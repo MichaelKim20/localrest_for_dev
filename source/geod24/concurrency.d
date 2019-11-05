@@ -43,6 +43,50 @@ import core.thread;
 import std.range.primitives;
 import std.range.interfaces : InputRange;
 import std.traits;
+
+
+@system unittest
+{
+    import std.exception : assertThrown;
+
+    static void fun()
+    {
+        string res = receiveOnly!string();
+        assert(res == "Main calling");
+        ownerTid.send("Child responding");
+    }
+
+    assertThrown!TidMissingException(ownerTid);
+    auto child = spawn(&fun);
+
+
+    child.send("Main calling");
+    string res = receiveOnly!string();
+
+    writeln(res);
+    assert(res == "Child responding");
+}
+
+@system unittest
+{
+    import std.exception : assertThrown;
+
+    static void fun()
+    {
+        string res = receiveOnly!string();
+        assert(res == "Main calling");
+        ownerTid.send("Child responding");
+    }
+
+    assertThrown!TidMissingException(ownerTid);
+    auto child = spawn(&fun);
+    child.send("Main calling");
+    string res = receiveOnly!string();
+
+    writeln(res);
+    assert(res == "Child responding");
+}
+
 /*
 ///
 @system unittest
@@ -396,7 +440,7 @@ public:
     enforce!TidMissingException(thisInfo.owner.mbox !is null, "Error: Thread has no owner thread.");
     return thisInfo.owner;
 }
-
+/*
 @system unittest
 {
     import std.exception : assertThrown;
@@ -416,7 +460,7 @@ public:
     writeln(res);
     assert(res == "Child responding");
 }
-
+*/
 // Thread Creation
 
 private template isSpawnable(F, T...)
@@ -689,7 +733,7 @@ do
 
     thisInfo.ident.mbox.get( ops );
 }
-
+/*
 ///
 @system unittest
 {
@@ -724,6 +768,7 @@ do
         assert(receiveOnly!int == 3);
     }
 }
+*/
 /*
 @safe unittest
 {
@@ -743,7 +788,6 @@ do
                            receive( (int x) {}, (int x) {} );
                        } ) );
 }
-*/
 // Make sure receive() works with free functions as well.
 version (unittest)
 {
@@ -757,6 +801,7 @@ version (unittest)
                           receive( &receiveFunction, (Variant x) {} );
                       } ) );
 }
+*/
 
 
 private template receiveOnlyRet(T...)
@@ -814,7 +859,7 @@ do
     else
         return ret;
 }
-
+/*
 ///
 @system unittest
 {
@@ -871,7 +916,7 @@ do
     string result = receiveOnly!string();
     assert(result == "Unexpected message type: expected 'string', got 'int'");
 }
-
+*/
 /**
  * Tries to receive but will give up if no matches arrive within duration.
  * Won't wait at all if provided $(REF Duration, core,time) is negative.
@@ -893,7 +938,7 @@ do
 
     return thisInfo.ident.mbox.get(duration, ops);
 }
-
+/*
 @safe unittest
 {
     static assert(__traits(compiles, {
@@ -913,7 +958,7 @@ do
         receiveTimeout(msecs(10), (int x) {}, (Variant x) {});
     }));
 }
-
+*/
 // MessageBox Limits
 
 /**
@@ -1495,7 +1540,7 @@ private:
     Fiber[] m_fibers;
     size_t m_pos;
 }
-
+/*
 @system unittest
 {
     static void receive(Condition cond, ref size_t received)
@@ -1538,7 +1583,7 @@ private:
     waiter.call();
     assert(received == 1);
 }
-
+*/
 /**
  * Sets the Scheduler behavior within the program.
  *
@@ -1758,7 +1803,7 @@ class Generator(T) :
 private:
     T* m_value;
 }
-
+/*
 ///
 @system unittest
 {
@@ -1780,7 +1825,7 @@ private:
 
     assert(receiveOnly!int == 18);
 }
-
+*/
 /**
  * Yields a value of type T to the caller of the currently executing
  * generator.
@@ -1804,7 +1849,7 @@ void yield(T)(T value)
 {
     yield(value);
 }
-
+/*
 @system unittest
 {
     import core.exception;
@@ -1853,6 +1898,7 @@ void yield(T)(T value)
     testScheduler(new ThreadScheduler);
     testScheduler(new FiberScheduler);
 }
+
 ///
 @system unittest
 {
@@ -1886,7 +1932,7 @@ void yield(T)(T value)
     assert(myIota.empty);
     assert(counter == [7, 21]);
 }
-
+*/
 private
 {
     /*
@@ -1900,6 +1946,13 @@ private
     {
         this() @trusted nothrow /* TODO: make @safe after relevant druntime PR gets merged */
         {
+            () @trusted nothrow {
+                try
+                {
+                    writeln("crate MessageBox");
+                } catch (Exception)
+                {}
+            }();
             m_channel = new WaitableChannel!Message(1024);
         }
 
@@ -1944,6 +1997,8 @@ private
         {
             // TODO: Generate an error here if m_closed is true, or maybe
             //       put a message in the caller's queue?
+
+            writeln("Message.put :");
             m_channel.send(msg);
         }
 
@@ -1985,7 +2040,7 @@ private
 
             bool onStandardMsg(ref Message msg)
             {
-                writeln("onStandardMsg");
+                //writeln("onStandardMsg");
                 foreach (i, t; Ops)
                 {
                     alias Args = Parameters!(t);
@@ -2009,6 +2064,8 @@ private
 
             bool onLinkDeadMsg(ref Message msg)
             {
+                return true;
+                /*
                 writeln("onLinkDeadMsg");
                 assert(msg.convertsTo!(Tid),
                         "Message could be converted to Tid");
@@ -2038,11 +2095,12 @@ private
                     throw e;
                 }
                 return false;
+                */
             }
 
             bool onControlMsg(ref Message msg)
             {
-                writeln("onControlMsg");
+                //writeln("onControlMsg");
                 switch (msg.type)
                 {
                     case MsgType.linkDead:
@@ -2054,14 +2112,11 @@ private
 
             bool scan(ref Message msg)
             {
-                writeln("scan");
+                //writeln("scan");
                 if (isControlMsg(msg))
                 {
                     if (onControlMsg(msg))
-                    {
-                        //isLinkDeadMsg(msg);
                         return true;
-                    }
                 }
                 else
                 {
@@ -2078,21 +2133,11 @@ private
             }
 
             Message msg;
-            if (!m_channel.receive(&msg))
+            if (m_channel.receive(&msg))
             {
-                return false;
+                return scan(msg);
             }
-
-            writeln("receive");
-        
-            if (scan(msg))
-            {
-                return true;
-            }
-            else
-            {
-                return false;
-            }
+            return false;
         }
 
         /*
@@ -2329,7 +2374,7 @@ private
         size_t m_count;
     }
 }
-
+/*
 @system unittest
 {
     import std.typecons : tuple, Tuple;
@@ -2375,7 +2420,7 @@ private
     simpleTest();
     scheduler = null;
 }
-
+*/
 private @property shared(Mutex) initOnceLock()
 {
     static shared Mutex lock;
@@ -2407,7 +2452,7 @@ auto ref initOnce(alias var)(lazy typeof(var) init)
 {
     return initOnce!var(init, initOnceLock);
 }
-
+/*
 /// A typical use-case is to perform lazy but thread-safe initialization.
 @system unittest
 {
@@ -2445,7 +2490,7 @@ auto ref initOnce(alias var)(lazy typeof(var) init)
         assert(receiveOnly!size_t == MySingleton.instance.val);
     assert(MySingleton.cnt == 1);
 }
-
+*/
 /**
  * Same as above, but takes a separate mutex instead of sharing one among
  * all initOnce instances.
@@ -2489,7 +2534,7 @@ auto ref initOnce(alias var)(lazy typeof(var) init, Mutex mutex)
 {
     return initOnce!var(init, cast(shared) mutex);
 }
-
+/*
 /// Use a separate mutex when init blocks on another thread that might also call initOnce.
 @system unittest
 {
@@ -2535,3 +2580,4 @@ auto ref initOnce(alias var)(lazy typeof(var) init, Mutex mutex)
     receiveOnly!(bool);
     assert(x[0] == 5);
 }
+*/
