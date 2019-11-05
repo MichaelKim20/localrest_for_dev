@@ -1,0 +1,10 @@
+{
+	"name": "base32",
+	"description": "RFC 4648 base32 encoding / decoding.",
+	"copyright": "Copyright (C) 2015, Kazuya Takahashi",
+	"license": "BSL-1.0",
+	"authors": ["Kazuya Takahashi"],
+	"dependencies": {
+	},
+	"targetType": "library",
+}

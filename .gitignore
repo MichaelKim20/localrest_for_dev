@@ -1,0 +1,15 @@
+.dub
+build/
+docs.json
+__dummy.html
+docs/
+source.so
+source.dylib
+source.dll
+source.a
+source.lib
+source-test-*
+*.exe
+*.o
+*.obj
+*.lst

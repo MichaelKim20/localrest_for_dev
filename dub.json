@@ -1,0 +1,22 @@
+{
+    "name": "sample03",
+    "description": "Node implementation for BOA CoinNet",
+
+    "license": "MIT",
+    "authors": [
+        ""
+    ],
+    "copyright": "Copyright © 2019, BOS Platform Foundation Korea",
+
+    "targetType": "executable",
+    "targetPath": "build",
+    "mainSourceFile": "source/app.d",
+    "dependencies": {
+        "base32":           { "path": "submodules/base32/", "version": "*" },
+        "bitblob":          { "path": "submodules/bitblob/", "version": "*" },
+        "dyaml":            { "path": "submodules/dyaml/", "version": "*" },
+        "libsodiumd":       { "path": "submodules/libsodiumd/", "version": "*" },
+        "localrest":        { "path": "submodules/localrest/", "version": "*" },
+        "vibe-d":           { "path": "submodules/vibe.d/", "version": "*" }
+    }
+}

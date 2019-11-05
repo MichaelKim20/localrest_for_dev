@@ -1,0 +1,8 @@
+﻿{
+	"name": "task-control-example",
+	"description": "Task manipulation example.",
+	"dependencies": {
+		"vibe-d:http": {"path": "../../"}
+	},
+	"versions": ["VibeDefaultMain"]
+}

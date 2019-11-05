@@ -1,0 +1,60 @@
+language: d
+sudo: false
+dist: trusty
+
+branches:
+  only:
+  - master
+
+addons:
+  apt:
+    packages:
+      - pkg-config
+      - zlib1g-dev
+      - libevent-dev
+      - libssl-dev
+
+d:
+  # order: latest DMD, oldest DMD, LDC/GDC, remaining DMD versions
+  # this way the overall test time gets cut down (GDC/LDC are a lot
+  # slower tham DMD, so they should be started early), while still
+  # catching most DMD version related build failures early
+  - dmd-2.079.0
+  - dmd-2.072.2
+  - ldc-1.8.0
+  - ldc-1.7.0
+  - ldc-1.6.0
+  - ldc-1.5.0
+  - ldc-1.4.0
+  - ldc-1.3.0
+  - ldc-1.2.0
+  - dmd-2.078.3
+  - dmd-2.077.1
+  - dmd-2.076.1
+  - dmd-2.075.1
+  - dmd-2.074.1
+  - dmd-2.073.2
+  - dmd-2.072.2
+
+#before_install:
+  #- pyenv global system 3.6
+  #- pip3 install meson>=0.40
+
+#install:
+  #- mkdir .ntmp
+  #- curl -L https://github.com/ninja-build/ninja/releases/download/v1.7.2/ninja-linux.zip -o .ntmp/ninja-linux.zip
+  #- unzip .ntmp/ninja-linux.zip -d .ntmp
+
+#before_script:
+  #- export PATH=$PATH:$PWD/.ntmp
+
+script:
+  - dub build -b release
+  - dub test
+  - dub build --root examples/htmlgenerator
+  - dub build --root examples/htmlserver
+  # test building with Meson
+  - mkdir build && cd build
+  #- meson ..
+  #- ninja -j4
+  #- DESTDIR=/tmp/diet_inst_target ninja install

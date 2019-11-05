@@ -1,0 +1,9 @@
+{
+	"name": "bitblob",
+	"authors": [
+		"Mathias 'Geod24' Lang"
+	],
+	"description": "A small library to represent hash types as value types",
+	"copyright": "Copyright © 2018, Mathias 'Geod24' Lang",
+	"license": "MIT"
+}

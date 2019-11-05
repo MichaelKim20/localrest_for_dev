@@ -1,0 +1,6 @@
+name "utils"
+description "Low level utility functionality"
+targetType "library"
+sourcePaths "."
+importPaths "."
+dependency "stdx-allocator" version="~>2.77.0"
