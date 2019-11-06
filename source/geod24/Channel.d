@@ -41,10 +41,64 @@ public interface Channel (T)
 
 *******************************************************************************/
 
+public class BlockingChannel (T) : Channel!T
+{
+    /// blocking queue
+    private BlockingQueue!(T) queue;
+
+    /// Ctor
+    public this ()
+    {
+        this.queue = new BlockingQueue!T;
+    }
+
+    /***************************************************************************
+
+        Send data `elem`.
+
+        Params:
+            elem = value to send
+
+        Return:
+            true if the sending is successful, otherwise false
+
+    ***************************************************************************/
+
+    public bool send (T elem)
+    {
+        this.queue.enqueue(elem);
+        return true;
+    }
+
+    /***************************************************************************
+
+        Write the data received in `elem`
+
+        Params:
+            elem = value to receive
+
+        Return:
+            true if the receiving is successful, otherwise false
+
+    ***************************************************************************/
+
+    public bool receive (T* elem)
+    {
+        *elem = this.queue.dequeue();
+        return true;
+    }
+}
+
+/*******************************************************************************
+
+    This channel use `NonBlockingQueue`. This is not uses `Lock`
+
+*******************************************************************************/
+
 public class NonBlockingChannel (T) : Channel!T
 {
     /// Non blocking queue
-    private NonBlockingQueue!T queue;
+    private NonBlockingQueue!(T) queue;
 
     /// Ctor
     public this ()
@@ -339,6 +393,63 @@ public class WaitableChannel (T) : Channel!T
         }
 
         return true;
+    }
+
+
+    /***************************************************************************
+
+        Write the data received in `elem`
+
+        Params:
+            elem = value to receive
+
+        Return:
+            true if the receiving is successful, otherwise false
+
+    ***************************************************************************/
+
+    public bool receive2 (T* elem)
+    {
+        this.mutex.lock();
+
+        if (this.closed)
+        {
+            (*elem) = T.init;
+            this.mutex.unlock();
+
+            return false;
+        }
+
+        if (this.sendq[].walkLength > 0)
+        {
+            SudoFiber!T sf = this.sendq.front;
+            this.sendq.removeFront();
+
+            this.mutex.unlock();
+
+            *(elem) = sf.elem;
+
+            if (sf.fiber !is null)
+                sf.fiber.call();
+            else if (sf.swdg !is null)
+                sf.swdg();
+
+            return true;
+        }
+
+        if (this.queue[].walkLength > 0)
+        {
+            *(elem) = this.queue.front;
+            this.queue.removeFront();
+
+            this.mutex.unlock();
+
+            return true;
+        }
+        else
+        {
+            return false;
+        }
     }
 
     /***************************************************************************

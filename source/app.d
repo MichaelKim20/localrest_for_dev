@@ -18,11 +18,11 @@ import core.stdc.stdlib : exit;
 //import agora.common.LocalRest;
 import std.stdio;
 import vibe.data.json;
-
+/*
 void main()
 {
 }
-/*
+*/
 void main()
 {
     static interface API
@@ -53,7 +53,7 @@ void main()
     
     import std.stdio;
 }
-*/
+
 /*
 import std.stdio;
 import std.digest;
