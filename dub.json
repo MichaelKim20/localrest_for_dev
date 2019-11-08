@@ -1,5 +1,5 @@
 {
-    "name": "sample08",
+    "name": "sample",
     "description": "Node implementation for BOA CoinNet",
 
     "license": "MIT",
@@ -9,7 +9,7 @@
     "copyright": "Copyright © 2019, BOS Platform Foundation Korea",
 
     "targetType": "executable",
-    "targetPath": "build",
+    "targetPath": "",
     "mainSourceFile": "source/app.d",
     "dependencies": {
         "vibe-d":           { "path": "submodules/vibe.d/", "version": "*" }

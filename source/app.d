@@ -4,7 +4,7 @@
 	dependency "vibe-core" path="../"
 +/
 module test;
-
+/*
 import vibe.core.core;
 import vibe.core.log;
 import vibe.http.router;
@@ -14,13 +14,66 @@ import vibe.web.rest;
 import core.atomic;
 import core.time;
 import core.stdc.stdlib : exit;
+*/
 
-//import agora.common.LocalRest;
-import std.stdio;
 import vibe.data.json;
+import geod24.LocalRest;
+import std.stdio;
+import geod24.concurrency;
 /*
 void main()
 {
+    import core.exception;
+    import std.exception;
+
+    static void testScheduler(Scheduler s)
+    {
+        scheduler = s;
+        scheduler.start({
+            auto tid = spawn({
+                int i;
+
+                try
+                {
+                    for (i = 1; i < 10; i++)
+                    {
+                        assertNotThrown!AssertError(assert(receiveOnly!int() == i));
+                    }
+                }
+                catch (OwnerTerminated e)
+                {
+                        writefln("OwnerTerminated");
+                }
+
+                // i will advance 1 past the last value expected
+                assert(i == 10);
+            });
+
+            auto r = new Generator!int({
+                assertThrown!Exception(yield(2.0));
+                yield(); // ensure this is a no-op
+                yield(1);
+                yield(); // also once something has been yielded
+                yield(2);
+                yield(3);
+                yield(4);
+                yield(5);
+                yield(6);
+                yield(7);
+                yield(8);
+                yield(9);
+            });
+
+            foreach (e; r)
+            {
+                tid.send(e);
+            }
+        });
+        scheduler = null;
+    }
+
+    //testScheduler(new ThreadScheduler);
+    testScheduler(new FiberScheduler);
 }
 */
 void main()
@@ -46,12 +99,16 @@ void main()
         public override string recv (Json data)
         { assert(0); }
     }
-
-    scope test = new RemoteAPI!(API, MockAPI)();
-
-    auto value = test.pubkey();
     
     import std.stdio;
+
+    writeln("start");
+    scope test = RemoteAPI!API.spawn!MockAPI();
+    writeln("pubkey");
+    ulong v;
+    test.getValue(v);
+    writeln("end");
+    test.ctrl.shutdown();
 }
 
 /*

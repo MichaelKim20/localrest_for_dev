@@ -34,6 +34,7 @@ module geod24.concurrency;
 import geod24.Channel;
 
 public import std.variant;
+public import std.stdio;
 
 import core.atomic;
 import core.sync.condition;
@@ -43,48 +44,6 @@ import std.range.primitives;
 import std.range.interfaces : InputRange;
 import std.traits;
 
-/*
-@system unittest
-{
-    import std.exception : assertThrown;
-
-    static void fun()
-    {
-        string res = receiveOnly!string();
-        assert(res == "Main calling");
-        ownerTid.send("Child responding");
-    }
-
-    assertThrown!TidMissingException(ownerTid);
-    auto child = spawn(&fun);
-
-
-    child.send("Main calling");
-    string res = receiveOnly!string();
-
-    assert(res == "Child responding");
-}
-
-@system unittest
-{
-    import std.exception : assertThrown;
-
-    static void fun()
-    {
-        string res = receiveOnly!string();
-        assert(res == "Main calling");
-        ownerTid.send("Child responding");
-    }
-
-    assertThrown!TidMissingException(ownerTid);
-    auto child = spawn(&fun);
-    child.send("Main calling");
-    string res = receiveOnly!string();
-
-    assert(res == "Child responding");
-}
-*/
-/*
 ///
 @system unittest
 {
@@ -113,7 +72,7 @@ import std.traits;
     assert(wasSuccessful);
     assert(received == "Received the number 42");
 }
-*/
+
 private
 {
     bool hasLocalAliasing(Types...)()
@@ -131,13 +90,13 @@ private
         }
         return doesIt;
     }
-/*
+
     @safe unittest
     {
         static struct Container { Tid t; }
         static assert(!hasLocalAliasing!(Tid, Container, int));
     }
-*/
+
     enum MsgType
     {
         standard,
@@ -379,7 +338,7 @@ public:
     }
 
 }
-/*
+
 @system unittest
 {
     // text!Tid is @system
@@ -391,7 +350,7 @@ public:
     auto tid3 = tid2;
     assert(text(tid2) == text(tid3));
 }
-*/
+
 /**
  * Returns: The $(LREF Tid) of the caller's thread.
  */
@@ -422,7 +381,7 @@ public:
     enforce!TidMissingException(thisInfo.owner.mbox !is null, "Error: Thread has no owner thread.");
     return thisInfo.owner;
 }
-/*
+
 @system unittest
 {
     import std.exception : assertThrown;
@@ -440,7 +399,7 @@ public:
     string res = receiveOnly!string();
     assert(res == "Child responding");
 }
-*/
+
 // Thread Creation
 
 private template isSpawnable(F, T...)
@@ -493,7 +452,7 @@ if (isSpawnable!(F, T))
     static assert(!hasLocalAliasing!(T), "Aliases to mutable thread-local data not allowed.");
     return _spawn(false, fn, args);
 }
-/*
+
 ///
 @system unittest
 {
@@ -542,7 +501,7 @@ if (isSpawnable!(F, T))
     thread_joinAll;
     assert(receivedMessage == "Hello World");
 }
-*/
+
 /**
  * Starts fn(args) in a logical thread and will receive a LinkTerminated
  * message when the operation terminates.
@@ -597,7 +556,7 @@ if (isSpawnable!(F, T))
     thisInfo.links[spawnTid] = linked;
     return spawnTid;
 }
-/*
+
 @system unittest
 {
     void function() fn1;
@@ -643,7 +602,7 @@ if (isSpawnable!(F, T))
     static assert( __traits(compiles, spawn(callable10, 10)));
     static assert( __traits(compiles, spawn(callable11, 11)));
 }
-*/
+
 /**
  * Places the values as a message at the back of tid's message queue.
  *
@@ -713,7 +672,7 @@ do
 
     thisInfo.ident.mbox.get( ops );
 }
-/*
+
 ///
 @system unittest
 {
@@ -779,7 +738,7 @@ version (unittest)
                           receive( &receiveFunction, (Variant x) {} );
                       } ) );
 }
-*/
+
 
 private template receiveOnlyRet(T...)
 {
@@ -836,7 +795,7 @@ do
     else
         return ret;
 }
-/*
+
 ///
 @system unittest
 {
@@ -893,7 +852,7 @@ do
     string result = receiveOnly!string();
     assert(result == "Unexpected message type: expected 'string', got 'int'");
 }
-*/
+
 /**
  * Tries to receive but will give up if no matches arrive within duration.
  * Won't wait at all if provided $(REF Duration, core,time) is negative.
@@ -915,7 +874,7 @@ do
 
     return thisInfo.ident.mbox.get(duration, ops);
 }
-/*
+
 @safe unittest
 {
     static assert(__traits(compiles, {
@@ -935,7 +894,7 @@ do
         receiveTimeout(msecs(10), (int x) {}, (Variant x) {});
     }));
 }
-*/
+
 // MessageBox Limits
 
 /**
@@ -964,51 +923,6 @@ private
     {
         return false;
     }
-}
-
-/**
- * Sets a maximum mailbox size.
- *
- * Sets a limit on the maximum number of user messages allowed in the mailbox.
- * If this limit is reached, the caller attempting to add a new message will
- * execute the behavior specified by doThis.  If messages is zero, the mailbox
- * is unbounded.
- *
- * Params:
- *  tid      = The Tid of the thread for which this limit should be set.
- *  messages = The maximum number of messages or zero if no limit.
- *  doThis   = The behavior executed when a message is sent to a full
- *             mailbox.
- */
-void setMaxMailboxSize(Tid tid, size_t messages, OnCrowding doThis) @safe pure
-{
-    final switch (doThis)
-    {
-    case OnCrowding.block:
-        return tid.mbox.setMaxMsgs(messages, &onCrowdingBlock);
-    case OnCrowding.throwException:
-        return tid.mbox.setMaxMsgs(messages, &onCrowdingThrow);
-    case OnCrowding.ignore:
-        return tid.mbox.setMaxMsgs(messages, &onCrowdingIgnore);
-    }
-}
-
-/**
- * Sets a maximum mailbox size.
- *
- * Sets a limit on the maximum number of user messages allowed in the mailbox.
- * If this limit is reached, the caller attempting to add a new message will
- * execute onCrowdingDoThis.  If messages is zero, the mailbox is unbounded.
- *
- * Params:
- *  tid      = The Tid of the thread for which this limit should be set.
- *  messages = The maximum number of messages or zero if no limit.
- *  onCrowdingDoThis = The routine called when a message is sent to a full
- *                     mailbox.
- */
-void setMaxMailboxSize(Tid tid, size_t messages, bool function(Tid) onCrowdingDoThis)
-{
-    tid.mbox.setMaxMsgs(messages, onCrowdingDoThis);
 }
 
 private
@@ -1344,7 +1258,6 @@ class FiberScheduler : Scheduler
     void spawn(void delegate() op) nothrow
     {
         create(op);
-        yield();
     }
 
     /**
@@ -1491,7 +1404,7 @@ private:
     Fiber[] m_fibers;
     size_t m_pos;
 }
-/*
+
 @system unittest
 {
     static void receive(Condition cond, ref size_t received)
@@ -1534,7 +1447,7 @@ private:
     waiter.call();
     assert(received == 1);
 }
-*/
+
 /**
  * Sets the Scheduler behavior within the program.
  *
@@ -1754,7 +1667,7 @@ class Generator(T) :
 private:
     T* m_value;
 }
-/*
+
 ///
 @system unittest
 {
@@ -1776,7 +1689,6 @@ private:
 
     assert(receiveOnly!int == 18);
 }
-*/
 
 /**
  * Yields a value of type T to the caller of the currently executing
@@ -1848,7 +1760,7 @@ void yield(T)(T value)
     }
 
     testScheduler(new ThreadScheduler);
-    //testScheduler(new FiberScheduler);
+    testScheduler(new FiberScheduler);
 }
 
 ///
@@ -1898,33 +1810,13 @@ private
     {
         this() @trusted nothrow /* TODO: make @safe after relevant druntime PR gets merged */
         {
-            m_channel = new WaitableChannel!Message(1024);
+            m_channel = new Channel!Message(1024);
         }
 
         ///
         final @property bool isClosed() @safe @nogc pure
         {
             return m_channel.isClosed;
-        }
-
-        /*
-         * Sets a limit on the maximum number of user messages allowed in the
-         * mailbox.  If this limit is reached, the caller attempting to add
-         * a new message will execute call.  If num is zero, there is no limit
-         * on the message queue.
-         *
-         * Params:
-         *  num  = The maximum size of the queue or zero if the queue is
-         *         unbounded.
-         *  call = The routine to call when the queue is full.
-         */
-        final void setMaxMsgs(size_t num, bool function(Tid) call) @safe @nogc pure
-        {
-            //synchronized (m_lock)
-            //{
-                m_maxMsgs = num;
-                m_onMaxMsgs = call;
-            //}
         }
 
         /*
@@ -2047,26 +1939,6 @@ private
                 }
             }
 
-            bool scan(ref Message msg)
-            {
-                if (isControlMsg(msg))
-                {
-                    if (onControlMsg(msg))
-                    {
-                        if (!isLinkDeadMsg(msg))
-                            return true;
-                        else
-                            return false;
-                    }
-                }
-                else
-                {
-                    if (onStandardMsg(msg))
-                        return true;
-                }
-                return false;
-            }
-
             static if (timedWait)
             {
                 import core.time : MonoTime;
@@ -2149,59 +2021,8 @@ private
             return msg.type == MsgType.linkDead;
         }
 
-        alias OnMaxFn = bool function(Tid);
-
-        OnMaxFn m_onMaxMsgs;
-        size_t m_maxMsgs;
-
-        WaitableChannel!Message m_channel;
+        Channel!Message m_channel;
     }
-}
-
-@system unittest
-{
-    import std.typecons : tuple, Tuple;
-
-    static void testfn(Tid tid)
-    {
-        receive((float val) { assert(0); }, (int val, int val2) {
-            assert(val == 42 && val2 == 86);
-        });
-        receive((Tuple!(int, int) val) { assert(val[0] == 42 && val[1] == 86); });
-        receive((Variant val) {  });
-        receive((string val) {
-            if ("the quick brown fox" != val)
-                return false;
-            return true;
-        }, (string val) { assert(false); });
-        prioritySend(tid, "done");
-    }
-
-    static void runTest(Tid tid)
-    {
-        send(tid, 42, 86);
-        send(tid, tuple(42, 86));
-        send(tid, "hello", "there");
-        send(tid, "the quick brown fox");
-        receive((string val) { assert(val == "done"); });
-    }
-
-    static void simpleTest()
-    {
-        auto tid = spawn(&testfn, thisTid);
-        runTest(tid);
-
-        // Run the test again with a limited mailbox size.
-        tid = spawn(&testfn, thisTid);
-        setMaxMailboxSize(tid, 2, OnCrowding.block);
-        runTest(tid);
-    }
-
-    simpleTest();
-
-    scheduler = new ThreadScheduler;
-    simpleTest();
-    scheduler = null;
 }
 
 private @property shared(Mutex) initOnceLock()
