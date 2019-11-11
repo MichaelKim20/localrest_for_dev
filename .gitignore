@@ -13,3 +13,5 @@ source-test-*
 *.o
 *.obj
 *.lst
+sample-test-application
+sample
