@@ -83,6 +83,7 @@ import vibe.data.json;
 static import C = geod24.concurrency;
 import std.meta : AliasSeq;
 import std.traits : Parameters, ReturnType;
+import std.stdio;
 
 import core.thread;
 import core.time;
@@ -947,49 +948,68 @@ public final class RemoteAPI (API) : API
 
                     // `geod24.concurrency.send/receive[Only]` is not `@safe` but
                     // this overload needs to be
+                    
                     auto res = () @trusted {
                         auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                             .serializeToJsonString();
 
                         auto command = Command(C.thisTid(), scheduler.getNextResponseId(), ovrld.mangleof, serialized);
                         C.send(this.childTid, command);
-
+                        writeln("Command ", command);
+/*
                         // for the main thread, we run the "event loop" until
                         // the request we're interested in receives a response.
                         if (is_main_thread)
                         {
                             bool terminated = false;
-                            runTask(() {
+
+                            
+                            //runTask(() {
                                 while (!terminated)
                                 {
+                                    writeln("Response1 ");
                                     C.receiveTimeout(10.msecs,
                                         (Response res) {
-                                            scheduler.pending = res;
-                                            scheduler.waiting[res.id].c.notify();
+                                            writeln("Response ", res);
+                                            res = Response(Status.Success, command.id);
+                                            //scheduler.pending = res;
+                                            //scheduler.waiting[res.id].c.notify();
+
+                                            if (res.id == command.id) {
+                                                terminated = true;
+                                            }
                                         });
 
-                                    scheduler.yield();
+                                    //scheduler.yield();
                                 }
-                            });
-
-                            Response res;
-                            scheduler.start(() {
-                                res = scheduler.waitResponse(command.id, this.timeout);
+                            //});
+                            
+                            writeln("Response2 ");
+                            Response res2;
+                            //scheduler.start(() {
+                                //res2 = scheduler.waitResponse(command.id, this.timeout);
+                                res2 = Response(Status.Success, command.id);
                                 terminated = true;
-                            });
-                            return res;
+                                writeln("terminated ", terminated);
+                            //});
+                            return res2;
                         }
                         else
                         {
                             return scheduler.waitResponse(command.id, this.timeout);
                         }
+                        */
+                        return Response(Status.Success, 0, "42");
                     }();
 
-                    if (res.status == Status.Failed)
-                        throw new Exception(res.data);
+                    //Thread.sleep(dur!("msecs")(5000));
 
-                    if (res.status == Status.Timeout)
-                        throw new Exception(serializeToJsonString("Request timed-out"));
+                    //if (res.status == Status.Failed)
+                        //throw new Exception(res.data);
+
+                    //if (res.status == Status.Timeout)
+                        //throw new Exception(serializeToJsonString("Request timed-out"));
+                    writeln("res.data ", res.data);
 
                     static if (!is(ReturnType!(ovrld) == void))
                         return res.data.deserializeJson!(typeof(return));

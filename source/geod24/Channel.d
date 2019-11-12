@@ -274,10 +274,10 @@ public class Channel (T)
 
             sf = this.recvq.front;
             this.recvq.removeFront();
-            if (sf.fiber !is null)
-                sf.fiber.call();
-            else if (sf.swdg !is null)
-                sf.swdg();
+            //if (sf.fiber !is null)
+            //    sf.fiber.call();
+            //else if (sf.swdg !is null)
+            //    sf.swdg();
         }
 
         while (true)
@@ -287,10 +287,10 @@ public class Channel (T)
 
             sf = this.sendq.front;
             this.sendq.removeFront();
-            if (sf.fiber !is null)
-                sf.fiber.call();
-            else if (sf.swdg !is null)
-                sf.swdg();
+            //if (sf.fiber !is null)
+            //    sf.fiber.call();
+            //else if (sf.swdg !is null)
+            //    sf.swdg();
         }
     }
 }

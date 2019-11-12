@@ -40,7 +40,7 @@ void main()
     scope test = RemoteAPI!API.spawn!MockAPI();
     writeln("pubkey");
     ulong v;
-    test.getValue(v);
+    v = test.pubkey();
     writeln("end");
     test.ctrl.shutdown();
 }

@@ -1810,7 +1810,7 @@ private
     {
         this() @trusted nothrow /* TODO: make @safe after relevant druntime PR gets merged */
         {
-            m_channel = new Channel!Message(1024);
+            m_channel = new Channel!Message();
         }
 
         ///
@@ -2000,6 +2000,8 @@ private
                 }
             }
 */
+            //import std.stdio;
+            //writeln("close");
             m_channel.close ();
         }
 
