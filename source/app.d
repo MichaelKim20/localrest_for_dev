@@ -85,9 +85,6 @@ void main()
         }
     });
 
-    Message msg;
-    msg = Message(MsgType.standard, Variant(Request(thisTid(), "pow", "2")));
-    auto res = child.request(msg);
-    writeln(res.data.type.toString());
-    writeln(res.data.peek!(Response).data);
+    auto res = child.query(Request(thisTid(), "pow", "2"));
+    writeln(res.data);
 }

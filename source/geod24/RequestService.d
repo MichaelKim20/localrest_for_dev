@@ -197,12 +197,20 @@ if (isSpawnable! (F, T))
     return spawnTid;
 }
 
+public Response query (Tid tid, Request data)
+{
+    auto req = Message(MsgType.standard, Variant(data));
+    auto res = request(tid, req);
+    return *res.data.peek!(Response);
+}
+
 ///
 public Message request (Tid tid, Message msg)
 {
     //msg.head.request_time = Clock.currTime();
     return tid.mbox.request(msg);
 }
+
 
 public alias ProcessDlg = scope Message delegate (Message msg);
 public void process (Tid tid, ProcessDlg dg)
