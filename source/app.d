@@ -70,7 +70,6 @@ void main()
                         if (req.method == "pow")
                         {
                             int value = to!int(req.args);
-                            writeln("pow");
                             res_msg = Message(
                                 MsgType.standard,
                                 Variant(Response(Status.Success, to!string(value * value)))
