@@ -193,18 +193,18 @@ if (isSpawnable! (F, T))
 
     auto t = new Thread(&exec);
     t.start();
-    
+
     return spawnTid;
 }
 
 ///
-public Message request (Tid tid, Message msg)
+public Message request (Tid tid, ref Message msg)
 {
     //msg.head.request_time = Clock.currTime();
     return tid.mbox.request(msg);
 }
 
-public alias ProcessDlg = scope Message delegate (Message msg);
+public alias ProcessDlg = scope Message delegate (ref Message msg);
 public void process (Tid tid, ProcessDlg dg)
 {
     tid.mbox.process(dg);
@@ -479,7 +479,7 @@ public struct Response
 {
     /// Final status of a request (failed, timeout, success, etc)
     Status status;
-    
+
     /// If `status == Status.Success`, the JSON-serialized return value.
     /// Otherwise, it contains `Exception.toString()`.
     string data;
@@ -541,7 +541,7 @@ public class MessageBox
 
     ***************************************************************************/
 
-    public Message request (Message req_msg)
+    public Message request (ref Message req_msg)
     {
         this.mutex.lock();
 

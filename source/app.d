@@ -33,7 +33,7 @@ void main()
         public override string recv (Json data)
         { assert(0); }
     }
-    
+
     import std.stdio;
 
     writeln("start");
@@ -60,7 +60,7 @@ void main()
         bool terminated = false;
         while (!terminated)
         {
-            thisTid.process((Message msg) {
+            thisTid.process((ref Message msg) {
                 Message res_msg;
                 if (msg.type == MsgType.standard)
                 {
@@ -72,7 +72,7 @@ void main()
                             int value = to!int(req.args);
                             writeln("pow");
                             res_msg = Message(
-                                MsgType.standard, 
+                                MsgType.standard,
                                 Variant(Response(Status.Success, to!string(value * value)))
                             );
                         }
