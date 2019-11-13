@@ -1,15 +1,15 @@
-/+ dub.sdl:
-	name "test"
-	description "Tests vibe.d's std.concurrency integration"
-	dependency "vibe-core" path="../"
-+/
 module test;
 
 import vibe.data.json;
 import geod24.LocalRest;
 import std.stdio;
-import geod24.concurrency;
+import geod24.RequestService;
+import core.sync.mutex;
+import core.thread;
+import std.datetime.systime;
+    import std.variant;
 
+/*
 void main()
 {
     static interface API
@@ -43,4 +43,51 @@ void main()
     v = test.pubkey();
     writeln("end");
     test.ctrl.shutdown();
+}
+*/
+
+void main()
+{
+    import std.stdio;
+    import std.conv;
+    import std.variant;
+
+    //writeln(Message2(MsgType.standard, "data").data.type);
+    //writeln(Message2(MsgType.standard, Command2("method", "args")).data.type);
+    //auto t = Clock.currTime();
+
+    auto child = spawn({
+        bool terminated = false;
+        while (!terminated)
+        {
+            thisTid.process((Message msg) {
+                Message res_msg;
+                if (msg.type == MsgType.standard)
+                {
+                    if (msg.data.type.toString() == "geod24.RequestService.Request")
+                    {
+                        auto req = msg.data.peek!(Request);
+                        if (req.method == "pow")
+                        {
+                            int value = to!int(req.args);
+                            writeln("pow");
+                            res_msg = Message(
+                                MsgType.standard, 
+                                Variant(Response(Status.Success, to!string(value * value)))
+                            );
+                        }
+                    }
+                }
+                return res_msg;
+            });
+            terminated = true;
+            Thread.sleep(dur!("msecs")(1));
+        }
+    });
+
+    Message msg;
+    msg = Message(MsgType.standard, Variant(Request(thisTid(), "pow", "2")));
+    auto res = child.request(msg);
+    writeln(res.data.type.toString());
+    writeln(res.data.peek!(Response).data);
 }

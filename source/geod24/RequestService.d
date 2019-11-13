@@ -1,20 +1,17 @@
 module geod24.RequestService;
 
-import geod24.Channel;
-
 import std.container;
 import std.datetime;
-import std.variant;
-import std.stdio;
-
-import core.atomic;
-import core.sync.condition;
-import core.sync.mutex;
-import core.thread;
 import std.range.primitives;
 import std.range.interfaces : InputRange;
-import std.traits;
 import std.stdio;
+import std.traits;
+import std.variant;
+
+import core.atomic;
+import core.sync.mutex;
+import core.thread;
+
 
 /**
  * Thrown when a Tid is missing, e.g. when `ownerTid` doesn't
@@ -27,6 +24,21 @@ class TidMissingException : Exception
     mixin basicExceptionCtors;
 }
 
+/**
+ * Thrown on calls to `receive` if the thread that spawned the receiving
+ * thread has terminated and no more messages exist.
+ */
+class OwnerTerminated : Exception
+{
+    ///
+    this(Tid t, string msg = "Owner terminated") @safe pure nothrow @nogc
+    {
+        super(msg);
+        tid = t;
+    }
+
+    Tid tid;
+}
 /**
  * An opaque type used to represent a logical thread.
  */
@@ -52,6 +64,13 @@ struct Tid
     }
 }
 
+static ~this()
+{
+    thisInfo.cleanup();
+    writeln("END");
+}
+
+/*
 @system unittest
 {
     // text!Tid is @system
@@ -63,7 +82,7 @@ struct Tid
     auto tid3 = tid2;
     assert(text(tid2) == text(tid3));
 }
-
+*/
 /**
  * Returns: The $(LREF Tid) of the caller's thread.
  */
@@ -179,12 +198,14 @@ if (isSpawnable! (F, T))
 }
 
 ///
-void request (Tid tid, Message* msg)
+public Message request (Tid tid, Message msg)
 {
-    tid.mbox.request(msg);
+    //msg.head.request_time = Clock.currTime();
+    return tid.mbox.request(msg);
 }
 
-void process (Tid tid, scope void delegate (Message* msg) dg)
+public alias ProcessDlg = scope Message delegate (Message msg);
+public void process (Tid tid, ProcessDlg dg)
 {
     tid.mbox.process(dg);
     // tid.mbox.check_timeout((Message* msg) => {return false;});
@@ -418,30 +439,26 @@ public @property ref ThreadInfo thisInfo () nothrow
     return ThreadInfo.thisInfo;
 }
 
-///
-public struct Head
-{
-    SysTime request_time;
-    Duration delay;
-    Duration timeout;
-}
-
 /// Data sent by the caller
 public struct Request
 {
     /// Tid of the sender thread (cannot be JSON serialized)
     Tid sender;
 
-    /// In order to support re-entrancy, every request contains an id
-    /// which should be copied in the `Response`
-    /// Initialized to `size_t.max` so not setting it crashes the program
-    size_t id = size_t.max;
-
     /// Method to call
     string method;
 
     /// Arguments to the method, JSON formatted
     string args;
+
+    ///
+    SysTime request_time;
+
+    ///
+    Duration delay;
+
+    ///
+    Duration timeout;
 }
 
 /// Status of a request
@@ -462,25 +479,35 @@ public struct Response
 {
     /// Final status of a request (failed, timeout, success, etc)
     Status status;
-
-    /// In order to support re-entrancy, every request contains an id
-    /// which should be copied in the `Response` so the scheduler can
-    /// properly dispatch this event
-    /// Initialized to `size_t.max` so not setting it crashes the program
-    size_t id;
     
     /// If `status == Status.Success`, the JSON-serialized return value.
     /// Otherwise, it contains `Exception.toString()`.
     string data;
 }
 
-public struct Message
+///
+public struct ServiceMessage
 {
-    Head     head;
     Request  req;
     Response res;
 }
 
+///
+public enum MsgType
+{
+    standard,
+    priority,
+    linkDead,
+}
+
+///
+public struct Message
+{
+    MsgType type;
+    Variant data;
+}
+
+///
 public class MessageBox
 {
     /// closed
@@ -514,27 +541,27 @@ public class MessageBox
 
     ***************************************************************************/
 
-    public bool request (Message* msg)
+    public Message request (Message req_msg)
     {
         this.mutex.lock();
 
         if (this.closed)
         {
             this.mutex.unlock();
-            return false;
+            return Message(MsgType.standard, Variant(Response(Status.Failed, "")));
         }
 
+        Message res_msg;
         Fiber fiber = Fiber.getThis();
         if (fiber !is null)
         {
             SudoFiber new_sf;
             new_sf.fiber = fiber;
-            new_sf.msg = msg;
+            new_sf.req_msg = &req_msg;
+            new_sf.res_msg = &res_msg;
 
             this.queue.insertBack(new_sf);
-
             this.mutex.unlock();
-
             Fiber.yield();
         }
         else
@@ -545,18 +572,17 @@ public class MessageBox
             }
             SudoFiber new_sf;
             new_sf.fiber = null;
-            new_sf.msg = msg;
+            new_sf.req_msg = &req_msg;
+            new_sf.res_msg = &res_msg;
             new_sf.swdg = &stopWait;
 
             this.queue.insertBack(new_sf);
-
             this.mutex.unlock();
-
             while (is_waiting)
                 Thread.sleep(dur!("msecs")(1));
         }
 
-        return true;
+        return res_msg;
     }
 
     /***************************************************************************
@@ -571,7 +597,7 @@ public class MessageBox
 
     ***************************************************************************/
 
-    public bool process (scope void delegate (Message* msg) dg)
+    public bool process (ProcessDlg dg)
     {
         this.mutex.lock();
 
@@ -590,7 +616,7 @@ public class MessageBox
 
             this.mutex.unlock();
 
-            dg(sf.msg);
+            (*sf.res_msg) = dg(*sf.req_msg);
 
             if (sf.fiber !is null)
                 sf.fiber.call();
@@ -601,7 +627,7 @@ public class MessageBox
         }
         return false;
     }
-    
+
     /***************************************************************************
 
         Check timeout
@@ -654,7 +680,7 @@ public class MessageBox
             sf = this.queue.front;
             this.queue.removeFront();
 
-            sf.msg.res.status = Status.Failed;
+            //sf.msg.res.status = Status.Failed;
 
             if (sf.fiber !is null)
                 sf.fiber.call();
@@ -671,16 +697,20 @@ private alias StopWaitDg = void delegate ();
 private struct SudoFiber
 {
     public Fiber fiber;
-    public Message* msg;
+    public Message* req_msg;
+    public Message* res_msg;
     public StopWaitDg swdg;
 }
 
+/*
 @system unittest
 {
     import std.stdio;
+    auto today = Clock.currTime();
+    writeln(today);
 
     Message msg;
-    msg.req = Request(thisTid(), 0, "", "");
+    msg.req = Request(thisTid(), "", "");
     auto child = spawn({
         bool terminated = false;
         while (!terminated)
@@ -688,16 +718,12 @@ private struct SudoFiber
             thisTid.process((Message* msg) {
                 msg.res.data = "12121";
                 writeln(msg.req.sender);
-
                 terminated = true;
             });
             Thread.sleep(dur!("msecs")(1));
         }
-        writeln("END");
-        Thread.yield();
     });
     child.request(&msg);
     writeln(msg.res.data);
-    thisInfo.cleanup();
-
 }
+*/

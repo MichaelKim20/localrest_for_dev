@@ -948,7 +948,7 @@ public final class RemoteAPI (API) : API
 
                     // `geod24.concurrency.send/receive[Only]` is not `@safe` but
                     // this overload needs to be
-                    
+
                     auto res = () @trusted {
                         auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                             .serializeToJsonString();
