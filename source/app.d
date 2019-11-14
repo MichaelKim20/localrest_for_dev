@@ -7,7 +7,7 @@ import geod24.RequestService;
 import core.sync.mutex;
 import core.thread;
 import std.datetime.systime;
-    import std.variant;
+import std.variant;
 
 /*
 void main()
@@ -50,41 +50,49 @@ void main()
 {
     import std.stdio;
     import std.conv;
-    import std.variant;
-
-    //writeln(Message2(MsgType.standard, "data").data.type);
-    //writeln(Message2(MsgType.standard, Command2("method", "args")).data.type);
-    //auto t = Clock.currTime();
 
     auto child = spawn({
         bool terminated = false;
         while (!terminated)
         {
-            thisTid.process((Message msg) {
+            thisTid.process((ref Message msg) {
                 Message res_msg;
-                if (msg.type == MsgType.standard)
+                if (msg.convertsTo!(Request))
                 {
-                    if (msg.data.type.toString() == "geod24.RequestService.Request")
+                    auto req = msg.data.peek!(Request);
+                    if (req.method == "pow")
                     {
-                        auto req = msg.data.peek!(Request);
-                        if (req.method == "pow")
-                        {
-                            int value = to!int(req.args);
-                            writeln("pow");
-                            res_msg = Message(
-                                MsgType.standard, 
-                                Variant(Response(Status.Success, to!string(value * value)))
-                            );
-                        }
+                        immutable int value = to!int(req.args);
+                        res_msg = Message(
+                            MsgType.standard, 
+                            Variant(Response(Status.Success, to!string(value * value)))
+                        );
+                    }
+                    else
+                    {
+                        res_msg = Message(
+                            MsgType.standard, 
+                            Variant(Response(Status.Failed, ""))
+                        );
                     }
                 }
+                else if (msg.convertsTo!(OwnerTerminated))
+                {
+                    terminated = true;
+                }
+                else if (msg.convertsTo!(Shutdown))
+                {
+                    terminated = true;
+                }
+                writeln(msg.data.type.toString());
                 return res_msg;
             });
-            terminated = true;
-            Thread.sleep(dur!("msecs")(1));
+            Thread.sleep(dur!("msecs")(10));
         }
     });
 
-    auto res = child.query(Request(thisTid(), "pow", "2"));
+    auto req = Request(thisTid(), "pow", "2");
+    auto res = child.query(req);
     writeln(res.data);
+    child.shutdown();
 }

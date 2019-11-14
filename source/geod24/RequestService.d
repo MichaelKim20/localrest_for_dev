@@ -12,18 +12,6 @@ import core.atomic;
 import core.sync.mutex;
 import core.thread;
 
-
-/**
- * Thrown when a Tid is missing, e.g. when `ownerTid` doesn't
- * find an owner thread.
- */
-class TidMissingException : Exception
-{
-    import std.exception : basicExceptionCtors;
-    ///
-    mixin basicExceptionCtors;
-}
-
 /**
  * Thrown on calls to `receive` if the thread that spawned the receiving
  * thread has terminated and no more messages exist.
@@ -39,6 +27,46 @@ class OwnerTerminated : Exception
 
     Tid tid;
 }
+
+/**
+ * Thrown if a linked thread has terminated.
+ */
+class LinkTerminated : Exception
+{
+    ///
+    this(Tid t, string msg = "Link terminated") @safe pure nothrow @nogc
+    {
+        super(msg);
+        tid = t;
+    }
+
+    Tid tid;
+}
+
+/**
+ * Thrown when a Tid is missing, e.g. when `ownerTid` doesn't
+ * find an owner thread.
+ */
+class TidMissingException : Exception
+{
+    import std.exception : basicExceptionCtors;
+    ///
+    mixin basicExceptionCtors;
+}
+
+/// Ask the node to shut down
+class Shutdown : Exception
+{
+    ///
+    this(Tid t, string msg = "Shot down") @safe pure nothrow @nogc
+    {
+        super(msg);
+        tid = t;
+    }
+
+    Tid tid;
+}
+
 /**
  * An opaque type used to represent a logical thread.
  */
@@ -67,10 +95,8 @@ struct Tid
 static ~this()
 {
     thisInfo.cleanup();
-    writeln("END");
 }
 
-/*
 @system unittest
 {
     // text!Tid is @system
@@ -82,7 +108,7 @@ static ~this()
     auto tid3 = tid2;
     assert(text(tid2) == text(tid3));
 }
-*/
+
 /**
  * Returns: The $(LREF Tid) of the caller's thread.
  */
@@ -194,25 +220,63 @@ if (isSpawnable! (F, T))
     auto t = new Thread(&exec);
     t.start();
     
+    thisInfo.links[spawnTid] = true;
+
     return spawnTid;
 }
 
-public Response query (Tid tid, Request data)
+///
+public void shutdown (Tid tid) @trusted
 {
-    auto req = Message(MsgType.standard, Variant(data));
+    _send(tid, new Shutdown(tid));
+}
+
+///
+public Response query (Tid tid, ref Request data)
+{
+    auto req = Message(MsgType.standard, data);
     auto res = request(tid, req);
     return *res.data.peek!(Response);
 }
 
 ///
-public Message request (Tid tid, Message msg)
+public Message request (Tid tid, ref Message msg)
 {
     //msg.head.request_time = Clock.currTime();
     return tid.mbox.request(msg);
 }
 
+/**
+ * Places the values as a message at the back of tid's message queue.
+ *
+ * Sends the supplied value to the thread represented by tid.  As with
+ * $(REF spawn, std,concurrency), `T` must not have unshared aliasing.
+ */
+void send (T...) (Tid tid, T vals)
+{
+    static assert(!hasLocalAliasing!(T), "Aliases to mutable thread-local data not allowed.");
+    _send(tid, vals);
+}
 
-public alias ProcessDlg = scope Message delegate (Message msg);
+/*
+ * ditto
+ */
+private void _send (T...) (Tid tid, T vals)
+{
+    _send(MsgType.standard, tid, vals);
+}
+
+/*
+ * Implementation of send.  This allows parameter checking to be different for
+ * both Tid.send() and .send().
+ */
+private void _send (T...) (MsgType type, Tid tid, T vals)
+{
+    auto msg = Message(type, vals);
+    tid.mbox.request(msg);
+}
+
+public alias ProcessDlg = scope Message delegate (ref Message msg);
 public void process (Tid tid, ProcessDlg dg)
 {
     tid.mbox.process(dg);
@@ -438,10 +502,17 @@ public struct ThreadInfo
     {
         if (ident.mbox !is null)
             ident.mbox.close();
+        foreach (tid; links.keys)
+            _send(MsgType.linkDead, tid, ident);
+        if (owner != Tid.init)
+            _send(MsgType.linkDead, owner, ident);
         unregisterMe(); // clean up registry entries
     }
 }
 
+/**
+ * 
+ */
 public @property ref ThreadInfo thisInfo () nothrow
 {
     return ThreadInfo.thisInfo;
@@ -504,7 +575,6 @@ public struct ServiceMessage
 public enum MsgType
 {
     standard,
-    priority,
     linkDead,
 }
 
@@ -513,6 +583,69 @@ public struct Message
 {
     MsgType type;
     Variant data;
+
+    this(T...)(MsgType t, T vals) if (T.length > 0)
+    {
+        static if (T.length == 1)
+        {
+            type = t;
+            data = vals[0];
+        }
+        else
+        {
+            import std.typecons : Tuple;
+
+            type = t;
+            data = Tuple!(T)(vals);
+        }
+    }
+
+    @property auto convertsTo(T...)()
+    {
+        static if (T.length == 1)
+        {
+            return is(T[0] == Variant) || data.convertsTo!(T);
+        }
+        else
+        {
+            import std.typecons : Tuple;
+            return data.convertsTo!(Tuple!(T));
+        }
+    }
+
+    @property auto get(T...)()
+    {
+        static if (T.length == 1)
+        {
+            static if (is(T[0] == Variant))
+                return data;
+            else
+                return data.get!(T);
+        }
+        else
+        {
+            import std.typecons : Tuple;
+            return data.get!(Tuple!(T));
+        }
+    }
+
+    auto map(Op)(Op op)
+    {
+        alias Args = Parameters!(Op);
+
+        static if (Args.length == 1)
+        {
+            static if (is(Args[0] == Variant))
+                return op(data);
+            else
+                return op(data.get!(Args));
+        }
+        else
+        {
+            import std.typecons : Tuple;
+            return op(data.get!(Tuple!(Args)).expand);
+        }
+    }
 }
 
 ///
@@ -549,7 +682,7 @@ public class MessageBox
 
     ***************************************************************************/
 
-    public Message request (Message req_msg)
+    public Message request (ref Message req_msg)
     {
         this.mutex.lock();
 
@@ -607,6 +740,61 @@ public class MessageBox
 
     public bool process (ProcessDlg dg)
     {
+        bool onStandardReq(Message* req_msg, Message* res_msg)
+        {
+            *res_msg = dg(*req_msg);
+            return true;
+        }
+
+        bool onStandardMsg(Message* msg)
+        {
+            dg(*msg);
+            return true;
+        }
+
+        bool onLinkDeadMsg(Message* msg)
+        {
+            assert(msg.convertsTo!(Tid));
+            auto tid = msg.get!(Tid);
+
+            if (bool* pDepends = tid in thisInfo.links)
+            {
+                auto depends = *pDepends;
+                thisInfo.links.remove(tid);
+                // Give the owner relationship precedence.
+                if (depends && tid != thisInfo.owner)
+                {
+                    auto e = new LinkTerminated(tid);
+                    auto m = Message(MsgType.standard, e);
+                    if (onStandardMsg(&m))
+                        return true;
+                    throw e;
+                }
+            }
+            
+            if (tid == thisInfo.owner)
+            {
+                thisInfo.owner = Tid.init;
+                auto e = new OwnerTerminated(tid);
+                auto m = Message(MsgType.standard, e);
+                if (onStandardMsg(&m))
+                    return true;
+                throw e;
+            }
+            return false;
+        }
+
+        bool onControlMsg(Message* msg)
+        {
+            switch (msg.type)
+            {
+                case MsgType.linkDead:
+                    return onLinkDeadMsg(msg);
+                default:
+                    return false;
+            }
+        }
+        
         this.mutex.lock();
 
         if (this.closed)
@@ -624,7 +812,20 @@ public class MessageBox
 
             this.mutex.unlock();
 
-            (*sf.res_msg) = dg(*sf.req_msg);
+            if (isControlMsg(sf.req_msg))
+            {
+                if (onControlMsg(sf.req_msg))
+                {
+
+                }
+            } 
+            else 
+            {
+                if (onStandardReq(sf.req_msg, sf.res_msg))
+                {
+
+                }
+            }
 
             if (sf.fiber !is null)
                 sf.fiber.call();
@@ -645,7 +846,6 @@ public class MessageBox
     public void check_timeout (scope bool delegate (Message* msg) dg)
     {
     }
-
 
     /***************************************************************************
 
@@ -672,6 +872,16 @@ public class MessageBox
 
     public void close ()
     {
+        static void onLinkDeadMsg(Message* msg)
+        {
+            assert(msg.convertsTo!(Tid));
+            auto tid = msg.get!(Tid);
+
+            thisInfo.links.remove(tid);
+            if (tid == thisInfo.owner)
+                thisInfo.owner = Tid.init;
+        }
+
         SudoFiber sf;
         bool res;
 
@@ -686,9 +896,11 @@ public class MessageBox
                 break;
 
             sf = this.queue.front;
-            this.queue.removeFront();
 
-            //sf.msg.res.status = Status.Failed;
+            if (sf.req_msg.type == MsgType.linkDead)
+                onLinkDeadMsg(sf.req_msg);
+
+            this.queue.removeFront();
 
             if (sf.fiber !is null)
                 sf.fiber.call();
@@ -697,6 +909,15 @@ public class MessageBox
         }
     }
 
+    private bool isControlMsg(Message* msg) @safe @nogc pure nothrow
+    {
+        return msg.type != MsgType.standard;
+    }
+
+    private bool isLinkDeadMsg(Message* msg) @safe @nogc pure nothrow
+    {
+        return msg.type == MsgType.linkDead;
+    }
 }
 
 private alias StopWaitDg = void delegate ();
@@ -710,28 +931,54 @@ private struct SudoFiber
     public StopWaitDg swdg;
 }
 
-/*
+
 @system unittest
 {
     import std.stdio;
-    auto today = Clock.currTime();
-    writeln(today);
+    import std.conv;
 
-    Message msg;
-    msg.req = Request(thisTid(), "", "");
     auto child = spawn({
         bool terminated = false;
         while (!terminated)
         {
-            thisTid.process((Message* msg) {
-                msg.res.data = "12121";
-                writeln(msg.req.sender);
-                terminated = true;
+            thisTid.process((ref Message msg) {
+                Message res_msg;
+                if (msg.type == MsgType.standard)
+                {
+                    if (msg.data.type.toString() == "geod24.RequestService.Request")
+                    {
+                        auto req = msg.data.peek!(Request);
+                        if (req.method == "pow")
+                        {
+                            int value = to!int(req.args);
+                            res_msg = Message(
+                                MsgType.standard, 
+                                Variant(Response(Status.Success, to!string(value * value)))
+                            );
+                        }
+                        else
+                        {
+                            res_msg = Message(
+                                MsgType.standard, 
+                                Variant(Response(Status.Failed, ""))
+                            );
+                        }
+                    }
+                    else if (msg.data.type.toString() == "geod24.RequestService.OwnerTerminated")
+                    {
+                        terminated = true;
+                    }
+                    writeln(msg.data.type.toString());
+                }
+                return res_msg;
             });
-            Thread.sleep(dur!("msecs")(1));
+            Thread.sleep(dur!("msecs")(10));
         }
     });
-    child.request(&msg);
-    writeln(msg.res.data);
+
+    auto req = Request(thisTid(), "pow", "2");
+    auto res = child.query(req);
+    writeln(res.data);
+    child.shutdown();
 }
-*/
+

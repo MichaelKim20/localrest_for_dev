@@ -497,9 +497,9 @@ if (isSpawnable!(F, T))
         receivedMessage = msg;
     }
 
-    auto tid1 = spawn(&f1, "Hello World");
-    thread_joinAll;
-    assert(receivedMessage == "Hello World");
+    //auto tid1 = spawn(&f1, "Hello World");
+    //thread_joinAll;
+    //assert(receivedMessage == "Hello World");
 }
 
 /**

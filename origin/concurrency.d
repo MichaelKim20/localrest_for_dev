@@ -736,7 +736,6 @@ version (unittest)
                       } ) );
 }
 
-
 private template receiveOnlyRet(T...)
 {
     static if ( T.length == 1 )
@@ -2212,8 +2211,8 @@ private
         }
 
     private:
+    
         // Routines involving local data only, no lock needed.
-
         bool mboxFull() @safe @nogc pure nothrow
         {
             return m_maxMsgs && m_maxMsgs <= m_localMsgs + m_sharedBox.length;
