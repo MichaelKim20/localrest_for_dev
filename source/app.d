@@ -33,7 +33,7 @@ void main()
         public override string recv (Json data)
         { assert(0); }
     }
-    
+
     import std.stdio;
 
     writeln("start");
@@ -57,6 +57,12 @@ void main()
         {
             thisTid.process((ref Message msg) {
                 Message res_msg;
+                if (msg.type == MsgType.exit)
+                {
+                    terminated = true;
+                    return res_msg;
+                }
+
                 if (msg.convertsTo!(Request))
                 {
                     auto req = msg.data.peek!(Request);
@@ -64,30 +70,15 @@ void main()
                     {
                         immutable int value = to!int(req.args);
                         res_msg = Message(
-                            MsgType.standard, 
+                            MsgType.standard,
                             Variant(Response(Status.Success, to!string(value * value)))
                         );
                     }
-                    else
-                    {
-                        res_msg = Message(
-                            MsgType.standard, 
-                            Variant(Response(Status.Failed, ""))
-                        );
-                    }
                 }
-                else if (msg.convertsTo!(OwnerTerminated))
-                {
-                    terminated = true;
-                }
-                else if (msg.convertsTo!(Shutdown))
-                {
-                    terminated = true;
-                }
-                writeln(msg.data.type.toString());
+
                 return res_msg;
             });
-            Thread.sleep(dur!("msecs")(10));
+            Thread.sleep(dur!("msecs")(1));
         }
     });
 

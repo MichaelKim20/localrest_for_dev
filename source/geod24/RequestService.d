@@ -4,7 +4,6 @@ import std.container;
 import std.datetime;
 import std.range.primitives;
 import std.range.interfaces : InputRange;
-import std.stdio;
 import std.traits;
 import std.variant;
 
@@ -219,7 +218,7 @@ if (isSpawnable! (F, T))
 
     auto t = new Thread(&exec);
     t.start();
-    
+
     thisInfo.links[spawnTid] = true;
 
     return spawnTid;
@@ -511,7 +510,7 @@ public struct ThreadInfo
 }
 
 /**
- * 
+ *
  */
 public @property ref ThreadInfo thisInfo () nothrow
 {
@@ -558,7 +557,7 @@ public struct Response
 {
     /// Final status of a request (failed, timeout, success, etc)
     Status status;
-    
+
     /// If `status == Status.Success`, the JSON-serialized return value.
     /// Otherwise, it contains `Exception.toString()`.
     string data;
@@ -576,6 +575,7 @@ public enum MsgType
 {
     standard,
     linkDead,
+    exit
 }
 
 ///
@@ -742,13 +742,26 @@ public class MessageBox
     {
         bool onStandardReq(Message* req_msg, Message* res_msg)
         {
-            *res_msg = dg(*req_msg);
+            if  (
+                    (req_msg.convertsTo!(OwnerTerminated)) ||
+                    (req_msg.convertsTo!(Shutdown))
+                )
+            {
+                Message exit_msg = Message(MsgType.exit, "");
+                dg(exit_msg);
+            }
+            else if (req_msg.convertsTo!(Request))
+            {
+                *res_msg = dg(*req_msg);
+            }
+
             return true;
         }
 
         bool onStandardMsg(Message* msg)
         {
             dg(*msg);
+
             return true;
         }
 
@@ -761,7 +774,7 @@ public class MessageBox
             {
                 auto depends = *pDepends;
                 thisInfo.links.remove(tid);
-                // Give the owner relationship precedence.
+
                 if (depends && tid != thisInfo.owner)
                 {
                     auto e = new LinkTerminated(tid);
@@ -771,7 +784,7 @@ public class MessageBox
                     throw e;
                 }
             }
-            
+
             if (tid == thisInfo.owner)
             {
                 thisInfo.owner = Tid.init;
@@ -781,6 +794,7 @@ public class MessageBox
                     return true;
                 throw e;
             }
+
             return false;
         }
 
@@ -794,13 +808,12 @@ public class MessageBox
                     return false;
             }
         }
-        
+
         this.mutex.lock();
+        scope (exit) this.mutex.unlock();
 
         if (this.closed)
         {
-            this.mutex.unlock();
-
             return false;
         }
 
@@ -810,22 +823,10 @@ public class MessageBox
 
             this.queue.removeFront();
 
-            this.mutex.unlock();
-
             if (isControlMsg(sf.req_msg))
-            {
-                if (onControlMsg(sf.req_msg))
-                {
-
-                }
-            } 
-            else 
-            {
-                if (onStandardReq(sf.req_msg, sf.res_msg))
-                {
-
-                }
-            }
+                onControlMsg(sf.req_msg);
+            else
+                onStandardReq(sf.req_msg, sf.res_msg);
 
             if (sf.fiber !is null)
                 sf.fiber.call();
@@ -834,6 +835,7 @@ public class MessageBox
 
             return true;
         }
+
         return false;
     }
 
@@ -945,30 +947,33 @@ private struct SudoFiber
                 Message res_msg;
                 if (msg.type == MsgType.standard)
                 {
-                    if (msg.data.type.toString() == "geod24.RequestService.Request")
+                    if (msg.convertsTo!(Request))
                     {
                         auto req = msg.data.peek!(Request);
                         if (req.method == "pow")
                         {
                             int value = to!int(req.args);
                             res_msg = Message(
-                                MsgType.standard, 
+                                MsgType.standard,
                                 Variant(Response(Status.Success, to!string(value * value)))
                             );
                         }
                         else
                         {
                             res_msg = Message(
-                                MsgType.standard, 
+                                MsgType.standard,
                                 Variant(Response(Status.Failed, ""))
                             );
                         }
                     }
-                    else if (msg.data.type.toString() == "geod24.RequestService.OwnerTerminated")
+                    else if (msg.convertsTo!(OwnerTerminated))
                     {
                         terminated = true;
                     }
-                    writeln(msg.data.type.toString());
+                    else if (msg.convertsTo!(Shutdown))
+                    {
+                        terminated = true;
+                    }
                 }
                 return res_msg;
             });
