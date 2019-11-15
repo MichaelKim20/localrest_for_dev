@@ -66,6 +66,26 @@ class Shutdown : Exception
     Tid tid;
 }
 
+/// Ask the node to exhibit a certain behavior for a given time
+private struct TimeCommand
+{
+    /// For how long our remote node apply this behavior
+    Duration dur;
+
+    /// Whether or not affected messages should be dropped
+    bool drop = false;
+}
+
+/// Filter out requests before they reach a node
+private struct FilterAPI
+{
+    /// the mangled symbol name of the function to filter
+    string func_mangleof;
+
+    /// used for debugging
+    string pretty_func;
+}
+
 /**
  * An opaque type used to represent a logical thread.
  */
@@ -233,6 +253,7 @@ public void shutdown (Tid tid) @trusted
 ///
 public Response query (Tid tid, ref Request data)
 {
+    data.request_time = Clock.currTime();
     auto req = Message(MsgType.standard, data);
     auto res = request(tid, req);
     return *res.data.peek!(Response);
@@ -241,7 +262,6 @@ public Response query (Tid tid, ref Request data)
 ///
 public Message request (Tid tid, ref Message msg)
 {
-    //msg.head.request_time = Clock.currTime();
     return tid.mbox.request(msg);
 }
 
@@ -279,7 +299,7 @@ public alias ProcessDlg = scope Message delegate (ref Message msg);
 public void process (Tid tid, ProcessDlg dg)
 {
     tid.mbox.process(dg);
-    // tid.mbox.check_timeout((Message* msg) => {return false;});
+    //tid.mbox.check_timeout((Message* msg) => {return false;});
 }
 
 private
@@ -564,18 +584,11 @@ public struct Response
 }
 
 ///
-public struct ServiceMessage
-{
-    Request  req;
-    Response res;
-}
-
-///
 public enum MsgType
 {
     standard,
     linkDead,
-    exit
+    shotdown
 }
 
 ///
@@ -747,8 +760,8 @@ public class MessageBox
                     (req_msg.convertsTo!(Shutdown))
                 )
             {
-                Message exit_msg = Message(MsgType.exit, "");
-                dg(exit_msg);
+                Message shotdown = Message(MsgType.shotdown, "");
+                dg(shotdown);
             }
             else if (req_msg.convertsTo!(Request))
             {
@@ -933,57 +946,41 @@ private struct SudoFiber
     public StopWaitDg swdg;
 }
 
-
 @system unittest
 {
-    import std.stdio;
     import std.conv;
 
     auto child = spawn({
         bool terminated = false;
+        auto sleep_inteval = dur!("msecs")(1);
         while (!terminated)
         {
             thisTid.process((ref Message msg) {
                 Message res_msg;
-                if (msg.type == MsgType.standard)
+                if (msg.type == MsgType.shotdown)
                 {
-                    if (msg.convertsTo!(Request))
+                    terminated = true;
+                    return Message(MsgType.shotdown, Response(Status.Success));
+                }
+
+                if (msg.convertsTo!(Request))
+                {
+                    auto req = msg.data.peek!(Request);
+                    if (req.method == "pow")
                     {
-                        auto req = msg.data.peek!(Request);
-                        if (req.method == "pow")
-                        {
-                            int value = to!int(req.args);
-                            res_msg = Message(
-                                MsgType.standard,
-                                Variant(Response(Status.Success, to!string(value * value)))
-                            );
-                        }
-                        else
-                        {
-                            res_msg = Message(
-                                MsgType.standard,
-                                Variant(Response(Status.Failed, ""))
-                            );
-                        }
-                    }
-                    else if (msg.convertsTo!(OwnerTerminated))
-                    {
-                        terminated = true;
-                    }
-                    else if (msg.convertsTo!(Shutdown))
-                    {
-                        terminated = true;
+                        immutable int value = to!int(req.args);
+                        return Message(MsgType.standard, Response(Status.Success, to!string(value * value)));
                     }
                 }
-                return res_msg;
+                return Message(MsgType.standard, Response(Status.Failed));
             });
-            Thread.sleep(dur!("msecs")(10));
+            Thread.sleep(sleep_inteval);
         }
     });
 
     auto req = Request(thisTid(), "pow", "2");
     auto res = child.query(req);
-    writeln(res.data);
+    assert(res.data == "4");
+
     child.shutdown();
 }
-

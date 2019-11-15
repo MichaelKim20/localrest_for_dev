@@ -57,7 +57,7 @@ void main()
         {
             thisTid.process((ref Message msg) {
                 Message res_msg;
-                if (msg.type == MsgType.exit)
+                if (msg.type == MsgType.shotdown)
                 {
                     terminated = true;
                     return res_msg;
