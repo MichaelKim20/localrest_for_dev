@@ -31,8 +31,7 @@
  */
 module geod24.concurrency;
 
-import geod24.Channel;
-
+import std.container;
 public import std.variant;
 public import std.stdio;
 
@@ -497,9 +496,9 @@ if (isSpawnable!(F, T))
         receivedMessage = msg;
     }
 
-    //auto tid1 = spawn(&f1, "Hello World");
-    //thread_joinAll;
-    //assert(receivedMessage == "Hello World");
+    auto tid1 = spawn(&f1, "Hello World");
+    thread_joinAll;
+    assert(receivedMessage == "Hello World");
 }
 
 /**
@@ -1803,14 +1802,13 @@ private
      * A MessageBox is a message queue for one thread.  Other threads may send
      * messages to this owner by calling put(), and the owner receives them by
      * calling get().  The put() call is therefore effectively shared and the
-     * get() call is effectively local.  setMaxMsgs may be used by any thread
-     * to limit the size of the message queue.
+     * get() call is effectively local.
      */
     class MessageBox
     {
         this() @trusted nothrow /* TODO: make @safe after relevant druntime PR gets merged */
         {
-            m_channel = new Channel!Message();
+            m_channel = new Channel(1);
         }
 
         ///
@@ -1939,33 +1937,58 @@ private
                 }
             }
 
+            bool scan(ref Message msg)
+            {
+                if (isControlMsg(msg))
+                {
+                    if (onControlMsg(msg))
+                    {
+                        if (!isLinkDeadMsg(msg))
+                            return true;
+                        else
+                            return false;
+                    }
+                }
+                else
+                {
+                    if (onStandardMsg(msg))
+                        return true;
+                }
+                return false;
+            }
+
             static if (timedWait)
             {
                 import core.time : MonoTime;
                 auto limit = MonoTime.currTime + period;
             }
 
+            Message msg;
             while (true)
             {
-                Message msg;
                 if (m_channel.receive(&msg))
                 {
-                    if (isControlMsg(msg))
+                    if (msg.data.hasValue)
                     {
-                        if (onControlMsg(msg))
+                        writeln("m_channel.receive ", msg);
+
+                        if (isControlMsg(msg))
                         {
-                            if (!isLinkDeadMsg(msg))
+                            if (onControlMsg(msg))
+                            {
+                                if (!isLinkDeadMsg(msg))
+                                    break;
+                                else
+                                    continue;
+                            }
+                        }
+                        else
+                        {
+                            if (onStandardMsg(msg))
                                 break;
                             else
                                 continue;
                         }
-                    }
-                    else
-                    {
-                        if (onStandardMsg(msg))
-                            break;
-                        else
-                            continue;
                     }
                 }
                 else
@@ -2000,8 +2023,6 @@ private
                 }
             }
 */
-            //import std.stdio;
-            //writeln("close");
             m_channel.close ();
         }
 
@@ -2023,8 +2044,321 @@ private
             return msg.type == MsgType.linkDead;
         }
 
-        Channel!Message m_channel;
+        Channel m_channel;
     }
+
+
+    public class Channel
+    {
+        /// closed
+        private bool closed;
+
+        /// lock
+        private Mutex mutex;
+
+        /// size of queue
+        private size_t qsize;
+
+        /// queue of data
+        private DList!Message queue;
+
+        /// collection of send waiters
+        private DList!SudoFiber sendq;
+
+        /// collection of recv waiters
+        private DList!SudoFiber recvq;
+
+
+        /// Ctor
+        public this (size_t qsize = 0) @trusted nothrow 
+        {
+            this.closed = false;
+            this.mutex = new Mutex;
+            this.qsize = qsize;
+        }
+
+        /***********************************************************************
+
+            Send data `elem`.
+            First, check the receiving waiter that is in the `recvq`.
+            If there are no targets there, add data to the `queue`.
+            If queue is full then stored waiter(fiber) to the `sendq`.
+
+            Params:
+                msg = value to send
+
+            Return:
+                true if the sending is successful, otherwise false
+
+        ***********************************************************************/
+
+        public bool send (ref Message msg)
+        {
+            this.mutex.lock();
+
+            if (this.closed)
+            {
+                this.mutex.unlock();
+                return false;
+            }
+
+            if (this.recvq[].walkLength > 0)
+            {
+                writefln("send 1  %s", msg);
+                SudoFiber sf = this.recvq.front;
+                this.recvq.removeFront();
+
+                *(sf.msg_ptr) = msg;
+                this.mutex.unlock();
+
+                if (sf.fiber !is null)
+                    sf.fiber.call();
+                else if (sf.swdg !is null)
+                    sf.swdg();
+
+                return true;
+            }
+
+            if (this.queue[].walkLength < this.qsize)
+            {
+                writefln("send 2  %s", msg);
+                this.queue.insertBack(msg);
+                return true;
+            }
+
+            Fiber f = Fiber.getThis();
+            if (f !is null)
+            {
+                writefln("send 3  %s", msg);
+                SudoFiber new_sf;
+                new_sf.fiber = f;
+                new_sf.msg = msg;
+                this.sendq.insertBack(new_sf);
+                this.mutex.unlock();
+
+                Fiber.yield();
+            }
+            else
+            {
+                writefln("send 4  %s", msg);
+                shared(bool) is_waiting = true;
+                void stopWait() {
+                    is_waiting = false;
+                }
+                SudoFiber new_sf;
+                new_sf.fiber = null;
+                new_sf.msg = msg;
+                new_sf.swdg = &stopWait;
+                this.sendq.insertBack(new_sf);
+                this.mutex.unlock();
+
+                while (is_waiting)
+                    Thread.sleep(dur!("msecs")(1));
+            }
+
+            return true;
+        }
+
+        /***********************************************************************
+
+            Write the data received in `msg`
+
+        ***********************************************************************/
+
+        public bool receive (Message* msg)
+        {
+            this.mutex.lock();
+
+            if (this.closed)
+            {
+                this.mutex.unlock();
+                return false;
+            }
+
+            if (this.sendq[].walkLength > 0)
+            {
+                SudoFiber sf = this.sendq.front;
+                this.sendq.removeFront();
+
+                *msg = sf.msg;
+                this.mutex.unlock();
+
+                if (sf.fiber !is null)
+                    sf.fiber.call();
+                else if (sf.swdg !is null)
+                    sf.swdg();
+                writefln("receive 1  %s  ", *msg);
+                return true;
+            }
+
+            if (this.queue[].walkLength > 0)
+            {
+                *msg = this.queue.front;
+
+                this.queue.removeFront();
+
+                this.mutex.unlock();
+                writefln("receive 2  %s  ", *msg);
+
+                return true;
+            }
+
+            Fiber f = Fiber.getThis();
+            if (f !is null)
+            {
+                *msg = Message();
+                SudoFiber new_sf;
+                new_sf.fiber = f;
+                new_sf.msg_ptr = msg;
+
+                this.recvq.insertBack(new_sf);
+                //writefln("receive 4  %s   %s  ", new_sf.fiber, *new_sf.msg_ptr);
+
+                this.mutex.unlock();
+                Fiber.yield();
+                //writefln("receive 4  %s   %s  ", new_sf.fiber, *new_sf.msg_ptr);
+                return true;
+            }
+            else
+            {
+                shared(bool) is_waiting = true;
+                void stopWait() {
+                    is_waiting = false;
+                }
+                SudoFiber new_sf;
+                new_sf.fiber = null;
+                new_sf.msg_ptr = msg;
+                new_sf.swdg = &stopWait;
+
+                this.recvq.insertBack(new_sf);
+                this.mutex.unlock();
+
+                while (is_waiting)
+                    Thread.sleep(dur!("msecs")(1));
+
+                writeln("receive 4 ", *msg);
+
+                return true;
+            }
+        }
+
+        /***********************************************************************
+
+            Return closing status
+
+            Return:
+                true if channel is closed, otherwise false
+
+        ***********************************************************************/
+
+        public @property bool isClosed () @safe @nogc pure
+        {
+            synchronized (this.mutex)
+            {
+                return this.closed;
+            }
+        }
+
+        /***********************************************************************
+
+            Close channel
+
+        ***********************************************************************/
+
+        public void close ()
+        {
+            SudoFiber sf;
+            bool res;
+
+            this.mutex.lock();
+            scope (exit) this.mutex.unlock();
+
+            this.closed = true;
+
+            while (true)
+            {
+                if (this.recvq[].walkLength == 0)
+                    break;
+
+                sf = this.recvq.front;
+                this.recvq.removeFront();
+                if (sf.fiber !is null)
+                    sf.fiber.call();
+                else if (sf.swdg !is null)
+                    sf.swdg();
+            }
+
+            while (true)
+            {
+                if (this.sendq[].walkLength == 0)
+                    break;
+
+                sf = this.sendq.front;
+                this.sendq.removeFront();
+                if (sf.fiber !is null)
+                    sf.fiber.call();
+                else if (sf.swdg !is null)
+                    sf.swdg();
+            }
+        }
+    }
+
+    private alias StopWaitDg = void delegate ();
+
+    ///
+    private struct SudoFiber
+    {
+        public Fiber fiber;
+        public Message  msg;
+        public Message* msg_ptr;
+        public StopWaitDg swdg;
+    }
+
+}
+
+@system unittest
+{
+    import std.typecons : tuple, Tuple;
+
+    static void testfn(Tid tid)
+    {
+        receive((float val) { assert(0); }, (int val, int val2) {
+            assert(val == 42 && val2 == 86);
+        });
+        receive((Tuple!(int, int) val) { assert(val[0] == 42 && val[1] == 86); });
+        receive((Variant val) {  });
+        receive((string val) {
+            if ("the quick brown fox" != val)
+                return false;
+            return true;
+        }, (string val) { assert(false); });
+        prioritySend(tid, "done");
+    }
+
+    static void runTest(Tid tid)
+    {
+        send(tid, 42, 86);
+        send(tid, tuple(42, 86));
+        send(tid, "hello", "there");
+        send(tid, "the quick brown fox");
+        receive((string val) { assert(val == "done"); });
+    }
+
+    static void simpleTest()
+    {
+        auto tid = spawn(&testfn, thisTid);
+        runTest(tid);
+
+        // Run the test again with a limited mailbox size.
+        tid = spawn(&testfn, thisTid);
+        runTest(tid);
+    }
+
+    simpleTest();
+
+    scheduler = new ThreadScheduler;
+    simpleTest();
+    scheduler = null;
 }
 
 private @property shared(Mutex) initOnceLock()
