@@ -1808,7 +1808,7 @@ private
     {
         this() @trusted nothrow /* TODO: make @safe after relevant druntime PR gets merged */
         {
-            m_channel = new Channel(1);
+            m_channel = new Channel(1000);
         }
 
         ///
@@ -1968,10 +1968,6 @@ private
             {
                 if (m_channel.receive(&msg))
                 {
-                    if (msg.data.hasValue)
-                    {
-                        writeln("m_channel.receive ", msg);
-
                         if (isControlMsg(msg))
                         {
                             if (onControlMsg(msg))
@@ -1989,7 +1985,6 @@ private
                             else
                                 continue;
                         }
-                    }
                 }
                 else
                     break;
@@ -2070,7 +2065,7 @@ private
 
 
         /// Ctor
-        public this (size_t qsize = 0) @trusted nothrow 
+        public this (size_t qsize = 0) @trusted nothrow
         {
             this.closed = false;
             this.mutex = new Mutex;
@@ -2104,7 +2099,6 @@ private
 
             if (this.recvq[].walkLength > 0)
             {
-                writefln("send 1  %s", msg);
                 SudoFiber sf = this.recvq.front;
                 this.recvq.removeFront();
 
@@ -2112,7 +2106,11 @@ private
                 this.mutex.unlock();
 
                 if (sf.fiber !is null)
-                    sf.fiber.call();
+                {
+                    if (sf.swdg !is null)
+                        sf.swdg();
+                    //sf.fiber.call();
+                }
                 else if (sf.swdg !is null)
                     sf.swdg();
 
@@ -2121,34 +2119,43 @@ private
 
             if (this.queue[].walkLength < this.qsize)
             {
-                writefln("send 2  %s", msg);
                 this.queue.insertBack(msg);
+
+                this.mutex.unlock();
+
                 return true;
             }
 
             Fiber f = Fiber.getThis();
             if (f !is null)
             {
-                writefln("send 3  %s", msg);
+                shared(bool) is_waiting = true;
+                void stopWait1() {
+                    is_waiting = false;
+                }
                 SudoFiber new_sf;
                 new_sf.fiber = f;
                 new_sf.msg = msg;
+                new_sf.swdg = &stopWait1;
+
                 this.sendq.insertBack(new_sf);
                 this.mutex.unlock();
+
+                while (is_waiting)
+                    Fiber.yield();
 
                 Fiber.yield();
             }
             else
             {
-                writefln("send 4  %s", msg);
                 shared(bool) is_waiting = true;
-                void stopWait() {
+                void stopWait2() {
                     is_waiting = false;
                 }
                 SudoFiber new_sf;
                 new_sf.fiber = null;
                 new_sf.msg = msg;
-                new_sf.swdg = &stopWait;
+                new_sf.swdg = &stopWait2;
                 this.sendq.insertBack(new_sf);
                 this.mutex.unlock();
 
@@ -2181,13 +2188,18 @@ private
                 this.sendq.removeFront();
 
                 *msg = sf.msg;
+
                 this.mutex.unlock();
 
                 if (sf.fiber !is null)
-                    sf.fiber.call();
+                {
+                    if (sf.swdg !is null)
+                        sf.swdg();
+                    //sf.fiber.call();
+                }
                 else if (sf.swdg !is null)
                     sf.swdg();
-                writefln("receive 1  %s  ", *msg);
+
                 return true;
             }
 
@@ -2198,7 +2210,6 @@ private
                 this.queue.removeFront();
 
                 this.mutex.unlock();
-                writefln("receive 2  %s  ", *msg);
 
                 return true;
             }
@@ -2206,37 +2217,43 @@ private
             Fiber f = Fiber.getThis();
             if (f !is null)
             {
-                *msg = Message();
+                shared(bool) is_waiting1 = true;
+
+                void stopWait1() {
+                    is_waiting1 = false;
+                }
+
                 SudoFiber new_sf;
                 new_sf.fiber = f;
                 new_sf.msg_ptr = msg;
+                new_sf.swdg = &stopWait1;
 
                 this.recvq.insertBack(new_sf);
-                //writefln("receive 4  %s   %s  ", new_sf.fiber, *new_sf.msg_ptr);
 
                 this.mutex.unlock();
-                Fiber.yield();
-                //writefln("receive 4  %s   %s  ", new_sf.fiber, *new_sf.msg_ptr);
+
+                while (is_waiting1)
+                    Fiber.yield();
+
                 return true;
             }
             else
             {
                 shared(bool) is_waiting = true;
-                void stopWait() {
+                void stopWait2() {
                     is_waiting = false;
                 }
                 SudoFiber new_sf;
                 new_sf.fiber = null;
                 new_sf.msg_ptr = msg;
-                new_sf.swdg = &stopWait;
+                new_sf.swdg = &stopWait2;
 
                 this.recvq.insertBack(new_sf);
+
                 this.mutex.unlock();
 
                 while (is_waiting)
                     Thread.sleep(dur!("msecs")(1));
-
-                writeln("receive 4 ", *msg);
 
                 return true;
             }

@@ -586,7 +586,6 @@ public final class RemoteAPI (API) : API
                                     cmd.id,
                                     node.%1$s(args.args).serializeToJsonString());
                             import std.stdio;
-                            writeln("----  ", res);
                             C.send(cmd.sender, res);
                         }
                         else
@@ -1028,11 +1027,15 @@ unittest
     scope test = RemoteAPI!API.spawn!MockAPI();
     assert(test.pubkey() == 42);
     test.ctrl.shutdown();
+    import std.stdio;
+    writeln("test1");
 }
 
 /// In a real world usage, users will most likely need to use the registry
 unittest
 {
+    import std.stdio;
+    writeln("test2");
     import std.conv;
     static import geod24.concurrency;
 
@@ -1109,10 +1112,13 @@ unittest
         node2.ctrl.shutdown();
         geod24.concurrency.send(parent, 42);
     }
+    writeln("test2");
 
     auto testerFiber = geod24.concurrency.spawn(&testFunc, geod24.concurrency.thisTid);
     // Make sure our main thread terminates after everyone else
     geod24.concurrency.receiveOnly!int();
+    import std.stdio;
+    writeln("test2");
 }
 
 /// This network have different types of nodes in it
@@ -1191,6 +1197,8 @@ unittest
     assert(nodes[0].requests() == 7);
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
+    import std.stdio;
+    writeln("test3");
 }
 
 /// Support for circular nodes call
@@ -1243,6 +1251,8 @@ unittest
 
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
+    import std.stdio;
+    writeln("test4");
 }
 
 
@@ -1295,6 +1305,8 @@ unittest
     assert(node.getCounter() >= 9);
     assert(node.getCounter() == 0);
     node.ctrl.shutdown();
+    import std.stdio;
+    writeln("test5");
 }
 
 // Sane name insurance policy
@@ -1392,6 +1404,8 @@ unittest
 
     n1.ctrl.shutdown();
     n2.ctrl.shutdown();
+    import std.stdio;
+    writeln("test6");
 }
 
 // Filter commands
@@ -1531,6 +1545,8 @@ unittest
 
     filtered.ctrl.shutdown();
     caller.ctrl.shutdown();
+    import std.stdio;
+    writeln("test7");
 }
 
 // request timeouts (from main thread)
@@ -1570,6 +1586,9 @@ unittest
     Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
+
+    import std.stdio;
+    writeln("test9");
 }
 
 // test-case for responses to re-used requests (from main thread)

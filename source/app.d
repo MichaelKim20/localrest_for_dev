@@ -27,9 +27,8 @@ void main()
     {
         @safe:
         public override @property ulong pubkey ()
-        { 
-            writeln("f in");
-            return 42; 
+        {
+            return 42;
         }
         public override Json getValue (ulong idx)
         { assert(0); }
@@ -41,14 +40,8 @@ void main()
 
     import std.stdio;
 
-    writeln("start");
     scope test = RemoteAPI!API.spawn!MockAPI();
-    writeln("pubkey");
-    ulong v;
-    v = test.pubkey();
-    writeln("end");
+    assert(42 == test.pubkey());
     test.ctrl.shutdown();
 
-
-    runEventLoop();
 }
