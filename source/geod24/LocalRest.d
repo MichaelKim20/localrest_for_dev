@@ -830,7 +830,6 @@ unittest
 /// Nodes can start tasks
 unittest
 {
-    /*
     static import core.thread;
     import core.time;
 
@@ -869,6 +868,8 @@ unittest
     auto node = RemoteAPI!API.spawn!Node();
     assert(node.getCounter() == 0);
     node.start();
+    import std.stdio;
+    writefln("%s", node.getCounter());
     assert(node.getCounter() == 1);
     assert(node.getCounter() == 0);
     core.thread.Thread.sleep(1.seconds);
@@ -879,7 +880,6 @@ unittest
     node.ctrl.shutdown();
     import std.stdio;
     writeln("test5");
-    */
 }
 
 // Sane name insurance policy

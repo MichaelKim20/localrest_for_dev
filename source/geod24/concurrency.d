@@ -331,8 +331,8 @@ public:
 
     /**
      * Generate a convenient string for identifying this Tid.  This i
-     
-     
+
+
      s only
      * useful to see if Tid's that are currently executing are the same or
      * different, e.g. for logging and debugging.  It is potentially possible
@@ -1067,30 +1067,36 @@ private
             Fiber fiber = Fiber.getThis();
             if (fiber !is null)
             {
+                shared(bool) is_waiting1 = true;
+                void stopWait1() {
+                    is_waiting1 = false;
+                }
                 SudoFiber new_sf;
                 new_sf.fiber = fiber;
                 new_sf.req_msg = &req_msg;
                 new_sf.res_msg = &res_msg;
+                new_sf.swdg = &stopWait1;
 
                 this.queue.insertBack(new_sf);
                 this.mutex.unlock();
-                Fiber.yield();
+                while (is_waiting1)
+                    Fiber.yield();
             }
             else
             {
-                shared(bool) is_waiting = true;
-                void stopWait() {
-                    is_waiting = false;
+                shared(bool) is_waiting2 = true;
+                void stopWait2() {
+                    is_waiting2 = false;
                 }
                 SudoFiber new_sf;
                 new_sf.fiber = null;
                 new_sf.req_msg = &req_msg;
                 new_sf.res_msg = &res_msg;
-                new_sf.swdg = &stopWait;
+                new_sf.swdg = &stopWait2;
 
                 this.queue.insertBack(new_sf);
                 this.mutex.unlock();
-                while (is_waiting)
+                while (is_waiting2)
                     Thread.sleep(dur!("msecs")(1));
             }
 
@@ -1240,7 +1246,11 @@ private
                 this.queue.removeFront();
 
                 if (sf.fiber !is null)
+                {
+                    if (sf.swdg !is null)
+                        sf.swdg();
                     sf.fiber.call();
+                }
                 else if (sf.swdg !is null)
                     sf.swdg();
             }
