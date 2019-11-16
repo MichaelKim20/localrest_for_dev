@@ -1194,7 +1194,11 @@ private
                     onStandardReq(sf.req_msg, sf.res_msg);
 
                 if (sf.fiber !is null)
-                    sf.fiber.call();
+                {
+                    if (sf.swdg !is null)
+                        sf.swdg();
+                    //sf.fiber.call();
+                }
                 else if (sf.swdg !is null)
                     sf.swdg();
 
@@ -1249,7 +1253,7 @@ private
                 {
                     if (sf.swdg !is null)
                         sf.swdg();
-                    sf.fiber.call();
+                    //sf.fiber.call();
                 }
                 else if (sf.swdg !is null)
                     sf.swdg();
