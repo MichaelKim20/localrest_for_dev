@@ -3,7 +3,7 @@ module test;
 import vibe.data.json;
 import geod24.LocalRest;
 import std.stdio;
-import geod24.RequestService;
+import geod24.concurrency;
 import core.sync.mutex;
 import core.thread;
 import std.datetime.systime;
@@ -49,41 +49,41 @@ void main()
 void main()
 {
     import std.stdio;
+
     import std.conv;
 
     auto child = spawn({
         bool terminated = false;
+        auto sleep_inteval = dur!("msecs")(1);
         while (!terminated)
         {
             thisTid.process((ref Message msg) {
                 Message res_msg;
-                if (msg.type == MsgType.shotdown)
+                if (msg.type == MsgType.shutdown)
                 {
                     terminated = true;
-                    return res_msg;
+                    return Message(MsgType.shutdown, Response(Status.Success));
                 }
 
                 if (msg.convertsTo!(Request))
                 {
-                    auto req = msg.data.peek!(Request);
+                    auto req = msg.get!(Request);
                     if (req.method == "pow")
                     {
                         immutable int value = to!int(req.args);
-                        res_msg = Message(
-                            MsgType.standard,
-                            Variant(Response(Status.Success, to!string(value * value)))
-                        );
+                        return Message(MsgType.standard, Response(Status.Success, to!string(value * value)));
                     }
                 }
-
-                return res_msg;
+                return Message(MsgType.standard, Response(Status.Failed));
             });
-            Thread.sleep(dur!("msecs")(1));
+            Thread.sleep(sleep_inteval);
         }
     });
 
     auto req = Request(thisTid(), "pow", "2");
     auto res = child.query(req);
-    writeln(res.data);
+    assert(res.data == "4");
+
     child.shutdown();
+    thisInfo.cleanup();
 }
