@@ -1968,27 +1968,28 @@ private
             {
                 if (m_channel.receive(&msg))
                 {
-                        if (isControlMsg(msg))
+                    if (isControlMsg(msg))
+                    {
+                        if (onControlMsg(msg))
                         {
-                            if (onControlMsg(msg))
-                            {
-                                if (!isLinkDeadMsg(msg))
-                                    break;
-                                else
-                                    continue;
-                            }
-                        }
-                        else
-                        {
-                            if (onStandardMsg(msg))
+                            if (!isLinkDeadMsg(msg))
                                 break;
                             else
                                 continue;
                         }
+                    }
+                    else
+                    {
+                        if (onStandardMsg(msg))
+                            break;
+                        else
+                            continue;
+                    }
                 }
                 else
                     break;
             }
+
             return false;
         }
 
@@ -2096,7 +2097,7 @@ private
                 this.mutex.unlock();
                 return false;
             }
-
+/*
             if (this.recvq[].walkLength > 0)
             {
                 SudoFiber sf = this.recvq.front;
@@ -2116,16 +2117,16 @@ private
 
                 return true;
             }
-
-            if (this.queue[].walkLength < this.qsize)
-            {
+*/
+            //if (this.queue[].walkLength < this.qsize)
+           // {
                 this.queue.insertBack(msg);
 
                 this.mutex.unlock();
 
                 return true;
-            }
-
+            //}
+/*
             Fiber f = Fiber.getThis();
             if (f !is null)
             {
@@ -2162,8 +2163,8 @@ private
                 while (is_waiting)
                     Thread.sleep(dur!("msecs")(1));
             }
-
-            return true;
+*/
+            //return true;
         }
 
         /***********************************************************************
@@ -2181,7 +2182,7 @@ private
                 this.mutex.unlock();
                 return false;
             }
-
+/*
             if (this.sendq[].walkLength > 0)
             {
                 SudoFiber sf = this.sendq.front;
@@ -2202,9 +2203,9 @@ private
 
                 return true;
             }
-
-            if (this.queue[].walkLength > 0)
-            {
+*/
+            //if (this.queue[].walkLength > 0)
+            //{
                 *msg = this.queue.front;
 
                 this.queue.removeFront();
@@ -2212,8 +2213,8 @@ private
                 this.mutex.unlock();
 
                 return true;
-            }
-
+            //}
+/*
             Fiber f = Fiber.getThis();
             if (f !is null)
             {
@@ -2257,6 +2258,7 @@ private
 
                 return true;
             }
+            */
         }
 
         /***********************************************************************
