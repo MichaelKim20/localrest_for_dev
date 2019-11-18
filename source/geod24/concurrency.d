@@ -1761,7 +1761,6 @@ void yield(T)(T value)
     testScheduler(new ThreadScheduler);
     testScheduler(new FiberScheduler);
 }
-
 ///
 @system unittest
 {
@@ -1808,7 +1807,9 @@ private
     {
         this() @trusted nothrow /* TODO: make @safe after relevant druntime PR gets merged */
         {
-            m_channel = new Channel(1000);
+            m_lock = new Mutex();
+            m_channel = new Channel(m_lock, 0);
+            m_condition = new FiberCondition(m_lock);
         }
 
         ///
@@ -1833,6 +1834,7 @@ private
          */
         final void put(ref Message msg)
         {
+            //m_condition.notify();
             m_channel.send(msg);
         }
 
@@ -1964,27 +1966,31 @@ private
             }
 
             Message msg;
+
             while (true)
             {
-                if (m_channel.receive(&msg))
+                /*
+                synchronized (m_lock)
                 {
-                    if (isControlMsg(msg))
+                    static if (timedWait)
                     {
-                        if (onControlMsg(msg))
-                        {
-                            if (!isLinkDeadMsg(msg))
-                                break;
-                            else
-                                continue;
-                        }
+                        if (period <= Duration.zero || !m_condition.wait(period))
+                            return false;
                     }
                     else
                     {
-                        if (onStandardMsg(msg))
-                            break;
-                        else
-                            continue;
+                        //m_condition.wait();
                     }
+                }
+                
+                */
+
+                if (m_channel.receive(&msg))
+                {
+                    if (scan(msg))
+                        break;
+                    else
+                        continue;
                 }
                 else
                     break;
@@ -2041,10 +2047,64 @@ private
         }
 
         Channel m_channel;
+        Mutex m_lock;
+        FiberCondition m_condition;
     }
 
+    private class FiberCondition : Condition
+    {
+        this(Mutex m) nothrow
+        {
+            super(m);
+            notified = false;
+        }
 
-    public class Channel
+        override void wait() nothrow
+        {
+            scope (exit) notified = false;
+
+            while (!notified)
+                switchContext();
+        }
+
+        override bool wait(Duration period) nothrow
+        {
+            import core.time : MonoTime;
+
+            scope (exit) notified = false;
+
+            for (auto limit = MonoTime.currTime + period;
+                 !notified && !period.isNegative;
+                 period = limit - MonoTime.currTime)
+            {
+                yield();
+            }
+            return notified;
+        }
+
+        override void notify() nothrow
+        {
+            notified = true;
+            switchContext();
+        }
+
+        override void notifyAll() nothrow
+        {
+            notified = true;
+            switchContext();
+        }
+    private:
+        void switchContext() nothrow
+        {
+            mutex_nothrow.unlock_nothrow();
+            scope (exit) mutex_nothrow.lock_nothrow();
+            yield();
+        }
+
+        private bool notified;
+    }
+
+    private class Channel
     {
         /// closed
         private bool closed;
@@ -2066,10 +2126,10 @@ private
 
 
         /// Ctor
-        public this (size_t qsize = 0) @trusted nothrow
+        public this (Mutex mutex, size_t qsize = 0) @trusted nothrow
         {
             this.closed = false;
-            this.mutex = new Mutex;
+            this.mutex = mutex;
             this.qsize = qsize;
         }
 
@@ -2103,6 +2163,8 @@ private
                 SudoFiber sf = this.recvq.front;
                 this.recvq.removeFront();
 
+                //writefln("send 1 %s %s", sf.fiber, msg);
+
                 *(sf.msg_ptr) = msg;
                 this.mutex.unlock();
 
@@ -2124,6 +2186,8 @@ private
 
                 this.mutex.unlock();
 
+                //writefln("send 2 %s",  msg);
+
                 return true;
             }
 
@@ -2138,6 +2202,8 @@ private
                 new_sf.fiber = f;
                 new_sf.msg = msg;
                 new_sf.swdg = &stopWait1;
+
+                //writefln("send 3 %s %s", new_sf.fiber, msg);
 
                 this.sendq.insertBack(new_sf);
                 this.mutex.unlock();
@@ -2157,6 +2223,9 @@ private
                 new_sf.fiber = null;
                 new_sf.msg = msg;
                 new_sf.swdg = &stopWait2;
+
+                //writefln("send 4 %s %s", new_sf.fiber, msg);
+
                 this.sendq.insertBack(new_sf);
                 this.mutex.unlock();
 
@@ -2191,6 +2260,8 @@ private
 
                 this.mutex.unlock();
 
+                //writefln("receive 1 %s %s", sf.msg);
+
                 if (sf.fiber !is null)
                 {
                     if (sf.swdg !is null)
@@ -2211,6 +2282,8 @@ private
 
                 this.mutex.unlock();
 
+                //writefln("receive 2 %s", *msg);
+
                 return true;
             }
 
@@ -2227,6 +2300,7 @@ private
                 new_sf.fiber = f;
                 new_sf.msg_ptr = msg;
                 new_sf.swdg = &stopWait1;
+
 
                 this.recvq.insertBack(new_sf);
 
@@ -2247,6 +2321,8 @@ private
                 new_sf.fiber = null;
                 new_sf.msg_ptr = msg;
                 new_sf.swdg = &stopWait2;
+
+                //writefln("receive 4 %s %s", new_sf.fiber, *new_sf.msg_ptr);
 
                 this.recvq.insertBack(new_sf);
 
