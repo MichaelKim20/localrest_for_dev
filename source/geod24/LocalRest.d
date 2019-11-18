@@ -966,8 +966,8 @@ public final class RemoteAPI (API) : API
                                         (Response res) {
                                             if (scheduler !is null)
                                             {
-                                                while (res.id !in scheduler.waiting)
-                                                    Fiber.yield();
+                                                //while (res.id !in scheduler.waiting)
+                                                //    Fiber.yield();
                                                 scheduler.pending = res;
                                                 scheduler.waiting[res.id].c.notify();
                                             }
@@ -1735,6 +1735,7 @@ unittest
     writeln("test12");
 }
 */
+
 /*
 // request timeouts with dropped messages
 unittest
@@ -1776,7 +1777,7 @@ unittest
     import std.stdio;
     writeln("test13");
 }
-
+*/
 // Test a node that gets a replay while it's delayed
 unittest
 {
@@ -1821,7 +1822,7 @@ unittest
     import std.stdio;
     writeln("test14");
 }
-
+/*
 // Test explicit shutdown
 unittest
 {
