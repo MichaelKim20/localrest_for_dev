@@ -84,6 +84,9 @@ static import C = geod24.concurrency;
 import std.meta : AliasSeq;
 import std.traits : Parameters, ReturnType;
 
+import core.atomic;
+import core.sync.condition;
+import core.sync.mutex;
 import core.thread;
 import core.time;
 
@@ -136,13 +139,403 @@ private struct ArgWrapper (T...)
 
 public void runTask (scope void delegate() dg)
 {
+    //assert(scheduler !is null, "Cannot call this function from the main thread");
+    //scheduler.spawn(dg);
 }
 
 /// Ditto
 public void sleep (Duration timeout)
 {
+    //assert(scheduler !is null, "Cannot call this function from the main thread");
+    //scope cond = scheduler.new FiberCondition();
+    //cond.wait(timeout);
 }
 
+/**
+ * A Scheduler controls how threading is performed by spawn.
+ *
+ * Implementing a Scheduler allows the concurrency mechanism used by this
+ * module to be customized according to different needs.  By default, a call
+ * to spawn will create a new kernel thread that executes the supplied routine
+ * and terminates when finished.  But it is possible to create Schedulers that
+ * reuse threads, that multiplex Fibers (coroutines) across a single thread,
+ * or any number of other approaches.  By making the choice of Scheduler a
+ * user-level option, std.concurrency may be used for far more types of
+ * application than if this behavior were predefined.
+ *
+ * Example:
+ * ---
+ * import std.concurrency;
+ * import std.stdio;
+ *
+ * void main()
+ * {
+ *     scheduler = new FiberScheduler;
+ *     scheduler.start(
+ *     {
+ *         writeln("the rest of main goes here");
+ *     });
+ * }
+ * ---
+ *
+ * Some schedulers have a dispatching loop that must run if they are to work
+ * properly, so for the sake of consistency, when using a scheduler, start()
+ * must be called within main().  This yields control to the scheduler and
+ * will ensure that any spawned threads are executed in an expected manner.
+ */
+interface Scheduler
+{
+    /**
+     * Spawns the supplied op and starts the Scheduler.
+     *
+     * This is intended to be called at the start of the program to yield all
+     * scheduling to the active Scheduler instance.  This is necessary for
+     * schedulers that explicitly dispatch threads rather than simply relying
+     * on the operating system to do so, and so start should always be called
+     * within main() to begin normal program execution.
+     *
+     * Params:
+     *  op = A wrapper for whatever the main thread would have done in the
+     *       absence of a custom scheduler.  It will be automatically executed
+     *       via a call to spawn by the Scheduler.
+     */
+    void start(void delegate() op);
+
+    /**
+     * Assigns a logical thread to execute the supplied op.
+     *
+     * This routine is called by spawn.  It is expected to instantiate a new
+     * logical thread and run the supplied operation.  This thread must call
+     * thisInfo.cleanup() when the thread terminates if the scheduled thread
+     * is not a kernel thread--all kernel threads will have their ThreadInfo
+     * cleaned up automatically by a thread-local destructor.
+     *
+     * Params:
+     *  op = The function to execute.  This may be the actual function passed
+     *       by the user to spawn itself, or may be a wrapper function.
+     */
+    void spawn(void delegate() op);
+
+    /**
+     * Yields execution to another logical thread.
+     *
+     * This routine is called at various points within concurrency-aware APIs
+     * to provide a scheduler a chance to yield execution when using some sort
+     * of cooperative multithreading model.  If this is not appropriate, such
+     * as when each logical thread is backed by a dedicated kernel thread,
+     * this routine may be a no-op.
+     */
+    void yield() nothrow;
+
+    /**
+     * Returns an appropriate ThreadInfo instance.
+     *
+     * Returns an instance of ThreadInfo specific to the logical thread that
+     * is calling this routine or, if the calling thread was not create by
+     * this scheduler, returns ThreadInfo.thisInfo instead.
+     */
+    @property ref C.ThreadInfo thisInfo() nothrow;
+
+    /**
+     * Creates a Condition variable analog for signaling.
+     *
+     * Creates a new Condition variable analog which is used to check for and
+     * to signal the addition of messages to a thread's message queue.  Like
+     * yield, some schedulers may need to define custom behavior so that calls
+     * to Condition.wait() yield to another thread when no new messages are
+     * available instead of blocking.
+     *
+     * Params:
+     *  m = The Mutex that will be associated with this condition.  It will be
+     *      locked prior to any operation on the condition, and so in some
+     *      cases a Scheduler may need to hold this reference and unlock the
+     *      mutex before yielding execution to another logical thread.
+     */
+    Condition newCondition(Mutex m) nothrow;
+}
+
+/**
+ * Copied from std.concurrency.FiberScheduler, increased the stack size to 16MB.
+ */
+class BaseFiberScheduler : Scheduler
+{
+    static class InfoFiber : Fiber
+    {
+        C.ThreadInfo info;
+
+        this(void delegate() op) nothrow
+        {
+            super(op, 16 * 1024 * 1024);  // 16Mb
+        }
+    }
+
+
+    /**
+     * This creates a new Fiber for the supplied op and then starts the
+     * dispatcher.
+     */
+    void start(void delegate() op)
+    {
+        create(op);
+        dispatch();
+    }
+
+    /**
+     * This created a new Fiber for the supplied op and adds it to the
+     * dispatch list.
+     */
+    void spawn(void delegate() op) nothrow
+    {
+        create(op);
+        yield();
+    }
+
+    /**
+     * If the caller is a scheduled Fiber, this yields execution to another
+     * scheduled Fiber.
+     */
+    void yield() nothrow
+    {
+        // NOTE: It's possible that we should test whether the calling Fiber
+        //       is an InfoFiber before yielding, but I think it's reasonable
+        //       that any (non-Generator) fiber should yield here.
+        if (Fiber.getThis())
+            Fiber.yield();
+    }
+
+    /**
+     * Returns an appropriate ThreadInfo instance.
+     *
+     * Returns a ThreadInfo instance specific to the calling Fiber if the
+     * Fiber was created by this dispatcher, otherwise it returns
+     * ThreadInfo.thisInfo.
+     */
+    @property ref C.ThreadInfo thisInfo() nothrow
+    {
+        auto f = cast(InfoFiber) Fiber.getThis();
+
+        if (f !is null)
+            return f.info;
+        return C.ThreadInfo.thisInfo;
+    }
+
+    /**
+     * Returns a Condition analog that yields when wait or notify is called.
+     */
+    C.Condition newCondition(C.Mutex m) nothrow
+    {
+        return new FiberCondition(m);
+    }
+
+private:
+
+    class FiberCondition : C.Condition
+    {
+        this(C.Mutex m) nothrow
+        {
+            super(m);
+            notified = false;
+        }
+
+        override void wait() nothrow
+        {
+            scope (exit) notified = false;
+
+            while (!notified)
+                switchContext();
+        }
+
+        override bool wait(Duration period) nothrow
+        {
+            import core.time : MonoTime;
+
+            scope (exit) notified = false;
+
+            for (auto limit = MonoTime.currTime + period;
+                 !notified && !period.isNegative;
+                 period = limit - MonoTime.currTime)
+            {
+                yield();
+            }
+            return notified;
+        }
+
+        override void notify() nothrow
+        {
+            notified = true;
+            switchContext();
+        }
+
+        override void notifyAll() nothrow
+        {
+            notified = true;
+            switchContext();
+        }
+
+    private:
+        void switchContext() nothrow
+        {
+            mutex_nothrow.unlock_nothrow();
+            scope (exit) mutex_nothrow.lock_nothrow();
+            yield();
+        }
+
+        private bool notified;
+    }
+
+private:
+    void dispatch()
+    {
+        import std.algorithm.mutation : remove;
+
+        while (m_fibers.length > 0)
+        {
+            auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
+            if (t !is null && !(cast(C.OwnerTerminated) t))
+            {
+                throw t;
+            }
+            if (m_fibers[m_pos].state == Fiber.State.TERM)
+            {
+                if (m_pos >= (m_fibers = remove(m_fibers, m_pos)).length)
+                    m_pos = 0;
+            }
+            else if (m_pos++ >= m_fibers.length - 1)
+            {
+                m_pos = 0;
+            }
+        }
+    }
+
+    void create(void delegate() op) nothrow
+    {
+        void wrap()
+        {
+            scope (exit)
+            {
+                thisInfo.cleanup();
+            }
+            op();
+        }
+
+        m_fibers ~= new InfoFiber(&wrap);
+    }
+
+private:
+    Fiber[] m_fibers;
+    size_t m_pos;
+}
+
+/// Our own little scheduler
+private final class LocalScheduler : BaseFiberScheduler
+{
+    import core.sync.condition;
+    import core.sync.mutex;
+
+    /// Just a FiberCondition with a state
+    private struct Waiting { FiberCondition c; bool busy; }
+
+    /// The 'Response' we are currently processing, if any
+    private C.Response pending;
+
+    /// Request IDs waiting for a response
+    private Waiting[ulong] waiting;
+
+    /// Should never be called from outside
+    public override Condition newCondition(Mutex m = null) nothrow
+    {
+        assert(0);
+    }
+
+    /// Get the next available request ID
+    public size_t getNextResponseId ()
+    {
+        static size_t last_idx;
+        return last_idx++;
+    }
+
+    public C.Response waitResponse (size_t id, Duration duration) nothrow
+    {
+        if (id !in this.waiting)
+            this.waiting[id] = Waiting(new FiberCondition, false);
+
+        Waiting* ptr = &this.waiting[id];
+        if (ptr.busy)
+            assert(0, "Trying to override a pending request");
+
+        // We yield and wait for an answer
+        ptr.busy = true;
+
+        if (duration == Duration.init)
+            ptr.c.wait();
+        else if (!ptr.c.wait(duration))
+            this.pending = C.Response(C.Status.Timeout);
+
+        ptr.busy = false;
+        // After control returns to us, `pending` has been filled
+        scope(exit) this.pending = C.Response.init;
+        return this.pending;
+    }
+
+    /// Called when a waiting condition was handled and can be safely removed
+    public void remove (size_t id)
+    {
+        this.waiting.remove(id);
+    }
+
+    /// Override `FiberScheduler.FiberCondition` to avoid mutexes
+    /// and usage of global state
+    private class FiberCondition : Condition
+    {
+        this() nothrow
+        {
+            super(null);
+            notified = false;
+        }
+
+        override void wait() nothrow
+        {
+            scope (exit) notified = false;
+            while (!notified)
+                this.outer.yield();
+        }
+
+        override bool wait(Duration period) nothrow
+        {
+            scope (exit) notified = false;
+
+            for (auto limit = MonoTime.currTime + period;
+                 !notified && !period.isNegative;
+                 period = limit - MonoTime.currTime)
+            {
+                this.outer.yield();
+            }
+            return notified;
+        }
+
+        override void notify() nothrow
+        {
+            notified = true;
+            this.outer.yield();
+        }
+
+        override void notifyAll() nothrow
+        {
+            notified = true;
+            this.outer.yield();
+        }
+
+        private bool notified;
+    }
+}
+
+
+/// We need a scheduler to simulate an event loop and to be re-entrant
+/// However, the one in `std.concurrency` is process-global (`__gshared`)
+private LocalScheduler scheduler;
+
+/// Whether this is the main thread
+private bool is_main_thread;
 
 /*******************************************************************************
 
@@ -294,7 +687,7 @@ public final class RemoteAPI (API) : API
 
         Control control;
 
-        try
+        try scheduler.start(()
         {
             bool terminated = false;
             auto sleep_inteval = dur!("msecs")(1);
@@ -332,7 +725,7 @@ public final class RemoteAPI (API) : API
                 });
                 Thread.sleep(sleep_inteval);
             }
-        }
+        });
         catch (Exception e)
             if (e !is exc)
                 throw e;
@@ -547,6 +940,13 @@ public final class RemoteAPI (API) : API
             mixin(q{
                 override ReturnType!(ovrld) } ~ member ~ q{ (Parameters!ovrld params)
                 {
+                    // we are in the main thread
+                    if (scheduler is null)
+                    {
+                        scheduler = new LocalScheduler;
+                        is_main_thread = true;
+                    }
+
                     // `std.concurrency.send/receive[Only]` is not `@safe` but
                     // this overload needs to be
                     auto res = () @trusted {

@@ -9,7 +9,7 @@ import core.thread;
 import std.datetime.systime;
 import std.variant;
 
-/*
+
 void main()
 {
     static interface API
@@ -44,8 +44,8 @@ void main()
     writeln("end");
     test.ctrl.shutdown();
 }
-*/
 
+/*
 void main()
 {
     import std.stdio;
@@ -87,3 +87,4 @@ void main()
     child.shutdown();
     thisInfo.cleanup();
 }
+*/
