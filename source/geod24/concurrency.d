@@ -37,6 +37,7 @@ import std.range.primitives;
 import std.range.interfaces : InputRange;
 import std.traits;
 public import std.variant;
+public import std.stdio;
 
 import core.atomic;
 import core.sync.condition;
@@ -1065,10 +1066,14 @@ private
 
             Message res_msg;
             Fiber fiber = Fiber.getThis();
+
+            writefln("request %s %s", fiber, req_msg);
+
             if (fiber !is null)
             {
                 shared(bool) is_waiting1 = true;
-                void stopWait1() {
+                void stopWait1()
+                {
                     is_waiting1 = false;
                 }
                 SudoFiber new_sf;
@@ -1085,7 +1090,8 @@ private
             else
             {
                 shared(bool) is_waiting2 = true;
-                void stopWait2() {
+                void stopWait2()
+                {
                     is_waiting2 = false;
                 }
                 SudoFiber new_sf;
@@ -1193,6 +1199,8 @@ private
                 else
                     onStandardReq(sf.req_msg, sf.res_msg);
 
+                writefln("process %s %s %s", sf.fiber, *sf.req_msg, *sf.res_msg);
+
                 if (sf.fiber !is null)
                 {
                     if (sf.swdg !is null)
@@ -1262,12 +1270,12 @@ private
 
     private:
 
-        private bool isControlMsg(Message* msg) @safe @nogc pure nothrow
+        bool isControlMsg(Message* msg) @safe @nogc pure nothrow
         {
             return msg.type != MsgType.standard;
         }
 
-        private bool isLinkDeadMsg(Message* msg) @safe @nogc pure nothrow
+        bool isLinkDeadMsg(Message* msg) @safe @nogc pure nothrow
         {
             return msg.type == MsgType.linkDead;
         }
