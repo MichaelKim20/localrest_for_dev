@@ -914,7 +914,6 @@ public final class RemoteAPI (API) : API
             C.send(this.childTid, FilterAPI(mangled, pretty));
         }
 
-
         /***********************************************************************
 
             Clear out any filtering set by a call to filter()
