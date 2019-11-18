@@ -2093,6 +2093,7 @@ private
             notified = true;
             switchContext();
         }
+
     private:
         void switchContext() nothrow
         {
@@ -2166,16 +2167,11 @@ private
                 //writefln("send 1 %s %s", sf.fiber, msg);
 
                 *(sf.msg_ptr) = msg;
-                this.mutex.unlock();
 
-                if (sf.fiber !is null)
-                {
-                    if (sf.swdg !is null)
-                        sf.swdg();
-                    //sf.fiber.call();
-                }
-                else if (sf.swdg !is null)
+                if (sf.swdg !is null)
                     sf.swdg();
+
+                this.mutex.unlock();
 
                 return true;
             }
@@ -2211,7 +2207,6 @@ private
                 while (is_waiting)
                     Fiber.yield();
 
-                Fiber.yield();
             }
             else
             {
@@ -2258,18 +2253,12 @@ private
 
                 *msg = sf.msg;
 
-                this.mutex.unlock();
+                //writefln("receive 1 %s", sf.msg);
 
-                //writefln("receive 1 %s %s", sf.msg);
-
-                if (sf.fiber !is null)
-                {
-                    if (sf.swdg !is null)
-                        sf.swdg();
-                    //sf.fiber.call();
-                }
-                else if (sf.swdg !is null)
+                if (sf.swdg !is null)
                     sf.swdg();
+
+                this.mutex.unlock();
 
                 return true;
             }
@@ -2300,7 +2289,6 @@ private
                 new_sf.fiber = f;
                 new_sf.msg_ptr = msg;
                 new_sf.swdg = &stopWait1;
-
 
                 this.recvq.insertBack(new_sf);
 
