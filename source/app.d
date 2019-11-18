@@ -66,6 +66,7 @@ void test2()
     {
         @safe:
         public @property ulong pubkey ();
+        public Json getValue (ulong idx);
         public string recv (Json data);
         public string recv (ulong index, Json data);
 
