@@ -51,10 +51,72 @@ void main()
 */
 void main()
 {
-    //test2();
-    test13();
+    //test0();
+    test14();
+    //test15();
+
+    //writefln("%s", Duration.init);
 }
-/*
+
+void test0()
+{
+    import std.container;
+    import std.algorithm;
+    import std.stdio;
+    import std.range : popFrontN, popBackN, walkLength;
+    struct MyData
+    {
+        string name;
+        int age;
+    }
+
+    DList!MyData data;
+
+    data.insertBack(MyData("Kim", 10));
+    data.insertBack(MyData("Lee", 11));
+    data.insertBack(MyData("Park", 12));
+
+    auto r = find(data[], MyData("Lee", 11));
+    if (!r.empty)
+    {
+        popBackN(r, r.walkLength-1);
+        writefln("%s", r);
+        data.remove(r);
+        writefln("%s", data[]);
+    }
+}
+
+void test1()
+{
+    writeln("test1 1");
+    static interface API
+    {
+        @safe:
+        public @property ulong pubkey ();
+        public Json getValue (ulong idx);
+        public Json getQuorumSet ();
+        public string recv (Json data);
+    }
+
+    static class MockAPI : API
+    {
+        @safe:
+        public override @property ulong pubkey ()
+        { return 42; }
+        public override Json getValue (ulong idx)
+        { assert(0); }
+        public override Json getQuorumSet ()
+        { assert(0); }
+        public override string recv (Json data)
+        { assert(0); }
+    }
+
+    scope test = RemoteAPI!API.spawn!MockAPI();
+    assert(test.pubkey() == 42);
+    test.ctrl.shutdown();
+    writeln("test1 2");
+}
+
 void test2()
 {
 
@@ -134,7 +196,7 @@ void test2()
         assert(node2.last() == "pubkey");
         node1.ctrl.shutdown();
         node2.ctrl.shutdown();
-        geod24.concurrency.send(parent, 42);
+        geod24.concurrency.send(parent, Duration.init, 42);
     }
     writeln("test2, 2");
 
@@ -227,12 +289,60 @@ void test3()
     nodes.each!(node => node.ctrl.shutdown());
     writeln("test3 - 9");
 }
-*/
 
 void test13()
 {
     import std.stdio;
-    writeln("test13");
+    writeln("test10");
+
+    import core.thread;
+    import std.exception;
+
+    static interface API
+    {
+        float getFloat();
+        size_t sleepFor (long dur);
+    }
+
+    static class Node : API
+    {
+        override float getFloat() { return 69.69; }
+        override size_t sleepFor (long dur)
+        {
+            Thread.sleep(msecs(dur));
+            return 42;
+        }
+    }
+
+    // node with no timeout
+    auto node = RemoteAPI!API.spawn!Node();
+    assert(node.sleepFor(80) == 42);  // no timeout
+
+    // node with a configured timeout
+    auto to_node = RemoteAPI!API.spawn!Node(500.msecs);
+
+    /// none of these should time out
+    assert(to_node.sleepFor(10) == 42);
+    assert(to_node.sleepFor(20) == 42);
+    assert(to_node.sleepFor(30) == 42);
+    assert(to_node.sleepFor(40) == 42);
+
+    assertThrown!Exception(to_node.sleepFor(2000));
+    Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
+    import std.stdio;
+    assert(cast(int)to_node.getFloat() == 69);
+
+    to_node.ctrl.shutdown();
+    node.ctrl.shutdown();
+
+    import std.stdio;
+    writeln("test10");
+}
+
+void test14()
+{
+    import std.stdio;
+    writeln("test14 --- 1");
     static import geod24.concurrency;
     import std.exception;
 
@@ -250,26 +360,36 @@ void test13()
 
         override void check ()
         {
-            auto node = new RemoteAPI!API(node_tid, 420.msecs);
-
-            // Requests are dropped, so it times out
+            auto node = new RemoteAPI!API(node_tid, 5000.msecs);
             assert(node.ping() == 42);
-            node.ctrl.sleep(1000.msecs, true);
-            assertThrown!Exception(node.ping());
+            // We need to return immediately so that the main thread
+            // puts us to sleep
+            geod24.LocalRest.runTask(() {
+                //node.ctrl.sleep(200.msecs);
+                assert(node.ping() == 42);
+            });
         }
     }
 
-    auto node_1 = RemoteAPI!API.spawn!Node();
-    auto node_2 = RemoteAPI!API.spawn!Node();
+    auto node_1 = RemoteAPI!API.spawn!Node(5000.msecs);
+    auto node_2 = RemoteAPI!API.spawn!Node(5000.msecs);
     node_tid = node_2.tid;
     node_1.check();
+    //writeln("test14 --- 2");
+    node_1.ctrl.sleep(300.msecs);
+    //writeln("test14 --- 3");
+    assert(node_1.ping() == 42);
+    //writeln("test14 --- 4");
+
+    //Thread.sleep(dur!("msecs")(1000));
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
+
     import std.stdio;
-    writeln("test13");
+    writeln("test14 --- 5");
 }
-/*
-void test14()
+
+void test15()
 {
     import std.stdio;
     writeln("test15");
@@ -304,4 +424,3 @@ void test14()
     import std.stdio;
     writeln("test15");
 }
-*/

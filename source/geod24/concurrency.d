@@ -38,6 +38,7 @@ public import std.stdio;
 import core.atomic;
 import core.sync.condition;
 import core.sync.mutex;
+import core.time : MonoTime;
 import core.thread;
 import std.range.primitives;
 import std.range.interfaces : InputRange;
@@ -56,7 +57,7 @@ import std.traits;
 
             // Send a message back to the owner thread
             // indicating success.
-            send(ownerTid, true);
+            send(ownerTid, Duration.init, true);
         });
     }
 
@@ -64,7 +65,7 @@ import std.traits;
     auto childTid = spawn(&spawnedFunc, thisTid);
 
     // Send the number 42 to this new thread.
-    send(childTid, 42);
+    send(childTid, Duration.init, 42);
 
     // Receive the result code.
     auto wasSuccessful = receiveOnly!(bool);
@@ -107,12 +108,14 @@ private
     {
         MsgType type;
         Variant data;
+        Duration timeout;
 
-        this(T...)(MsgType t, T vals) if (T.length > 0)
+        this(T...)(MsgType t, Duration to, T vals) if (T.length > 0)
         {
             static if (T.length == 1)
             {
                 type = t;
+                timeout = to;
                 data = vals[0];
             }
             else
@@ -120,6 +123,7 @@ private
                 import std.typecons : Tuple;
 
                 type = t;
+                timeout = to;
                 data = Tuple!(T)(vals);
             }
         }
@@ -317,11 +321,13 @@ private:
     this(MessageBox m) @safe pure nothrow @nogc
     {
         mbox = m;
+        //timeout = Duration.init;
     }
 
     MessageBox mbox;
 
 public:
+    //Duration timeout;
 
     /**
      * Generate a convenient string for identifying this Tid.  This is only
@@ -389,12 +395,12 @@ public:
     {
         string res = receiveOnly!string();
         assert(res == "Main calling");
-        ownerTid.send("Child responding");
+        ownerTid.send(Duration.init, "Child responding");
     }
 
     assertThrown!TidMissingException(ownerTid);
     auto child = spawn(&fun);
-    child.send("Main calling");
+    child.send(Duration.init, "Main calling");
     string res = receiveOnly!string();
     assert(res == "Child responding");
 }
@@ -481,7 +487,7 @@ if (isSpawnable!(F, T))
 @system unittest
 {
     spawn({
-        ownerTid.send("This is so great!");
+        ownerTid.send(Duration.init, "This is so great!");
     });
     assert(receiveOnly!string == "This is so great!");
 }
@@ -602,16 +608,25 @@ if (isSpawnable!(F, T))
     static assert( __traits(compiles, spawn(callable11, 11)));
 }
 
+
+enum SendStatus
+{
+    success,
+    queue,
+    timeout,
+    closed,
+}
+
 /**
  * Places the values as a message at the back of tid's message queue.
  *
  * Sends the supplied value to the thread represented by tid.  As with
  * $(REF spawn, std,concurrency), `T` must not have unshared aliasing.
  */
-void send(T...)(Tid tid, T vals)
+SendStatus send(T...)(Tid tid, Duration timeout, T vals)
 {
     static assert(!hasLocalAliasing!(T), "Aliases to mutable thread-local data not allowed.");
-    _send(tid, vals);
+    return _send(tid, timeout, vals);
 }
 
 /**
@@ -621,28 +636,28 @@ void send(T...)(Tid tid, T vals)
  * queue instead of at the back.  This function is typically used for
  * out-of-band communication, to signal exceptional conditions, etc.
  */
-void prioritySend(T...)(Tid tid, T vals)
+SendStatus prioritySend(T...)(Tid tid, Duration timeout, T vals)
 {
     static assert(!hasLocalAliasing!(T), "Aliases to mutable thread-local data not allowed.");
-    _send(MsgType.priority, tid, vals);
+    return _send(MsgType.priority, tid, timeout, vals);
 }
 
 /*
  * ditto
  */
-private void _send(T...)(Tid tid, T vals)
+private SendStatus _send(T...)(Tid tid, Duration timeout, T vals)
 {
-    _send(MsgType.standard, tid, vals);
+    return _send(MsgType.standard, tid, timeout, vals);
 }
 
 /*
  * Implementation of send.  This allows parameter checking to be different for
  * both Tid.send() and .send().
  */
-private void _send(T...)(MsgType type, Tid tid, T vals)
+private SendStatus _send(T...)(MsgType type, Tid tid, Duration timeout, T vals)
 {
-    auto msg = Message(type, vals);
-    tid.mbox.put(msg);
+    auto msg = Message(type, timeout, vals);
+    return tid.mbox.put(msg);
 }
 
 /**
@@ -680,27 +695,27 @@ do
     auto process = ()
     {
         receive(
-            (int i) { ownerTid.send(1); },
-            (double f) { ownerTid.send(2); },
-            (Variant v) { ownerTid.send(3); }
+            (int i) { ownerTid.send(Duration.init, 1); },
+            (double f) { ownerTid.send(Duration.init, 2); },
+            (Variant v) { ownerTid.send(Duration.init, 3); }
         );
     };
 
     {
         auto tid = spawn(process);
-        send(tid, 42);
+        send(tid, Duration.init, 42);
         assert(receiveOnly!int == 1);
     }
 
     {
         auto tid = spawn(process);
-        send(tid, 3.14);
+        send(tid, Duration.init, 3.14);
         assert(receiveOnly!int == 2);
     }
 
     {
         auto tid = spawn(process);
-        send(tid, "something else");
+        send(tid, Duration.init, "something else");
         assert(receiveOnly!int == 3);
     }
 }
@@ -802,7 +817,7 @@ do
     {
         assert(receiveOnly!int == 42);
     });
-    send(tid, 42);
+    send(tid, Duration.init, 42);
 }
 
 ///
@@ -812,7 +827,7 @@ do
     {
         assert(receiveOnly!string == "text");
     });
-    send(tid, "text");
+    send(tid, Duration.init, "text");
 }
 
 ///
@@ -828,7 +843,7 @@ do
         assert(msg[1].age == 31);
     });
 
-    send(tid, 0.5, Record("Alice", 31));
+    send(tid, Duration.init, 0.5, Record("Alice", 31));
 }
 
 @system unittest
@@ -838,16 +853,16 @@ do
         try
         {
             receiveOnly!string();
-            mainTid.send("");
+            mainTid.send(Duration.init, "");
         }
         catch (Throwable th)
         {
-            mainTid.send(th.msg);
+            mainTid.send(Duration.init, th.msg);
         }
     }
 
     auto tid = spawn(&t1, thisTid);
-    tid.send(1);
+    tid.send(Duration.init, 1);
     string result = receiveOnly!string();
     assert(result == "Unexpected message type: expected 'string', got 'int'");
 }
@@ -1068,9 +1083,9 @@ struct ThreadInfo
         if (ident.mbox !is null)
             ident.mbox.close();
         foreach (tid; links.keys)
-            _send(MsgType.linkDead, tid, ident);
+            _send(MsgType.linkDead, tid, Duration.init, ident);
         if (owner != Tid.init)
-            _send(MsgType.linkDead, owner, ident);
+            _send(MsgType.linkDead, owner, Duration.init, ident);
         unregisterMe(); // clean up registry entries
     }
 }
@@ -1675,7 +1690,7 @@ private:
         while (i < 9)
             i = receiveOnly!int;
 
-        ownerTid.send(i * 2);
+        ownerTid.send(Duration.init, i * 2);
     });
 
     auto r = new Generator!int({
@@ -1684,7 +1699,7 @@ private:
     });
 
     foreach (e; r)
-        tid.send(e);
+        tid.send(Duration.init, e);
 
     assert(receiveOnly!int == 18);
 }
@@ -1752,7 +1767,7 @@ void yield(T)(T value)
 
             foreach (e; r)
             {
-                tid.send(e);
+                tid.send(Duration.init, e);
             }
         });
         scheduler = null;
@@ -1810,6 +1825,10 @@ private
             this.mutex = new Mutex();
             this.qsize = 12;            
             this.closed = false;
+
+            this.timed_wait = false;
+            this.timed_wait_period = Duration.init;
+            this.limit = MonoTime.currTime;
         }
 
         ///
@@ -1820,8 +1839,7 @@ private
                 return this.closed;
             }
         }
-
-
+/*
         private bool _put (ref Message msg)
         {
             this.mutex.lock();
@@ -1829,6 +1847,56 @@ private
             {
                 this.mutex.unlock();
                 return false;
+            }
+
+            Fiber f = Fiber.getThis();
+            if (f !is null)
+            {
+                shared(bool) is_waiting = true;
+                void stopWait1() {
+                    is_waiting = false;
+                }
+                SudoFiber new_sf;
+                new_sf.fiber = f;
+                new_sf.msg = msg;
+                new_sf.swdg = &stopWait1;
+                //writefln("send 3 %s %s", new_sf.fiber, msg);
+                this.share_queue.insertBack(new_sf);
+                this.mutex.unlock();
+
+                while (is_waiting)
+                    Fiber.yield();
+            }
+            else
+            {
+                shared(bool) is_waiting = true;
+                void stopWait2() {
+                    is_waiting = false;
+                }
+                SudoFiber new_sf;
+                new_sf.fiber = null;
+                new_sf.msg = msg;
+                new_sf.swdg = &stopWait2;
+                //writefln("send 4 %s %s", new_sf.fiber, msg);
+                this.share_queue.insertBack(new_sf);
+                this.mutex.unlock();
+
+                while (is_waiting)
+                    Thread.sleep(dur!("msecs")(1));
+            }
+            return true;
+        }
+*/
+        private SendStatus _put (ref Message msg)
+        {
+            import std.algorithm;
+            import std.range : popBackN, walkLength;
+
+            this.mutex.lock();
+            if (this.closed)
+            {
+                this.mutex.unlock();
+                return SendStatus.closed;
             }
 
             if (this.recvq[].walkLength > 0)
@@ -1843,7 +1911,7 @@ private
 
                 this.mutex.unlock();
 
-                return true;
+                return SendStatus.success;
             }
 
             if (this.queue[].walkLength < this.qsize)
@@ -1851,7 +1919,11 @@ private
                 this.queue.insertBack(msg);
                 //writefln("send 2 %s",  msg);
                 this.mutex.unlock();
-                return true;
+
+                if (this.timed_wait)
+                    this.wait(this.timed_wait_period);
+                
+                return SendStatus.queue;
             }
 
             Fiber f = Fiber.getThis();
@@ -1869,8 +1941,36 @@ private
                 this.sendq.insertBack(new_sf);
                 this.mutex.unlock();
 
-                while (is_waiting)
-                    Fiber.yield();
+                if (msg.timeout > Duration.init)
+                {
+                    auto start = MonoTime.currTime;
+                    while (is_waiting)
+                    {
+                        auto end = MonoTime.currTime();
+                        auto elapsed = end - start;
+                        if (elapsed > msg.timeout)
+                        {
+                            // remove timeout element 
+                            this.mutex.lock();
+                            auto range = find(this.sendq[], new_sf);
+                            if (!range.empty)
+                            {
+                                popBackN(range, range.walkLength-1);
+                                this.sendq.remove(range);
+                            }
+                            scope(exit) this.mutex.unlock();
+
+                            return SendStatus.timeout;
+                        }
+                        Fiber.yield();
+                    }
+                }
+                else
+                {
+                    while (is_waiting)
+                        Fiber.yield();
+                }
+
             }
             else
             {
@@ -1886,10 +1986,36 @@ private
                 this.sendq.insertBack(new_sf);
                 this.mutex.unlock();
 
-                while (is_waiting)
-                    Thread.sleep(dur!("msecs")(1));
+                if (msg.timeout > Duration.init)
+                {
+                    auto start = MonoTime.currTime;
+                    while (is_waiting)
+                    {
+                        auto end = MonoTime.currTime();
+                        auto elapsed = end - start;
+                        if (elapsed > msg.timeout)
+                        {
+                            // remove timeout element 
+                            this.mutex.lock();
+                            auto range = find(this.sendq[], new_sf);
+                            if (!range.empty)
+                            {
+                                popBackN(range, range.walkLength-1);
+                                this.sendq.remove(range);
+                            }
+                            scope(exit) this.mutex.unlock();
+                            return SendStatus.timeout;
+                        }
+                        Thread.sleep(dur!("msecs")(1));
+                    }
+                }
+                else
+                {
+                    while (is_waiting)
+                        Thread.sleep(dur!("msecs")(1));
+                }
             }
-            return true;
+            return SendStatus.success;
         }
 
         private bool _get (Message* msg)
@@ -1910,11 +2036,13 @@ private
                 *msg = sf.msg;
 
                 //writefln("receive 1 %s", sf.msg);
-
                 if (sf.swdg !is null)
                     sf.swdg();
 
                 this.mutex.unlock();
+
+                if (this.timed_wait)
+                    this.wait(this.timed_wait_period);
 
                 return true;
             }
@@ -1929,6 +2057,9 @@ private
 
                 //writefln("receive 2 %s", *msg);
 
+                if (this.timed_wait)
+                    this.wait(this.timed_wait_period);
+
                 return true;
             }
 
@@ -1940,7 +2071,7 @@ private
                 void stopWait1() {
                     is_waiting1 = false;
                 }
-
+                
                 SudoFiber new_sf;
                 new_sf.fiber = f;
                 new_sf.msg_ptr = msg;
@@ -1953,13 +2084,17 @@ private
                 while (is_waiting1)
                     Fiber.yield();
 
+                if (this.timed_wait)
+                    this.wait(this.timed_wait_period);
+
+
                 return true;
             }
             else
             {
-                shared(bool) is_waiting = true;
+                shared(bool) is_waiting2 = true;
                 void stopWait2() {
-                    is_waiting = false;
+                    is_waiting2 = false;
                 }
                 SudoFiber new_sf;
                 new_sf.fiber = null;
@@ -1969,11 +2104,13 @@ private
                 //writefln("receive 4 %s %s", new_sf.fiber, *new_sf.msg_ptr);
 
                 this.recvq.insertBack(new_sf);
-
                 this.mutex.unlock();
 
-                while (is_waiting)
+                while (is_waiting2)
                     Thread.sleep(dur!("msecs")(1));
+
+                if (this.timed_wait)
+                    this.wait(this.timed_wait_period);
 
                 return true;
             }
@@ -1992,9 +2129,9 @@ private
          * Throws:
          *  An exception if the queue is full and onCrowdingDoThis throws.
          */
-        final void put (ref Message msg)
+        final SendStatus put (ref Message msg)
         {
-            this._put(msg);
+            return this._put(msg);
         }
 
         /*
@@ -2023,14 +2160,17 @@ private
             {
                 alias Ops = AliasSeq!(T[1 .. $]);
                 alias ops = vals[1 .. $];
-                enum timedWait = true;
-                Duration period = vals[0];
+
+                this.timed_wait = true;
+                this.timed_wait_period = vals[0];
             }
             else
             {
                 alias Ops = AliasSeq!(T);
                 alias ops = vals[0 .. $];
-                enum timedWait = false;
+
+                this.timed_wait = false;
+                this.timed_wait_period = Duration.init;
             }
 
             bool onStandardMsg(ref Message msg)
@@ -2069,7 +2209,7 @@ private
                     if (depends && tid != thisInfo.owner)
                     {
                         auto e = new LinkTerminated(tid);
-                        auto m = Message(MsgType.standard, e);
+                        auto m = Message(MsgType.standard, Duration.init, e);
                         if (onStandardMsg(m))
                             return true;
                         throw e;
@@ -2079,7 +2219,7 @@ private
                 {
                     thisInfo.owner = Tid.init;
                     auto e = new OwnerTerminated(tid);
-                    auto m = Message(MsgType.standard, e);
+                    auto m = Message(MsgType.standard, Duration.init, e);
                     if (onStandardMsg(m))
                         return true;
                     throw e;
@@ -2118,28 +2258,13 @@ private
                 return false;
             }
 
-
-            void wait(Duration period)
+            if (this.timed_wait)
             {
-                import core.time : MonoTime;
-
-                for (auto limit = MonoTime.currTime + period;
-                    !period.isNegative;
-                    period = limit - MonoTime.currTime)
-                {
-                    yield();
-                }
+                this.limit = MonoTime.currTime + this.timed_wait_period;
+                //writefln("limit %s", typeof(limit));
             }
 
-            static if (timedWait)
-            {
-                import core.time : MonoTime;
-                if (period > Duration.zero)
-                    wait(period);
-            }
-
-            Message msg;
-
+            Message msg; 
             while (true)
             {
                 if (this._get(&msg))
@@ -2154,6 +2279,19 @@ private
             }
 
             return false;
+        }
+
+        private void wait(Duration period)
+        {
+            if (this.timed_wait_period > Duration.zero)
+            {
+                for (auto limit = MonoTime.currTime + period;
+                    !period.isNegative;
+                    period = limit - MonoTime.currTime)
+                {
+                    yield();
+                }
+            }
         }
 
         /*
@@ -2248,6 +2386,13 @@ private
 
         /// collection of recv waiters
         DList!SudoFiber recvq;
+
+        /// collection of send waiters
+        DList!SudoFiber share_queue;
+
+        bool timed_wait;
+        Duration timed_wait_period;
+        MonoTime limit;
     }
 
     private alias StopWaitDg = void delegate ();
@@ -2260,7 +2405,6 @@ private
         public Message* msg_ptr;
         public StopWaitDg swdg;
     }
-
 }
 
 @system unittest
@@ -2279,15 +2423,15 @@ private
                 return false;
             return true;
         }, (string val) { assert(false); });
-        prioritySend(tid, "done");
+        prioritySend(tid, Duration.init, "done");
     }
 
     static void runTest(Tid tid)
     {
-        send(tid, 42, 86);
-        send(tid, tuple(42, 86));
-        send(tid, "hello", "there");
-        send(tid, "the quick brown fox");
+        send(tid, Duration.init, 42, 86);
+        send(tid, Duration.init, tuple(42, 86));
+        send(tid, Duration.init, "hello", "there");
+        send(tid, Duration.init, "the quick brown fox");
         receive((string val) { assert(val == "done"); });
     }
 
@@ -2372,7 +2516,7 @@ auto ref initOnce(alias var)(lazy typeof(var) init)
     }
 
     foreach (_; 0 .. 10)
-        spawn({ ownerTid.send(MySingleton.instance.val); });
+        spawn({ ownerTid.send(Duration.init, MySingleton.instance.val); });
     foreach (_; 0 .. 10)
         assert(receiveOnly!size_t == MySingleton.instance.val);
     assert(MySingleton.cnt == 1);
@@ -2434,7 +2578,7 @@ auto ref initOnce(alias var)(lazy typeof(var) init, Mutex mutex)
     spawn({
         // use a different mutex for varB to avoid a dead-lock
         initOnce!varB(true, m);
-        ownerTid.send(true);
+        ownerTid.send(Duration.init, true);
     });
     // init depends on the result of the spawned thread
     initOnce!varA(receiveOnly!bool);
@@ -2461,9 +2605,9 @@ auto ref initOnce(alias var)(lazy typeof(var) init, Mutex mutex)
     auto tid = spawn({
         auto arr = receiveOnly!(shared(int)[]);
         arr[0] = 5;
-        ownerTid.send(true);
+        ownerTid.send(Duration.init, true);
     });
-    tid.send(x);
+    tid.send(Duration.init, x);
     receiveOnly!(bool);
     assert(x[0] == 5);
 }

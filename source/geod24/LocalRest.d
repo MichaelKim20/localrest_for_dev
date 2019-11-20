@@ -83,6 +83,7 @@ import vibe.data.json;
 static import C = geod24.concurrency;
 import std.meta : AliasSeq;
 import std.traits : Parameters, ReturnType;
+import std.stdio;
 
 import core.thread;
 import core.time;
@@ -528,6 +529,7 @@ public final class RemoteAPI (API) : API
         Duration timeout = Duration.init)
     {
         auto childTid = C.spawn(&spawned!(Impl), args);
+        //childTid.timeout = timeout;
         return new RemoteAPI(childTid, true, timeout);
     }
 
@@ -572,7 +574,7 @@ public final class RemoteAPI (API) : API
                         {
                             // we have to send back a message
                             import std.format;
-                            C.send(cmd.sender, Response(Status.Failed, cmd.id,
+                            C.send(cmd.sender, Duration.init, Response(Status.Failed, cmd.id,
                                 format("Filtered method '%%s'", filter.pretty_func)));
                             return;
                         }
@@ -586,18 +588,18 @@ public final class RemoteAPI (API) : API
                                     cmd.id,
                                     node.%1$s(args.args).serializeToJsonString());
                             import std.stdio;
-                            C.send(cmd.sender, res);
+                            C.send(cmd.sender, Duration.init, res);
                         }
                         else
                         {
                             node.%1$s(args.args);
-                            C.send(cmd.sender, Response(Status.Success, cmd.id));
+                            C.send(cmd.sender, Duration.init, Response(Status.Success, cmd.id));
                         }
                     }
                     catch (Throwable t)
                     {
                         // Our sender expects a response
-                        C.send(cmd.sender, Response(Status.Failed, cmd.id, t.toString()));
+                        C.send(cmd.sender, Duration.init, Response(Status.Failed, cmd.id, t.toString()));
                     }
 
                     return;
@@ -809,7 +811,7 @@ public final class RemoteAPI (API) : API
 
         public void shutdown () @trusted
         {
-            C.send(this.childTid, ShutdownCommand());
+            C.send(this.childTid, Duration.init, ShutdownCommand());
         }
 
         /***********************************************************************
@@ -830,7 +832,7 @@ public final class RemoteAPI (API) : API
 
         public void sleep (Duration d, bool dropMessages = false) @trusted
         {
-            C.send(this.childTid, TimeCommand(d, dropMessages));
+            C.send(this.childTid, Duration.init, TimeCommand(d, dropMessages));
         }
 
         /***********************************************************************
@@ -911,7 +913,7 @@ public final class RemoteAPI (API) : API
                 enum mangled = getBestMatch!Overloads;
             }
 
-            C.send(this.childTid, FilterAPI(mangled, pretty));
+            C.send(this.childTid, Duration.init, FilterAPI(mangled, pretty));
         }
 
         /***********************************************************************
@@ -922,7 +924,7 @@ public final class RemoteAPI (API) : API
 
         public void clearFilter () @trusted
         {
-            C.send(this.childTid, FilterAPI(""));
+            C.send(this.childTid, Duration.init, FilterAPI(""));
         }
     }
 
@@ -931,6 +933,7 @@ public final class RemoteAPI (API) : API
         Generate the API `override` which forward to the actual object
 
     ***************************************************************************/
+
 
     static foreach (member; __traits(allMembers, API))
         static foreach (ovrld; __traits(getOverloads, API, member))
@@ -952,43 +955,56 @@ public final class RemoteAPI (API) : API
                             .serializeToJsonString();
 
                         auto command = Command(C.thisTid(), scheduler.getNextResponseId(), ovrld.mangleof, serialized);
-                        C.send(this.childTid, command);
+                        auto status = C.send(this.childTid, this.timeout, command);
 
-                        // for the main thread, we run the "event loop" until
-                        // the request we're interested in receives a response.
-                        if (is_main_thread)
+                        if (status == C.SendStatus.queue)
                         {
-                            bool terminated = false;
-                            runTask(() {
-                                while (!terminated)
-                                {
-                                    C.receiveTimeout(10.msecs,
-                                        (Response res) {
-                                            if (scheduler !is null)
-                                            {
-                                                //while (res.id !in scheduler.waiting)
-                                                //    Fiber.yield();
-                                                scheduler.pending = res;
-                                                scheduler.waiting[res.id].c.notify();
-                                            }
-                                        });
-                                    if (scheduler !is null)
-                                        scheduler.yield();
-                                }
-                            });
+                            // for the main thread, we run the "event loop" until
+                            // the request we're interested in receives a response.
+                            if (is_main_thread)
+                            {
+                                bool terminated = false;
+                                runTask(() {
+                                    while (!terminated)
+                                    {
+                                        C.receiveTimeout(10.msecs,
+                                            (Response res) {
+                                                if (scheduler !is null)
+                                                {
+                                                    //while (res.id !in scheduler.waiting)
+                                                    //    Fiber.yield();
+                                                    scheduler.pending = res;
+                                                    scheduler.waiting[res.id].c.notify();
+                                                }
+                                            });
+                                        if (scheduler !is null)
+                                            scheduler.yield();
+                                    }
+                                });
 
-                            Response res;
-                            scheduler.start(() {
-                                res = scheduler.waitResponse(command.id, this.timeout);
-                                terminated = true;
-                            });
-                            return res;
+                                Response res;
+                                scheduler.start(() {
+                                    res = scheduler.waitResponse(command.id, this.timeout);
+                                    terminated = true;
+                                    if (res.status == Status.Timeout)
+                                        throw new Exception(serializeToJsonString("Request timed-out"));
+                                });
+                                return res;
+                            }
+                            else
+                            {
+                                return scheduler.waitResponse(command.id, this.timeout);
+                            }
                         }
-                        else
+                        else if ((status == C.SendStatus.timeout) || (status == C.SendStatus.closed))
                         {
+                            return Response(Status.Timeout, command.id);
+                        }
+                        else {
                             return scheduler.waitResponse(command.id, this.timeout);
                         }
                     }();
+                   
 
                     if (res.status == Status.Failed)
                         throw new Exception(res.data);
@@ -1002,6 +1018,7 @@ public final class RemoteAPI (API) : API
                 });
         }
 }
+
 /*
 /// Simple usage example
 unittest
@@ -1110,12 +1127,12 @@ unittest
         assert(node2.last() == "pubkey");
         node1.ctrl.shutdown();
         node2.ctrl.shutdown();
-        geod24.concurrency.send(parent, 42);
+        geod24.concurrency.send(parent, Duration.init, 42);
     }
 
-    auto testerFiber = geod24.concurrency.spawn(&testFunc, geod24.concurrency.thisTid);
+    //auto testerFiber = geod24.concurrency.spawn(&testFunc, geod24.concurrency.thisTid);
     // Make sure our main thread terminates after everyone else
-    geod24.concurrency.receiveOnly!int();
+    //geod24.concurrency.receiveOnly!int();
 }
 
 /// This network have different types of nodes in it
@@ -1195,7 +1212,9 @@ unittest
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
 }
+*/
 
+/*
 /// Support for circular nodes call
 unittest
 {
@@ -1250,7 +1269,7 @@ unittest
     writeln("test4");
 }
 
-
+/*
 /// Nodes can start tasks
 unittest
 {
@@ -1332,9 +1351,7 @@ unittest
     import std.stdio;
     writeln("test6");
 }
-*/
 
-/* no pass
 // Simulate temporary outage
 unittest
 {
@@ -1406,8 +1423,7 @@ unittest
     import std.stdio;
     writeln("test7");
 }
-*/
-/*
+
 // Filter commands
 unittest
 {
@@ -1548,9 +1564,7 @@ unittest
     import std.stdio;
     writeln("test8");
 }
-*/
 
-/*
 // request timeouts (from main thread)
 unittest
 {
@@ -1642,9 +1656,7 @@ unittest
     import std.stdio;
     writeln("test10");
 }
-*/
 
-/* NOT PASS
 // request timeouts (foreign node to another node)
 unittest
 {
@@ -1734,9 +1746,7 @@ unittest
     import std.stdio;
     writeln("test12");
 }
-*/
 
-/*
 // request timeouts with dropped messages
 unittest
 {
@@ -1811,17 +1821,21 @@ unittest
         }
     }
 
-    auto node_1 = RemoteAPI!API.spawn!Node(500.msecs);
+    auto node_1 = RemoteAPI!API.spawn!Node(5000.msecs);
     auto node_2 = RemoteAPI!API.spawn!Node();
     node_tid = node_2.tid;
     node_1.check();
     node_1.ctrl.sleep(300.msecs);
     assert(node_1.ping() == 42);
+
+    Thread.sleep(dur!("msecs")(100));
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
+
     import std.stdio;
     writeln("test14");
 }
+
 /*
 // Test explicit shutdown
 unittest
