@@ -52,6 +52,7 @@ void main()
 void main()
 {
     //test2();
+    //test11();
     test13();
 }
 /*
@@ -228,7 +229,50 @@ void test3()
     writeln("test3 - 9");
 }
 */
+void test11()
+{
+    import std.stdio;
+    writeln("test11");
+    static import geod24.concurrency;
+    import std.exception;
 
+    __gshared C.Tid node_tid;
+
+    static interface API
+    {
+        void check ();
+        int ping ();
+    }
+
+    static class Node : API
+    {
+        override int ping () { return 42; }
+
+        override void check ()
+        {
+            auto node = new RemoteAPI!API(node_tid, 5000.msecs);
+
+            // no time-out
+            writeln("node.ctrl.sleep(10.msecs);");
+            node.ctrl.sleep(10.msecs);
+            assert(node.ping() == 42);
+
+            // time-out
+            writeln("node.ctrl.sleep(2000.msecs);");
+            node.ctrl.sleep(2000.msecs);
+            assertThrown!Exception(node.ping());
+        }
+    }
+
+    auto node_1 = RemoteAPI!API.spawn!Node();
+    auto node_2 = RemoteAPI!API.spawn!Node();
+    node_tid = node_2.tid;
+    node_1.check();
+    node_1.ctrl.shutdown();
+    node_2.ctrl.shutdown();
+    import std.stdio;
+    writeln("test11");
+}
 void test13()
 {
     import std.stdio;

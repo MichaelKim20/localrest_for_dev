@@ -84,6 +84,8 @@ static import C = geod24.concurrency;
 import std.meta : AliasSeq;
 import std.traits : Parameters, ReturnType;
 
+import std.stdio;
+
 import core.thread;
 import core.time;
 
@@ -528,6 +530,7 @@ public final class RemoteAPI (API) : API
         Duration timeout = Duration.init)
     {
         auto childTid = C.spawn(&spawned!(Impl), args);
+        childTid.setTimeout(timeout);
         return new RemoteAPI(childTid, true, timeout);
     }
 
@@ -581,6 +584,7 @@ public final class RemoteAPI (API) : API
 
                         static if (!is(ReturnType!ovrld == void))
                         {
+                            writefln("handleCommand 7");
                             auto res = Response(
                                     Status.Success,
                                     cmd.id,
@@ -590,6 +594,7 @@ public final class RemoteAPI (API) : API
                         }
                         else
                         {
+                            writefln("handleCommand 8 %s", member);
                             node.%1$s(args.args);
                             C.send(cmd.sender, Response(Status.Success, cmd.id));
                         }
@@ -598,6 +603,7 @@ public final class RemoteAPI (API) : API
                     {
                         // Our sender expects a response
                         C.send(cmd.sender, Response(Status.Failed, cmd.id, t.toString()));
+                        writefln("handleCommand 9 %s", t);
                     }
 
                     return;
@@ -695,24 +701,49 @@ public final class RemoteAPI (API) : API
                             terminated = true;
                         },
                         (TimeCommand s)      {
+                            writefln("TimeCommand");
                             control.sleep_until = Clock.currTime + s.dur;
                             control.drop = s.drop;
                         },
                         (FilterAPI filter_api) {
+                            writefln("FilterAPI");
                             control.filter = filter_api;
                         },
                         (Response res) {
                             if (!isSleeping())
+                            {
                                 handle(res);
+                            }
                             else if (!control.drop)
-                                await_msgs ~= Variant(res);
+                            {
+                                writefln("add 1 %s", res);
+                                scheduler.spawn({
+                                    while (isSleeping())
+                                        Fiber.yield();
+                                    writefln("add 2 %s", res);
+                                    handle(res);
+                                });
+                                //await_msgs ~= Variant(res);
+                                //writefln("add 1 %s", res);
+                            }
                         },
-                        (Command cmd)
-                        {
-                            if (!isSleeping())
+                        (Command cmd) {
+                            if (!isSleeping()) 
+                            {
                                 handle(cmd);
+                            }
                             else if (!control.drop)
-                                await_msgs ~= Variant(cmd);
+                            {
+                                writefln("add 1 %s", cmd);
+                                scheduler.spawn({
+                                    while (isSleeping())
+                                        Fiber.yield();
+                                    writefln("add 2 %s", cmd);
+                                    handle(cmd);
+                                });
+                                //await_msgs ~= Variant(cmd);
+                                //writefln("add 2 %s", cmd);
+                            }
                         });
 
                     // now handle any leftover messages after any sleep() call
@@ -952,6 +983,7 @@ public final class RemoteAPI (API) : API
                             .serializeToJsonString();
 
                         auto command = Command(C.thisTid(), scheduler.getNextResponseId(), ovrld.mangleof, serialized);
+                        writefln("command 1 [%s] %s", C.thisTid(), command);
                         C.send(this.childTid, command);
 
                         // for the main thread, we run the "event loop" until
@@ -982,11 +1014,14 @@ public final class RemoteAPI (API) : API
                                 res = scheduler.waitResponse(command.id, this.timeout);
                                 terminated = true;
                             });
+                            writefln("response 1 [%s] %s", C.thisTid(), res);
                             return res;
                         }
                         else
                         {
-                            return scheduler.waitResponse(command.id, this.timeout);
+                            auto res = scheduler.waitResponse(command.id, this.timeout);
+                            writefln("response 2 [%s] %s", C.thisTid(), res);
+                            return res;
                         }
                     }();
 
@@ -1002,7 +1037,7 @@ public final class RemoteAPI (API) : API
                 });
         }
 }
-/*
+
 /// Simple usage example
 unittest
 {
@@ -1031,6 +1066,9 @@ unittest
     scope test = RemoteAPI!API.spawn!MockAPI();
     assert(test.pubkey() == 42);
     test.ctrl.shutdown();
+
+    import std.stdio;
+    writeln("test 1");
 }
 
 /// In a real world usage, users will most likely need to use the registry
@@ -1116,6 +1154,10 @@ unittest
     auto testerFiber = geod24.concurrency.spawn(&testFunc, geod24.concurrency.thisTid);
     // Make sure our main thread terminates after everyone else
     geod24.concurrency.receiveOnly!int();
+
+    import std.stdio;
+    writeln("test 2");
+
 }
 
 /// This network have different types of nodes in it
@@ -1194,6 +1236,10 @@ unittest
     assert(nodes[0].requests() == 7);
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
+
+
+    import std.stdio;
+    writeln("test 3");
 }
 
 /// Support for circular nodes call
@@ -1247,9 +1293,8 @@ unittest
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
     import std.stdio;
-    writeln("test4");
+    writeln("test 4");
 }
-
 
 /// Nodes can start tasks
 unittest
@@ -1292,16 +1337,22 @@ unittest
     auto node = RemoteAPI!API.spawn!Node();
     assert(node.getCounter() == 0);
     node.start();
+
+    import std.stdio;
+    //writefln("test 5 %s", node.getCounter());
     assert(node.getCounter() == 1);
+    //writefln("test 5 %s", node.getCounter());
     assert(node.getCounter() == 0);
     core.thread.Thread.sleep(1.seconds);
     // It should be 19 but some machines are very slow
     // (e.g. Travis Mac testers) so be safe
+    //writefln("test 5 %s", node.getCounter());
     assert(node.getCounter() >= 9);
+    //writefln("test 5 %s", node.getCounter());
     assert(node.getCounter() == 0);
     node.ctrl.shutdown();
     import std.stdio;
-    writeln("test5");
+    writeln("test 5");
 }
 
 // Sane name insurance policy
@@ -1330,11 +1381,10 @@ unittest
     static assert(!is(typeof(RemoteAPI!DoesntWork)));
     node.ctrl.shutdown();
     import std.stdio;
-    writeln("test6");
+    writeln("test 6");
 }
-*/
 
-/* no pass
+/*
 // Simulate temporary outage
 unittest
 {
@@ -1404,7 +1454,7 @@ unittest
     n1.ctrl.shutdown();
     n2.ctrl.shutdown();
     import std.stdio;
-    writeln("test7");
+    writeln("test 7");
 }
 */
 /*
@@ -1644,7 +1694,7 @@ unittest
 }
 */
 
-/* NOT PASS
+
 // request timeouts (foreign node to another node)
 unittest
 {
@@ -1734,9 +1784,9 @@ unittest
     import std.stdio;
     writeln("test12");
 }
-*/
 
-/*
+
+
 // request timeouts with dropped messages
 unittest
 {
@@ -1777,7 +1827,8 @@ unittest
     import std.stdio;
     writeln("test13");
 }
-*/
+
+/*
 // Test a node that gets a replay while it's delayed
 unittest
 {
@@ -1822,7 +1873,7 @@ unittest
     import std.stdio;
     writeln("test14");
 }
-/*
+
 // Test explicit shutdown
 unittest
 {

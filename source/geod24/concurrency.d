@@ -34,14 +34,15 @@ module geod24.concurrency;
 import std.container;
 public import std.variant;
 public import std.stdio;
+import std.range.primitives;
+import std.range.interfaces : InputRange;
+import std.traits;
 
 import core.atomic;
 import core.sync.condition;
 import core.sync.mutex;
+import core.time : MonoTime;
 import core.thread;
-import std.range.primitives;
-import std.range.interfaces : InputRange;
-import std.traits;
 
 ///
 @system unittest
@@ -107,6 +108,7 @@ private
     {
         MsgType type;
         Variant data;
+        MonoTime create_time;
 
         this(T...)(MsgType t, T vals) if (T.length > 0)
         {
@@ -122,6 +124,7 @@ private
                 type = t;
                 data = Tuple!(T)(vals);
             }
+            create_time = MonoTime.currTime;
         }
 
         @property auto convertsTo(T...)()
@@ -314,14 +317,16 @@ class TidMissingException : Exception
 struct Tid
 {
 private:
-    this(MessageBox m) @safe pure nothrow @nogc
+    this (MessageBox m) @safe pure nothrow @nogc
     {
         mbox = m;
+        timeout = Duration.init;
     }
 
     MessageBox mbox;
 
 public:
+    Duration timeout;
 
     /**
      * Generate a convenient string for identifying this Tid.  This is only
@@ -330,12 +335,17 @@ public:
      * that a Tid executed in the future will have the same toString() output
      * as another Tid that has already terminated.
      */
-    void toString(scope void delegate(const(char)[]) sink)
+    void toString (scope void delegate(const(char)[]) sink)
     {
         import std.format : formattedWrite;
         formattedWrite(sink, "Tid(%x)", cast(void*) mbox);
     }
 
+    void setTimeout (Duration d)
+    {
+        this.timeout = d;
+        mbox.setTimeout(d);
+    }
 }
 
 @system unittest
@@ -1805,15 +1815,20 @@ private
      */
     class MessageBox
     {
-        this() @trusted nothrow /* TODO: make @safe after relevant druntime PR gets merged */
+        this () @trusted nothrow /* TODO: make @safe after relevant druntime PR gets merged */
         {
             this.mutex = new Mutex();
             this.qsize = 12;            
             this.closed = false;
         }
 
+        public void setTimeout (Duration d)
+        {
+            this.timeout = d;
+        }
+
         ///
-        final @property bool isClosed() @safe @nogc pure
+        public @property bool isClosed () @safe @nogc pure
         {
             synchronized (this.mutex)
             {
@@ -1835,7 +1850,7 @@ private
             {
                 SudoFiber sf = this.recvq.front;
                 this.recvq.removeFront();
-                //writefln("send 1 %s %s", sf.fiber, msg);
+                writefln("send 1 %s", msg);
                 *(sf.msg_ptr) = msg;
 
                 if (sf.swdg !is null)
@@ -1849,46 +1864,32 @@ private
             if (this.queue[].walkLength < this.qsize)
             {
                 this.queue.insertBack(msg);
-                //writefln("send 2 %s",  msg);
+                writefln("send 2 %s",  msg);
                 this.mutex.unlock();
                 return true;
             }
 
-            Fiber f = Fiber.getThis();
-            if (f !is null)
-            {
-                shared(bool) is_waiting = true;
-                void stopWait1() {
-                    is_waiting = false;
-                }
-                SudoFiber new_sf;
-                new_sf.fiber = f;
-                new_sf.msg = msg;
-                new_sf.swdg = &stopWait1;
-                //writefln("send 3 %s %s", new_sf.fiber, msg);
-                this.sendq.insertBack(new_sf);
-                this.mutex.unlock();
-
-                while (is_waiting)
-                    Fiber.yield();
+            shared(bool) is_waiting = true;
+            void stopWait1() {
+                is_waiting = false;
             }
-            else
-            {
-                shared(bool) is_waiting = true;
-                void stopWait2() {
-                    is_waiting = false;
-                }
-                SudoFiber new_sf;
-                new_sf.fiber = null;
-                new_sf.msg = msg;
-                new_sf.swdg = &stopWait2;
-                //writefln("send 4 %s %s", new_sf.fiber, msg);
-                this.sendq.insertBack(new_sf);
-                this.mutex.unlock();
 
-                while (is_waiting)
+            SudoFiber new_sf;
+            new_sf.msg = msg;
+            new_sf.swdg = &stopWait1;
+            new_sf.create_time = MonoTime.currTime;
+            writefln("send 3 %s", msg);
+            this.sendq.insertBack(new_sf);
+            this.mutex.unlock();
+
+            while (is_waiting)
+            {
+                if (Fiber.getThis() !is null)
+                    Fiber.yield();
+                else
                     Thread.sleep(dur!("msecs")(1));
             }
+
             return true;
         }
 
@@ -1910,11 +1911,13 @@ private
                 *msg = sf.msg;
 
                 //writefln("receive 1 %s", sf.msg);
-
                 if (sf.swdg !is null)
                     sf.swdg();
 
                 this.mutex.unlock();
+
+                if (this.timed_wait)
+                    this.waitFromBase(sf.msg.create_time, this.timed_wait_period);
 
                 return true;
             }
@@ -1929,55 +1932,40 @@ private
 
                 //writefln("receive 2 %s", *msg);
 
+                if (this.timed_wait)
+                    this.waitFromBase(msg.create_time, this.timed_wait_period);
+
                 return true;
             }
+            shared(bool) is_waiting1 = true;
 
-            Fiber f = Fiber.getThis();
-            if (f !is null)
+            void stopWait1() {
+                is_waiting1 = false;
+            }
+
+            SudoFiber new_sf;
+            new_sf.msg_ptr = msg;
+            new_sf.swdg = &stopWait1;
+            new_sf.create_time = MonoTime.currTime;
+
+            this.recvq.insertBack(new_sf);
+
+            this.mutex.unlock();
+
+            while (is_waiting1)
             {
-                shared(bool) is_waiting1 = true;
-
-                void stopWait1() {
-                    is_waiting1 = false;
-                }
-
-                SudoFiber new_sf;
-                new_sf.fiber = f;
-                new_sf.msg_ptr = msg;
-                new_sf.swdg = &stopWait1;
-
-                this.recvq.insertBack(new_sf);
-
-                this.mutex.unlock();
-
-                while (is_waiting1)
+                if (Fiber.getThis() !is null)
                     Fiber.yield();
-
-                return true;
-            }
-            else
-            {
-                shared(bool) is_waiting = true;
-                void stopWait2() {
-                    is_waiting = false;
-                }
-                SudoFiber new_sf;
-                new_sf.fiber = null;
-                new_sf.msg_ptr = msg;
-                new_sf.swdg = &stopWait2;
-
-                //writefln("receive 4 %s %s", new_sf.fiber, *new_sf.msg_ptr);
-
-                this.recvq.insertBack(new_sf);
-
-                this.mutex.unlock();
-
-                while (is_waiting)
+                else
                     Thread.sleep(dur!("msecs")(1));
-
-                return true;
             }
+
+            if (this.timed_wait)
+                this.waitFromBase(new_sf.create_time, this.timed_wait_period);
+
+            return true;
         }
+
         /*
          * If maxMsgs is not set, the message is added to the queue and the
          * owner is notified.  If the queue is full, the message will still be
@@ -1992,7 +1980,7 @@ private
          * Throws:
          *  An exception if the queue is full and onCrowdingDoThis throws.
          */
-        final void put (ref Message msg)
+        public void put (ref Message msg)
         {
             this._put(msg);
         }
@@ -2013,7 +2001,7 @@ private
          * if the owner thread terminates and no existing messages match the
          * supplied ops.
          */
-        bool get(T...)(scope T vals)
+        public bool get(T...)(scope T vals)
         {
             import std.meta : AliasSeq;
 
@@ -2023,14 +2011,17 @@ private
             {
                 alias Ops = AliasSeq!(T[1 .. $]);
                 alias ops = vals[1 .. $];
-                enum timedWait = true;
-                Duration period = vals[0];
+
+                this.timed_wait = true;
+                this.timed_wait_period = vals[0];
             }
             else
             {
                 alias Ops = AliasSeq!(T);
                 alias ops = vals[0 .. $];
-                enum timedWait = false;
+
+                this.timed_wait = false;
+                this.timed_wait_period = Duration.init;
             }
 
             bool onStandardMsg(ref Message msg)
@@ -2118,28 +2109,12 @@ private
                 return false;
             }
 
-
-            void wait(Duration period)
+            if (this.timed_wait)
             {
-                import core.time : MonoTime;
-
-                for (auto limit = MonoTime.currTime + period;
-                    !period.isNegative;
-                    period = limit - MonoTime.currTime)
-                {
-                    yield();
-                }
-            }
-
-            static if (timedWait)
-            {
-                import core.time : MonoTime;
-                if (period > Duration.zero)
-                    wait(period);
+                this.limit = MonoTime.currTime + this.timed_wait_period;
             }
 
             Message msg;
-
             while (true)
             {
                 if (this._get(&msg))
@@ -2156,12 +2131,38 @@ private
             return false;
         }
 
+        private void wait(Duration period)
+        {
+            if (this.timed_wait_period > Duration.zero)
+            {
+                for (auto limit = MonoTime.currTime + period;
+                    !period.isNegative;
+                    period = limit - MonoTime.currTime)
+                {
+                    yield();
+                }
+            }
+        }
+
+        private void waitFromBase(MonoTime base, Duration period)
+        {
+            if (this.timed_wait_period > Duration.zero)
+            {
+                for (auto limit = base + period;
+                    !period.isNegative;
+                    period = limit - MonoTime.currTime)
+                {
+                    yield();
+                }
+            }
+        }
+
         /*
          * Called on thread termination.  This routine processes any remaining
          * control messages, clears out message queues, and sets a flag to
          * reject any future messages.
          */
-        final void close()
+        public void close()
         {
             static void onLinkDeadMsg(ref Message msg)
             {
@@ -2248,6 +2249,14 @@ private
 
         /// collection of recv waiters
         DList!SudoFiber recvq;
+
+        Duration timeout;
+
+
+
+        bool timed_wait;
+        Duration timed_wait_period;
+        MonoTime limit;
     }
 
     private alias StopWaitDg = void delegate ();
@@ -2255,12 +2264,11 @@ private
     ///
     private struct SudoFiber
     {
-        public Fiber fiber;
         public Message  msg;
         public Message* msg_ptr;
         public StopWaitDg swdg;
+        public MonoTime create_time;
     }
-
 }
 
 @system unittest
