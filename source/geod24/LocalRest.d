@@ -181,7 +181,6 @@ class BaseFiberScheduler : C.Scheduler
         }
     }
 
-
     /**
      * This creates a new Fiber for the supplied op and then starts the
      * dispatcher.
@@ -584,7 +583,6 @@ public final class RemoteAPI (API) : API
 
                         static if (!is(ReturnType!ovrld == void))
                         {
-                            writefln("handleCommand 7");
                             auto res = Response(
                                     Status.Success,
                                     cmd.id,
@@ -594,7 +592,6 @@ public final class RemoteAPI (API) : API
                         }
                         else
                         {
-                            writefln("handleCommand 8 %s", member);
                             node.%1$s(args.args);
                             C.send(cmd.sender, Response(Status.Success, cmd.id));
                         }
@@ -603,7 +600,6 @@ public final class RemoteAPI (API) : API
                     {
                         // Our sender expects a response
                         C.send(cmd.sender, Response(Status.Failed, cmd.id, t.toString()));
-                        writefln("handleCommand 9 %s", t);
                     }
 
                     return;
@@ -701,12 +697,10 @@ public final class RemoteAPI (API) : API
                             terminated = true;
                         },
                         (TimeCommand s)      {
-                            writefln("TimeCommand");
                             control.sleep_until = Clock.currTime + s.dur;
                             control.drop = s.drop;
                         },
                         (FilterAPI filter_api) {
-                            writefln("FilterAPI");
                             control.filter = filter_api;
                         },
                         (Response res) {
@@ -716,36 +710,31 @@ public final class RemoteAPI (API) : API
                             }
                             else if (!control.drop)
                             {
-                                writefln("add 1 %s", res);
                                 scheduler.spawn({
                                     while (isSleeping())
                                         Fiber.yield();
-                                    writefln("add 2 %s", res);
                                     handle(res);
                                 });
                                 //await_msgs ~= Variant(res);
-                                //writefln("add 1 %s", res);
                             }
                         },
                         (Command cmd) {
-                            if (!isSleeping()) 
+                            if (!isSleeping())
                             {
                                 handle(cmd);
                             }
                             else if (!control.drop)
                             {
-                                writefln("add 1 %s", cmd);
                                 scheduler.spawn({
                                     while (isSleeping())
                                         Fiber.yield();
-                                    writefln("add 2 %s", cmd);
                                     handle(cmd);
                                 });
                                 //await_msgs ~= Variant(cmd);
-                                //writefln("add 2 %s", cmd);
                             }
                         });
 
+                    /*
                     // now handle any leftover messages after any sleep() call
                     if (!isSleeping())
                     {
@@ -753,6 +742,7 @@ public final class RemoteAPI (API) : API
                         await_msgs.length = 0;
                         assumeSafeAppend(await_msgs);
                     }
+                    */
                 }
                 // Make sure the scheduler is not waiting for polling tasks
                 throw exc;
@@ -799,6 +789,8 @@ public final class RemoteAPI (API) : API
         this.childTid = tid;
         this.owner = isOwner;
         this.timeout = timeout;
+
+        this.childTid.setTimeout(timeout);
     }
 
     /***************************************************************************
@@ -983,7 +975,6 @@ public final class RemoteAPI (API) : API
                             .serializeToJsonString();
 
                         auto command = Command(C.thisTid(), scheduler.getNextResponseId(), ovrld.mangleof, serialized);
-                        writefln("command 1 [%s] %s", C.thisTid(), command);
                         C.send(this.childTid, command);
 
                         // for the main thread, we run the "event loop" until
@@ -1014,13 +1005,11 @@ public final class RemoteAPI (API) : API
                                 res = scheduler.waitResponse(command.id, this.timeout);
                                 terminated = true;
                             });
-                            writefln("response 1 [%s] %s", C.thisTid(), res);
                             return res;
                         }
                         else
                         {
                             auto res = scheduler.waitResponse(command.id, this.timeout);
-                            writefln("response 2 [%s] %s", C.thisTid(), res);
                             return res;
                         }
                     }();
@@ -1598,9 +1587,7 @@ unittest
     import std.stdio;
     writeln("test8");
 }
-*/
 
-/*
 // request timeouts (from main thread)
 unittest
 {
@@ -1694,7 +1681,6 @@ unittest
 }
 */
 
-
 // request timeouts (foreign node to another node)
 unittest
 {
@@ -1786,7 +1772,7 @@ unittest
 }
 
 
-
+/*
 // request timeouts with dropped messages
 unittest
 {
@@ -1828,7 +1814,7 @@ unittest
     writeln("test13");
 }
 
-/*
+
 // Test a node that gets a replay while it's delayed
 unittest
 {

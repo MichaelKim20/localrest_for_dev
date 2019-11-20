@@ -341,7 +341,7 @@ public:
         formattedWrite(sink, "Tid(%x)", cast(void*) mbox);
     }
 
-    void setTimeout (Duration d)
+    void setTimeout (Duration d) @safe pure nothrow @nogc
     {
         this.timeout = d;
         mbox.setTimeout(d);
@@ -612,16 +612,25 @@ if (isSpawnable!(F, T))
     static assert( __traits(compiles, spawn(callable11, 11)));
 }
 
+
+enum SendStatus
+{
+    success,
+    queue,
+    timeout,
+    closed,
+}
+
 /**
  * Places the values as a message at the back of tid's message queue.
  *
  * Sends the supplied value to the thread represented by tid.  As with
  * $(REF spawn, std,concurrency), `T` must not have unshared aliasing.
  */
-void send(T...)(Tid tid, T vals)
+SendStatus send(T...)(Tid tid, T vals)
 {
     static assert(!hasLocalAliasing!(T), "Aliases to mutable thread-local data not allowed.");
-    _send(tid, vals);
+    return _send(tid, vals);
 }
 
 /**
@@ -631,28 +640,28 @@ void send(T...)(Tid tid, T vals)
  * queue instead of at the back.  This function is typically used for
  * out-of-band communication, to signal exceptional conditions, etc.
  */
-void prioritySend(T...)(Tid tid, T vals)
+SendStatus prioritySend(T...)(Tid tid, T vals)
 {
     static assert(!hasLocalAliasing!(T), "Aliases to mutable thread-local data not allowed.");
-    _send(MsgType.priority, tid, vals);
+    return _send(MsgType.priority, tid, vals);
 }
 
 /*
  * ditto
  */
-private void _send(T...)(Tid tid, T vals)
+private SendStatus _send(T...)(Tid tid, T vals)
 {
-    _send(MsgType.standard, tid, vals);
+    return _send(MsgType.standard, tid, vals);
 }
 
 /*
  * Implementation of send.  This allows parameter checking to be different for
  * both Tid.send() and .send().
  */
-private void _send(T...)(MsgType type, Tid tid, T vals)
+private SendStatus _send(T...)(MsgType type, Tid tid, T vals)
 {
     auto msg = Message(type, vals);
-    tid.mbox.put(msg);
+    return tid.mbox.put(msg);
 }
 
 /**
@@ -1818,11 +1827,12 @@ private
         this () @trusted nothrow /* TODO: make @safe after relevant druntime PR gets merged */
         {
             this.mutex = new Mutex();
-            this.qsize = 12;            
+            this.qsize = 12;
             this.closed = false;
+            this.timeout = Duration.init;
         }
 
-        public void setTimeout (Duration d)
+        public void setTimeout (Duration d) @safe pure nothrow @nogc
         {
             this.timeout = d;
         }
@@ -1837,20 +1847,23 @@ private
         }
 
 
-        private bool _put (ref Message msg)
+        private SendStatus _put (ref Message msg)
         {
+            import std.algorithm;
+            import std.range : popBackN, walkLength;
+
             this.mutex.lock();
             if (this.closed)
             {
                 this.mutex.unlock();
-                return false;
+                return SendStatus.closed;
             }
 
             if (this.recvq[].walkLength > 0)
             {
                 SudoFiber sf = this.recvq.front;
                 this.recvq.removeFront();
-                writefln("send 1 %s", msg);
+                //writefln("send 1 %s", msg);
                 *(sf.msg_ptr) = msg;
 
                 if (sf.swdg !is null)
@@ -1858,15 +1871,15 @@ private
 
                 this.mutex.unlock();
 
-                return true;
+                return SendStatus.success;
             }
 
             if (this.queue[].walkLength < this.qsize)
             {
                 this.queue.insertBack(msg);
-                writefln("send 2 %s",  msg);
+                //writefln("send 2 %s",  msg);
                 this.mutex.unlock();
-                return true;
+                return SendStatus.queue;
             }
 
             shared(bool) is_waiting = true;
@@ -1878,19 +1891,49 @@ private
             new_sf.msg = msg;
             new_sf.swdg = &stopWait1;
             new_sf.create_time = MonoTime.currTime;
-            writefln("send 3 %s", msg);
+            //writefln("send 3 %s", msg);
             this.sendq.insertBack(new_sf);
             this.mutex.unlock();
 
-            while (is_waiting)
+            if (this.timeout > Duration.init)
             {
-                if (Fiber.getThis() !is null)
-                    Fiber.yield();
-                else
-                    Thread.sleep(dur!("msecs")(1));
-            }
+                auto start = MonoTime.currTime;
+                while (is_waiting)
+                {
+                    auto end = MonoTime.currTime();
+                    auto elapsed = end - start;
+                    if (elapsed > this.timeout)
+                    {
+                        // remove timeout element
+                        this.mutex.lock();
+                        auto range = find(this.sendq[], new_sf);
+                        if (!range.empty)
+                        {
+                            popBackN(range, range.walkLength-1);
+                            this.sendq.remove(range);
+                        }
+                        scope(exit) this.mutex.unlock();
 
-            return true;
+                        return SendStatus.timeout;
+                    }
+
+                    if (Fiber.getThis() !is null)
+                        Fiber.yield();
+                    else
+                        Thread.sleep(dur!("msecs")(1));
+                }
+            }
+            else
+            {
+                while (is_waiting)
+                {
+                    if (Fiber.getThis() !is null)
+                        Fiber.yield();
+                    else
+                        Thread.sleep(dur!("msecs")(1));
+                }
+            }
+            return SendStatus.success;
         }
 
         private bool _get (Message* msg)
@@ -1980,9 +2023,9 @@ private
          * Throws:
          *  An exception if the queue is full and onCrowdingDoThis throws.
          */
-        public void put (ref Message msg)
+        public SendStatus put (ref Message msg)
         {
-            this._put(msg);
+            return this._put(msg);
         }
 
         /*

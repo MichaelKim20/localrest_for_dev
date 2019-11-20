@@ -1823,7 +1823,7 @@ private
         this() @trusted nothrow /* TODO: make @safe after relevant druntime PR gets merged */
         {
             this.mutex = new Mutex();
-            this.qsize = 12;            
+            this.qsize = 12;
             this.closed = false;
 
             this.timed_wait = false;
@@ -1922,7 +1922,7 @@ private
 
                 if (this.timed_wait)
                     this.wait(this.timed_wait_period);
-                
+
                 return SendStatus.queue;
             }
 
@@ -1950,7 +1950,7 @@ private
                         auto elapsed = end - start;
                         if (elapsed > msg.timeout)
                         {
-                            // remove timeout element 
+                            // remove timeout element
                             this.mutex.lock();
                             auto range = find(this.sendq[], new_sf);
                             if (!range.empty)
@@ -1995,7 +1995,7 @@ private
                         auto elapsed = end - start;
                         if (elapsed > msg.timeout)
                         {
-                            // remove timeout element 
+                            // remove timeout element
                             this.mutex.lock();
                             auto range = find(this.sendq[], new_sf);
                             if (!range.empty)
@@ -2071,7 +2071,7 @@ private
                 void stopWait1() {
                     is_waiting1 = false;
                 }
-                
+
                 SudoFiber new_sf;
                 new_sf.fiber = f;
                 new_sf.msg_ptr = msg;
@@ -2264,7 +2264,7 @@ private
                 //writefln("limit %s", typeof(limit));
             }
 
-            Message msg; 
+            Message msg;
             while (true)
             {
                 if (this._get(&msg))

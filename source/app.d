@@ -51,10 +51,45 @@ void main()
 */
 void main()
 {
+    //test1();
     //test2();
-    //test11();
-    test13();
+    test11();
+    //test13();
+    //test14();
+    //test15();
 }
+
+void test1()
+{
+    static interface API
+    {
+        @safe:
+        public @property ulong pubkey ();
+        public Json getValue (ulong idx);
+        public Json getQuorumSet ();
+        public string recv (Json data);
+    }
+
+    static class MockAPI : API
+    {
+        @safe:
+        public override @property ulong pubkey ()
+        { return 42; }
+        public override Json getValue (ulong idx)
+        { assert(0); }
+        public override Json getQuorumSet ()
+        { assert(0); }
+        public override string recv (Json data)
+        { assert(0); }
+    }
+
+    scope test = RemoteAPI!API.spawn!MockAPI();
+    assert(test.pubkey() == 42);
+    test.ctrl.shutdown();
+    import std.stdio;
+    writeln("test 1");
+}
+
 /*
 void test2()
 {
@@ -254,7 +289,7 @@ void test11()
 
             // no time-out
             writeln("node.ctrl.sleep(10.msecs);");
-            node.ctrl.sleep(10.msecs);
+            node.ctrl.sleep(1.msecs);
             assert(node.ping() == 42);
 
             // time-out
@@ -273,6 +308,7 @@ void test11()
     import std.stdio;
     writeln("test11");
 }
+
 void test13()
 {
     import std.stdio;
@@ -312,8 +348,58 @@ void test13()
     import std.stdio;
     writeln("test13");
 }
-/*
+
 void test14()
+{
+    import std.stdio;
+    writeln("test14 --- 1");
+    static import geod24.concurrency;
+    import std.exception;
+
+    __gshared C.Tid node_tid;
+
+    static interface API
+    {
+        void check ();
+        int ping ();
+    }
+
+    static class Node : API
+    {
+        override int ping () { return 42; }
+
+        override void check ()
+        {
+            auto node = new RemoteAPI!API(node_tid, 5000.msecs);
+            assert(node.ping() == 42);
+            // We need to return immediately so that the main thread
+            // puts us to sleep
+            geod24.LocalRest.runTask(() {
+                //node.ctrl.sleep(200.msecs);
+                assert(node.ping() == 42);
+            });
+        }
+    }
+
+    auto node_1 = RemoteAPI!API.spawn!Node(5000.msecs);
+    auto node_2 = RemoteAPI!API.spawn!Node(5000.msecs);
+    node_tid = node_2.tid;
+    node_1.check();
+    //writeln("test14 --- 2");
+    node_1.ctrl.sleep(300.msecs);
+    //writeln("test14 --- 3");
+    assert(node_1.ping() == 42);
+    //writeln("test14 --- 4");
+
+    //Thread.sleep(dur!("msecs")(1000));
+    node_1.ctrl.shutdown();
+    node_2.ctrl.shutdown();
+
+    import std.stdio;
+    writeln("test14 --- 5");
+}
+
+void test15()
 {
     import std.stdio;
     writeln("test15");
@@ -348,4 +434,3 @@ void test14()
     import std.stdio;
     writeln("test15");
 }
-*/
