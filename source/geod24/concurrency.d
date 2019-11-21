@@ -99,7 +99,6 @@ private
     enum MsgType
     {
         standard,
-        priority,
         linkDead,
     }
 
@@ -259,25 +258,6 @@ class LinkTerminated : Exception
     Tid tid;
 }
 
-/**
- * Thrown if a message was sent to a thread via
- * $(REF prioritySend, std,concurrency) and the receiver does not have a handler
- * for a message of this type.
- */
-class PriorityMessageException : Exception
-{
-    ///
-    this(Variant vals)
-    {
-        super("Priority message");
-        message = vals;
-    }
-
-    /**
-     * The message that was sent.
-     */
-    Variant message;
-}
 
 /**
  * Thrown on mailbox crowding if the mailbox is configured with
@@ -632,19 +612,6 @@ SendStatus send(T...)(Tid tid, T vals)
 {
     static assert(!hasLocalAliasing!(T), "Aliases to mutable thread-local data not allowed.");
     return _send(tid, vals);
-}
-
-/**
- * Places the values as a message on the front of tid's message queue.
- *
- * Send a message to `tid` but place it at the front of `tid`'s message
- * queue instead of at the back.  This function is typically used for
- * out-of-band communication, to signal exceptional conditions, etc.
- */
-SendStatus prioritySend(T...)(Tid tid, T vals)
-{
-    static assert(!hasLocalAliasing!(T), "Aliases to mutable thread-local data not allowed.");
-    return _send(MsgType.priority, tid, vals);
 }
 
 /*
@@ -2258,12 +2225,7 @@ private
 
         bool isControlMsg(ref Message msg) @safe @nogc pure nothrow
         {
-            return msg.type != MsgType.standard && msg.type != MsgType.priority;
-        }
-
-        bool isPriorityMsg(ref Message msg) @safe @nogc pure nothrow
-        {
-            return msg.type == MsgType.priority;
+            return msg.type != MsgType.standard;
         }
 
         bool isLinkDeadMsg(ref Message msg) @safe @nogc pure nothrow
@@ -2308,51 +2270,6 @@ private
         public StopWaitDg swdg;
         public MonoTime create_time;
     }
-}
-
-@system unittest
-{
-    import std.typecons : tuple, Tuple;
-
-    static void testfn(Tid tid)
-    {
-        receive((float val) { assert(0); }, (int val, int val2) {
-            assert(val == 42 && val2 == 86);
-        });
-        receive((Tuple!(int, int) val) { assert(val[0] == 42 && val[1] == 86); });
-        receive((Variant val) {  });
-        receive((string val) {
-            if ("the quick brown fox" != val)
-                return false;
-            return true;
-        }, (string val) { assert(false); });
-        prioritySend(tid, "done");
-    }
-
-    static void runTest(Tid tid)
-    {
-        send(tid, 42, 86);
-        send(tid, tuple(42, 86));
-        send(tid, "hello", "there");
-        send(tid, "the quick brown fox");
-        receive((string val) { assert(val == "done"); });
-    }
-
-    static void simpleTest()
-    {
-        auto tid = spawn(&testfn, thisTid);
-        runTest(tid);
-
-        // Run the test again with a limited mailbox size.
-        tid = spawn(&testfn, thisTid);
-        runTest(tid);
-    }
-
-    simpleTest();
-
-    scheduler = new ThreadScheduler;
-    simpleTest();
-    scheduler = null;
 }
 
 private @property shared(Mutex) initOnceLock()
