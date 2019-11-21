@@ -960,11 +960,22 @@ public final class RemoteAPI (API) : API
                     auto res = () @trusted {
                         auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                             .serializeToJsonString();
+
+                        MonoTime start_time = MonoTime.currTime;
                         auto command = Command(C.thisTid(), scheduler.getNextResponseId(), ovrld.mangleof, serialized);
                         auto status = C.send(this.childTid, command);
+                        MonoTime end_time = MonoTime.currTime;
 
                         if ((status == C.SendStatus.queue) || (status == C.SendStatus.success))
                         {
+                            Duration timeout = this.timeout;
+                            if (this.timeout != Duration.init)
+                            {
+                                timeout = this.timeout - (end_time - start_time);
+                                if (timeout.isNegative)
+                                    timeout = Duration.init;
+                            } 
+
                             // for the main thread, we run the "event loop" until
                             // the request we're interested in receives a response.
                             if (is_main_thread)
@@ -988,14 +999,14 @@ public final class RemoteAPI (API) : API
 
                                 Response res;
                                 scheduler.start(() {
-                                    res = scheduler.waitResponse(command.id, this.timeout);
+                                    res = scheduler.waitResponse(command.id, timeout);
                                     terminated = true;
                                 });
                                 return res;
                             }
                             else
                             {
-                                return scheduler.waitResponse(command.id, this.timeout);
+                                return scheduler.waitResponse(command.id, timeout);
                             }
                         }
                         else 
@@ -1003,7 +1014,6 @@ public final class RemoteAPI (API) : API
                             return Response(Status.Timeout, command.id);
                         }
                     }();
-
 
                     if (res.status == Status.Failed)
                         throw new Exception(res.data);
