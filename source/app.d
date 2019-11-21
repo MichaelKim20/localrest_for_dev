@@ -14,49 +14,17 @@ import vibe.http.router;
 import vibe.http.server;
 import vibe.web.rest;
 
-/*
-void main()
-{
-    static interface API
-    {
-        @safe:
-        public @property ulong pubkey ();
-        public Json getValue (ulong idx);
-        public Json getQuorumSet ();
-        public string recv (Json data);
-    }
-
-    static class MockAPI : API
-    {
-        @safe:
-        public override @property ulong pubkey ()
-        {
-            return 42;
-        }
-        public override Json getValue (ulong idx)
-        { assert(0); }
-        public override Json getQuorumSet ()
-        { assert(0); }
-        public override string recv (Json data)
-        { assert(0); }
-    }
-
-    import std.stdio;
-
-    scope test = RemoteAPI!API.spawn!MockAPI();
-    assert(42 == test.pubkey());
-    test.ctrl.shutdown();
-
-}
-*/
 void main()
 {
     //test1();
     //test2();
-    test11();
+    //test5();
+    //test7();
+    //test10();
+    //test11();
     //test13();
     //test14();
-    //test15();
+    test15();
 }
 
 void test1()
@@ -264,6 +232,210 @@ void test3()
     writeln("test3 - 9");
 }
 */
+
+/// Nodes can start tasks
+void test5()
+{
+    static import L = geod24.LocalRest;
+    writeln("test 5");
+    static import core.thread;
+    import core.time;
+
+    static interface API
+    {
+        public void start ();
+        public ulong getCounter ();
+    }
+
+    static class Node : API
+    {
+        public override void start ()
+        {
+            L.runTask(&this.task);
+        }
+
+        public override ulong getCounter ()
+        {
+            scope (exit) this.counter = 0;
+            return this.counter;
+        }
+
+        private void task ()
+        {
+            while (true)
+            {
+                this.counter++;
+                L.sleep(50.msecs);
+            }
+        }
+
+        private ulong counter;
+    }
+
+    import std.format;
+    auto node = L.RemoteAPI!API.spawn!Node();
+    ulong count;
+    writefln("test 5 SSS");
+    count = node.getCounter();
+    writefln("test 5 %s", count);
+
+    node.start();
+
+    count = node.getCounter();
+    writefln("test 5 %s", count);
+    assert(count == 1);
+
+    count = node.getCounter();
+    writefln("test 5 %s", count);
+    assert(count == 0);
+    core.thread.Thread.sleep(1.seconds);
+    // It should be 19 but some machines are very slow
+    // (e.g. Travis Mac testers) so be safe
+    count = node.getCounter();
+    writefln("test 5 %s", count);
+    assert(count >= 9);
+
+    count = node.getCounter();
+    writefln("test 5 %s", count);
+    assert(count == 0);
+    node.ctrl.shutdown();
+    writeln("test 5");
+}
+
+void test7()
+{
+    writeln("test 7");
+    __gshared C.Tid n1tid;
+    static import L = geod24.LocalRest;
+
+    static interface API
+    {
+        public ulong call ();
+        public void asyncCall ();
+    }
+    static class Node : API
+    {
+        public this()
+        {
+            if (n1tid != C.Tid.init)
+                this.remote = new RemoteAPI!API(n1tid);
+        }
+
+        public override ulong call () { return ++this.count; }
+        public override void  asyncCall () { L.runTask(() => cast(void)this.remote.call); }
+        size_t count;
+        RemoteAPI!API remote;
+    }
+
+    auto n1 = RemoteAPI!API.spawn!Node();
+    n1tid = n1.tid();
+    auto n2 = RemoteAPI!API.spawn!Node();
+
+    /// Make sure calls are *relatively* efficient
+    auto current1 = MonoTime.currTime();
+    assert(1 == n1.call());
+    assert(1 == n2.call());
+    auto current2 = MonoTime.currTime();
+    assert(current2 - current1 < 200.msecs);
+
+    // Make one of the node sleep
+    n1.sleep(1.seconds);
+    // Make sure our main thread is not suspended,
+    // nor is the second node
+    assert(2 == n2.call());
+    auto current3 = MonoTime.currTime();
+    assert(current3 - current2 < 400.msecs);
+
+    // Wait for n1 to unblock
+    assert(2 == n1.call());
+    // Check current time >= 1 second
+    auto current4 = MonoTime.currTime();
+    assert(current4 - current2 >= 1.seconds);
+
+    // Now drop many messages
+    n1.sleep(3.seconds, true);
+    for (size_t i = 0; i < 100; i++)
+        n2.asyncCall();
+    // Make sure we don't end up blocked forever
+    Thread.sleep(3.seconds);
+    assert(3 == n1.call());
+
+    // Debug output, uncomment if needed
+    version (none)
+    {
+        writeln("Two non-blocking calls: ", current2 - current1);
+        writeln("Sleep + non-blocking call: ", current3 - current2);
+        writeln("Delta since sleep: ", current4 - current2);
+    }
+
+    n1.ctrl.shutdown();
+    n2.ctrl.shutdown();
+    writeln("test 7");
+}
+
+void test10()
+{
+    writeln("test10");
+
+    import core.thread;
+    import std.exception;
+
+    static interface API
+    {
+        float getFloat();
+        size_t sleepFor (long dur);
+    }
+
+    static class Node : API
+    {
+        override float getFloat() 
+        { 
+            writeln("<<< IN getFloat");
+            return 69.69; 
+        }
+        override size_t sleepFor (long dur)
+        {
+            Thread.sleep(msecs(dur));
+            return 42;
+        }
+    }
+
+    // node with no timeout
+    auto node = RemoteAPI!API.spawn!Node();
+    assert(node.sleepFor(80) == 42);  // no timeout
+
+    // node with a configured timeout
+    auto to_node = RemoteAPI!API.spawn!Node(500.msecs);
+
+    writeln("test10 1");
+    /// none of these should time out
+    assert(to_node.sleepFor(10) == 42);
+    writeln("test10 2");
+    assert(to_node.sleepFor(20) == 42);
+    writeln("test10 3");
+    assert(to_node.sleepFor(30) == 42);
+    writeln("test10 4");
+    assert(to_node.sleepFor(40) == 42);
+
+    writeln("test10 5");
+    assertThrown!Exception(to_node.sleepFor(2000));
+    writeln("test10 6");
+    
+    Thread.sleep(2.seconds);
+    writeln("test10 7");
+    
+    auto v = to_node.getFloat();
+    writefln("test10 8 %s", v);
+    
+    //assert(cast(int) == 69);
+    writeln("test10 9");
+
+    to_node.ctrl.shutdown();
+    node.ctrl.shutdown();
+
+    writeln("test10 X");
+}
+
 void test11()
 {
     import std.stdio;
@@ -334,7 +506,7 @@ void test13()
 
             // Requests are dropped, so it times out
             assert(node.ping() == 42);
-            node.ctrl.sleep(1000.msecs, true);
+            node.ctrl.sleep(10.msecs, true);
             assertThrown!Exception(node.ping());
         }
     }
@@ -401,7 +573,6 @@ void test14()
 
 void test15()
 {
-    import std.stdio;
     writeln("test15");
     import std.exception;
 
@@ -431,6 +602,5 @@ void test15()
     {
         assert(ex.msg == `"Request timed-out"`);
     }
-    import std.stdio;
     writeln("test15");
 }

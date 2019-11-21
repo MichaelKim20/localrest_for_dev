@@ -33,7 +33,6 @@ module geod24.concurrency;
 
 import std.container;
 public import std.variant;
-public import std.stdio;
 import std.range.primitives;
 import std.range.interfaces : InputRange;
 import std.traits;
@@ -321,12 +320,14 @@ private:
     {
         mbox = m;
         timeout = Duration.init;
+        shutdowned = false;
     }
 
     MessageBox mbox;
 
 public:
     Duration timeout;
+    bool shutdowned;
 
     /**
      * Generate a convenient string for identifying this Tid.  This is only
@@ -1827,7 +1828,7 @@ private
         this () @trusted nothrow /* TODO: make @safe after relevant druntime PR gets merged */
         {
             this.mutex = new Mutex();
-            this.qsize = 12;
+            this.qsize = 64;
             this.closed = false;
             this.timeout = Duration.init;
         }
@@ -1846,7 +1847,6 @@ private
             }
         }
 
-
         private SendStatus _put (ref Message msg)
         {
             import std.algorithm;
@@ -1863,7 +1863,6 @@ private
             {
                 SudoFiber sf = this.recvq.front;
                 this.recvq.removeFront();
-                //writefln("send 1 %s", msg);
                 *(sf.msg_ptr) = msg;
 
                 if (sf.swdg !is null)
@@ -1877,7 +1876,6 @@ private
             if (this.queue[].walkLength < this.qsize)
             {
                 this.queue.insertBack(msg);
-                //writefln("send 2 %s",  msg);
                 this.mutex.unlock();
                 return SendStatus.queue;
             }
@@ -1891,7 +1889,7 @@ private
             new_sf.msg = msg;
             new_sf.swdg = &stopWait1;
             new_sf.create_time = MonoTime.currTime;
-            //writefln("send 3 %s", msg);
+
             this.sendq.insertBack(new_sf);
             this.mutex.unlock();
 
@@ -1913,14 +1911,13 @@ private
                             this.sendq.remove(range);
                         }
                         scope(exit) this.mutex.unlock();
-
                         return SendStatus.timeout;
                     }
 
                     if (Fiber.getThis() !is null)
                         Fiber.yield();
                     else
-                        Thread.sleep(dur!("msecs")(1));
+                        Thread.sleep(1.msecs);
                 }
             }
             else
@@ -1930,7 +1927,7 @@ private
                     if (Fiber.getThis() !is null)
                         Fiber.yield();
                     else
-                        Thread.sleep(dur!("msecs")(1));
+                        Thread.sleep(1.msecs);
                 }
             }
             return SendStatus.success;
@@ -1953,30 +1950,32 @@ private
 
                 *msg = sf.msg;
 
-                //writefln("receive 1 %s", sf.msg);
                 if (sf.swdg !is null)
                     sf.swdg();
 
                 this.mutex.unlock();
 
                 if (this.timed_wait)
+                {
                     this.waitFromBase(sf.msg.create_time, this.timed_wait_period);
+                    this.timed_wait = false;
+                }
 
                 return true;
             }
 
+
             if (this.queue[].walkLength > 0)
             {
                 *msg = this.queue.front;
-
                 this.queue.removeFront();
-
                 this.mutex.unlock();
 
-                //writefln("receive 2 %s", *msg);
-
                 if (this.timed_wait)
+                {
                     this.waitFromBase(msg.create_time, this.timed_wait_period);
+                    this.timed_wait = false;
+                }
 
                 return true;
             }
@@ -1992,7 +1991,6 @@ private
             new_sf.create_time = MonoTime.currTime;
 
             this.recvq.insertBack(new_sf);
-
             this.mutex.unlock();
 
             while (is_waiting1)
@@ -2000,11 +1998,14 @@ private
                 if (Fiber.getThis() !is null)
                     Fiber.yield();
                 else
-                    Thread.sleep(dur!("msecs")(1));
+                    Thread.sleep(1.msecs);
             }
 
             if (this.timed_wait)
+            {
                 this.waitFromBase(new_sf.create_time, this.timed_wait_period);
+                this.timed_wait = false;
+            }
 
             return true;
         }
@@ -2152,11 +2153,6 @@ private
                 return false;
             }
 
-            if (this.timed_wait)
-            {
-                this.limit = MonoTime.currTime + this.timed_wait_period;
-            }
-
             Message msg;
             while (true)
             {
@@ -2295,10 +2291,10 @@ private
 
         Duration timeout;
 
-
-
         bool timed_wait;
+
         Duration timed_wait_period;
+        
         MonoTime limit;
     }
 
