@@ -70,15 +70,9 @@ private
 
 }
 
-static ~this()
-{
-    thisInfo.cleanup();
-}
-
 enum MsgType
 {
     standard,
-    priority,
     linkDead,
     shutdown,
 }
@@ -89,7 +83,7 @@ struct Message
     Variant data;
     MonoTime create_time;
 
-    this(T...)(MsgType t, T vals) if (T.length > 0)
+    this (T...)(MsgType t, T vals) if (T.length > 0)
     {
         static if (T.length == 1)
         {
@@ -106,7 +100,7 @@ struct Message
         create_time = MonoTime.currTime;
     }
 
-    @property auto convertsTo(T...)()
+    @property auto convertsTo (T...)()
     {
         static if (T.length == 1)
         {
@@ -119,7 +113,7 @@ struct Message
         }
     }
 
-    @property auto get(T...)()
+    @property auto get (T...)()
     {
         static if (T.length == 1)
         {
@@ -135,7 +129,7 @@ struct Message
         }
     }
 
-    auto map(Op)(Op op)
+    auto map (Op)(Op op)
     {
         alias Args = Parameters!(Op);
 
@@ -184,6 +178,13 @@ void checkops (T...)(T ops)
 {
     return ThreadInfo.thisInfo;
 }
+
+
+static ~this()
+{
+    thisInfo.cleanup();
+}
+
 // Exceptions
 
 
@@ -242,12 +243,6 @@ struct Request
 
     /// Arguments to the method, JSON formatted
     string args;
-
-    ///
-    SysTime request_time;
-
-    ///
-    Duration timeout;
 }
 
 /// Status of a request
@@ -596,7 +591,6 @@ private void _send(T...)(MsgType type, Tid tid, T vals)
 ///
 public Response query(Tid tid, ref Request data)
 {
-    data.request_time = Clock.currTime();
     auto req = Message(MsgType.standard, data);
     auto res = request(tid, req);
     return *res.data.peek!(Response);
@@ -1079,6 +1073,9 @@ private
 
         public Message request (ref Message req_msg)
         {
+            import std.algorithm;
+            import std.range : popBackN, walkLength;
+
             this.mutex.lock();
 
             if (this.closed)
@@ -1105,12 +1102,42 @@ private
             this.queue.insertBack(new_sf);
             this.mutex.unlock();
 
-            while (is_waiting)
+            if (this.timeout > Duration.init)
             {
-                if (Fiber.getThis() !is null)
-                    Fiber.yield();
-                else
-                    Thread.sleep(1.msecs);
+                auto start = MonoTime.currTime;
+                while (is_waiting)
+                {
+                    auto end = MonoTime.currTime();
+                    auto elapsed = end - start;
+                    if (elapsed > this.timeout)
+                    {
+                        // remove timeout element
+                        this.mutex.lock();
+                        auto range = find(this.queue[], new_sf);
+                        if (!range.empty)
+                        {
+                            popBackN(range, range.walkLength-1);
+                            this.queue.remove(range);
+                        }
+                        scope(exit) this.mutex.unlock();
+                        return Message(MsgType.standard, Response(Status.Timeout, ""));
+                    }
+
+                    if (Fiber.getThis() !is null)
+                        Fiber.yield();
+                    else
+                        Thread.sleep(1.msecs);
+                }
+            }
+            else
+            {
+                while (is_waiting)
+                {
+                    if (Fiber.getThis() !is null)
+                        Fiber.yield();
+                    else
+                        Thread.sleep(1.msecs);
+                }
             }
 
             if (this.timed_wait)
