@@ -87,7 +87,6 @@ import std.traits : Parameters, ReturnType;
 import core.thread;
 import core.time;
 
-import std.stdio;
 
 /// Data sent by the caller
 private struct Command
@@ -166,7 +165,7 @@ private struct ArgWrapper (T...)
 }
 
 /**
- * Copied from std.concurrency.FiberScheduler, increased the stack size to 16MB.
+ * Copied from geod24.concurrency.FiberScheduler, increased the stack size to 16MB.
  */
 class BaseFiberScheduler : C.Scheduler
 {
@@ -441,7 +440,7 @@ private final class LocalScheduler : BaseFiberScheduler
 
 
 /// We need a scheduler to simulate an event loop and to be re-entrant
-/// However, the one in `std.concurrency` is process-global (`__gshared`)
+/// However, the one in `geod24.concurrency` is process-global (`__gshared`)
 private LocalScheduler scheduler;
 
 /// Whether this is the main thread
@@ -582,11 +581,11 @@ public final class RemoteAPI (API) : API
 
                         static if (!is(ReturnType!ovrld == void))
                         {
-                            auto res = Response(
+                            C.send(cmd.sender,
+                                Response(
                                     Status.Success,
                                     cmd.id,
-                                    node.%1$s(args.args).serializeToJsonString());
-                            C.send(cmd.sender, res);
+                                    node.%1$s(args.args).serializeToJsonString()));
                         }
                         else
                         {
@@ -616,7 +615,7 @@ public final class RemoteAPI (API) : API
        which is a struct with the sender's Tid, the method's mangleof,
        and the method's arguments as a tuple, serialized to a JSON string.
 
-       `std.concurrency.receive` is not `@safe`, so neither is this.
+       `geod24.concurrency.receive` is not `@safe`, so neither is this.
 
        Params:
            Implementation = Type of the implementation to instantiate
@@ -1141,8 +1140,6 @@ unittest
     auto testerFiber = geod24.concurrency.spawn(&testFunc, geod24.concurrency.thisTid);
     // Make sure our main thread terminates after everyone else
     geod24.concurrency.receiveOnly!int();
-    node1.ctrl.shutdown();
-    node2.ctrl.shutdown();
 }
 
 /// This network have different types of nodes in it
@@ -1638,12 +1635,12 @@ unittest
 
     assertThrown!Exception(to_node.sleepFor(2000));
     Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
+    import std.stdio;
     assert(cast(int)to_node.getFloat() == 69);
 
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
 }
-
 
 // request timeouts (foreign node to another node)
 unittest
@@ -1751,7 +1748,7 @@ unittest
 
             // Requests are dropped, so it times out
             assert(node.ping() == 42);
-            node.ctrl.sleep(10.msecs, true);
+            node.ctrl.sleep(20.msecs, true);
             assertThrown!Exception(node.ping());
         }
     }
@@ -1763,11 +1760,13 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
 }
+
 // Test a node that gets a replay while it's delayed
 unittest
 {
     static import geod24.concurrency;
     import std.exception;
+    import std.stdio;
 
     __gshared C.Tid node_tid;
 
@@ -1803,7 +1802,6 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
 }
-
 
 // Test explicit shutdown
 unittest

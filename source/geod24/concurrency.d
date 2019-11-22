@@ -258,6 +258,25 @@ class LinkTerminated : Exception
     Tid tid;
 }
 
+/**
+ * Thrown if a message was sent to a thread via
+ * $(REF prioritySend, std,concurrency) and the receiver does not have a handler
+ * for a message of this type.
+ */
+class PriorityMessageException : Exception
+{
+    ///
+    this(Variant vals)
+    {
+        super("Priority message");
+        message = vals;
+    }
+
+    /**
+     * The message that was sent.
+     */
+    Variant message;
+}
 
 /**
  * Thrown on mailbox crowding if the mailbox is configured with
@@ -1748,6 +1767,7 @@ void yield(T)(T value)
     testScheduler(new ThreadScheduler);
     testScheduler(new FiberScheduler);
 }
+
 ///
 @system unittest
 {
@@ -2135,19 +2155,6 @@ private
             }
 
             return false;
-        }
-
-        private void wait(Duration period)
-        {
-            if (this.timed_wait_period > Duration.zero)
-            {
-                for (auto limit = MonoTime.currTime + period;
-                    !period.isNegative;
-                    period = limit - MonoTime.currTime)
-                {
-                    yield();
-                }
-            }
         }
 
         private void waitFromBase(MonoTime base, Duration period)
