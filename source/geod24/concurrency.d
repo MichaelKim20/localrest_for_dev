@@ -87,6 +87,7 @@ struct Message
 {
     MsgType type;
     Variant data;
+    MonoTime create_time;
 
     this(T...)(MsgType t, T vals) if (T.length > 0)
     {
@@ -102,6 +103,7 @@ struct Message
             type = t;
             data = Tuple!(T)(vals);
         }
+        create_time = MonoTime.currTime;
     }
 
     @property auto convertsTo(T...)()
@@ -152,7 +154,7 @@ struct Message
     }
 }
 
-void checkops(T...)(T ops)
+void checkops (T...)(T ops)
 {
     foreach (i, t1; T)
     {
@@ -184,18 +186,6 @@ void checkops(T...)(T ops)
 }
 // Exceptions
 
-/**
- * Thrown on calls to `receiveOnly` if a message other than the type
- * the receiving thread expected is sent.
- */
-class MessageMismatch : Exception
-{
-    ///
-    this(string msg = "Unexpected message type") @safe pure nothrow @nogc
-    {
-        super(msg);
-    }
-}
 
 /**
  * Thrown on calls to `receive` if the thread that spawned the receiving
@@ -324,17 +314,18 @@ private:
     this(MessageBox m) @safe pure nothrow @nogc
     {
         mbox = m;
+        timeout = Duration.init;
+        shutdowned = false;
     }
 
     MessageBox mbox;
 
 public:
+    Duration timeout;
+    bool shutdowned;
 
     /**
-     * Generate a convenient string for identifying this Tid.  This i
-
-
-     s only
+     * Generate a convenient string for identifying this Tid.  This is only
      * useful to see if Tid's that are currently executing are the same or
      * different, e.g. for logging and debugging.  It is potentially possible
      * that a Tid executed in the future will have the same toString() output
@@ -346,6 +337,11 @@ public:
         formattedWrite(sink, "Tid(%x)", cast(void*) mbox);
     }
 
+    void setTimeout (Duration d) @safe pure nothrow @nogc
+    {
+        this.timeout = d;
+        mbox.setTimeout(d);
+    }
 }
 
 @system unittest
@@ -392,6 +388,7 @@ public:
 }
 
 // Thread Creation
+
 private template isSpawnable(F, T...)
 {
     template isParamsImplicitlyConvertible(F1, F2, int i = 0)
@@ -595,6 +592,7 @@ private void _send(T...)(MsgType type, Tid tid, T vals)
     tid.mbox.request(msg);
 }
 
+
 ///
 public Response query(Tid tid, ref Request data)
 {
@@ -610,10 +608,18 @@ public Message request(Tid tid, ref Message msg)
     return tid.mbox.request(msg);
 }
 
-public alias ProcessDlg = scope Message delegate (ref Message msg);
-public void process (Tid tid, ProcessDlg dg)
+public void process (T...)( T ops )
+in
 {
-    tid.mbox.process(dg);
+    assert(thisInfo.ident.mbox !is null,
+           "Cannot receive a message until a thread was spawned "
+           ~ "or thisTid was passed to a running thread.");
+}
+do
+{
+    checkops(ops);
+
+    thisInfo.ident.mbox.process (ops);
 }
 
 ///
@@ -1050,11 +1056,28 @@ private
     {
         this() @trusted nothrow /* TODO: make @safe after relevant druntime PR gets merged */
         {
-            mutex = new Mutex;
-            closed = false;
+            this.mutex = new Mutex();
+            this.qsize = 64;
+            this.closed = false;
+            this.timeout = Duration.init;
         }
 
-        final Message request(ref Message req_msg)
+        public void setTimeout (Duration d) @safe pure nothrow @nogc
+        {
+            this.timeout = d;
+        }
+
+        ///
+        public @property bool isClosed () @safe @nogc pure
+        {
+            synchronized (this.mutex)
+            {
+                return this.closed;
+            }
+        }
+
+
+        public Message request (ref Message req_msg)
         {
             this.mutex.lock();
 
@@ -1065,77 +1088,95 @@ private
             }
 
             Message res_msg;
-            Fiber fiber = Fiber.getThis();
 
-            writefln("request %s %s", fiber, req_msg);
+            writefln("request %s", req_msg);
 
-            if (fiber !is null)
+            shared(bool) is_waiting = true;
+            void stopWait ()
             {
-                shared(bool) is_waiting1 = true;
-                void stopWait1()
-                {
-                    is_waiting1 = false;
-                }
-                SudoFiber new_sf;
-                new_sf.fiber = fiber;
-                new_sf.req_msg = &req_msg;
-                new_sf.res_msg = &res_msg;
-                new_sf.swdg = &stopWait1;
+                is_waiting = false;
+            }
+            SudoFiber new_sf;
+            new_sf.req_msg = &req_msg;
+            new_sf.res_msg = &res_msg;
+            new_sf.swdg = &stopWait;
+            new_sf.create_time = MonoTime.currTime;
 
-                this.queue.insertBack(new_sf);
-                this.mutex.unlock();
-                while (is_waiting1)
+            this.queue.insertBack(new_sf);
+            this.mutex.unlock();
+
+            while (is_waiting)
+            {
+                if (Fiber.getThis() !is null)
                     Fiber.yield();
+                else
+                    Thread.sleep(1.msecs);
             }
-            else
-            {
-                shared(bool) is_waiting2 = true;
-                void stopWait2()
-                {
-                    is_waiting2 = false;
-                }
-                SudoFiber new_sf;
-                new_sf.fiber = null;
-                new_sf.req_msg = &req_msg;
-                new_sf.res_msg = &res_msg;
-                new_sf.swdg = &stopWait2;
 
-                this.queue.insertBack(new_sf);
-                this.mutex.unlock();
-                while (is_waiting2)
-                    Thread.sleep(dur!("msecs")(1));
+            if (this.timed_wait)
+            {
+                this.waitFromBase(new_sf.create_time, this.timed_wait_period);
+                this.timed_wait = false;
             }
+
 
             return res_msg;
         }
 
-        final bool process(ProcessDlg dg)
+        public bool process (T...)(scope T vals)
         {
-            bool onStandardReq(Message* req_msg, Message* res_msg)
+            import std.meta : AliasSeq;
+
+            static assert(T.length);
+
+            static if (isImplicitlyConvertible!(T[0], Duration))
             {
-                if  (
-                        (req_msg.convertsTo!(OwnerTerminated)) ||
-                        (req_msg.convertsTo!(Shutdown))
-                    )
-                {
-                    Message shutdown = Message(MsgType.shutdown, "");
-                    dg(shutdown);
-                }
-                else
-                {
-                    *res_msg = dg(*req_msg);
-                }
+                alias Ops = AliasSeq!(T[1 .. $]);
+                alias ops = vals[1 .. $];
 
-                return true;
+                this.timed_wait = true;
+                this.timed_wait_period = vals[0];
             }
-
-            bool onStandardMsg(Message* msg)
+            else
             {
-                dg(*msg);
+                alias Ops = AliasSeq!(T);
+                alias ops = vals[0 .. $];
 
-                return true;
+                this.timed_wait = false;
+                this.timed_wait_period = Duration.init;
             }
+            
+            bool onStandardMsg (Message* req_msg, Message* res_msg = null)
+            {
+                foreach (i, t; Ops)
+                {
+                    alias Args = Parameters!(t);
+                    auto op = ops[i];
 
+                    if (req_msg.convertsTo!(Args))
+                    {
+                        static if (is(ReturnType!(t) == Message))
+                        {
+                            if (res_msg !is null)
+                                *res_msg = (*req_msg).map(op);
+                            else
+                                (*req_msg).map(op);
+                            return true;
+                        } 
+                        else if (is(ReturnType!(t) == bool))
+                        {
+                            return (*req_msg).map(op);
+                        }
+                        else
+                        {
+                            (*req_msg).map(op);
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
+            
             bool onLinkDeadMsg(Message* msg)
             {
                 assert(msg.convertsTo!(Tid));
@@ -1197,17 +1238,11 @@ private
                 if (isControlMsg(sf.req_msg))
                     onControlMsg(sf.req_msg);
                 else
-                    onStandardReq(sf.req_msg, sf.res_msg);
+                    onStandardMsg(sf.req_msg, sf.res_msg);
 
                 writefln("process %s %s %s", sf.fiber, *sf.req_msg, *sf.res_msg);
 
-                if (sf.fiber !is null)
-                {
-                    if (sf.swdg !is null)
-                        sf.swdg();
-                    //sf.fiber.call();
-                }
-                else if (sf.swdg !is null)
+                if (sf.swdg !is null)
                     sf.swdg();
 
                 return true;
@@ -1216,18 +1251,27 @@ private
             return false;
         }
 
-        ///
-        final @property bool isClosed() @safe @nogc pure
+        private void waitFromBase (MonoTime base, Duration period)
         {
-            synchronized (mutex)
+            if (this.timed_wait_period > Duration.zero)
             {
-                return closed;
+                for (auto limit = base + period;
+                    !period.isNegative;
+                    period = limit - MonoTime.currTime)
+                {
+                    yield();
+                }
             }
         }
 
-        final void close()
+        /*
+         * Called on thread termination.  This routine processes any remaining
+         * control messages, clears out message queues, and sets a flag to
+         * reject any future messages.
+         */
+        public void close()
         {
-            static void onLinkDeadMsg(Message* msg)
+            static void onLinkDeadMsg (Message* msg)
             {
                 assert(msg.convertsTo!(Tid));
                 auto tid = msg.get!(Tid);
@@ -1253,29 +1297,23 @@ private
                 sf = this.queue.front;
 
                 if (sf.req_msg.type == MsgType.linkDead)
-                    onLinkDeadMsg(sf.req_msg);
+                    onLinkDeadMsg (sf.req_msg);
 
                 this.queue.removeFront();
 
-                if (sf.fiber !is null)
-                {
-                    if (sf.swdg !is null)
-                        sf.swdg();
-                    //sf.fiber.call();
-                }
-                else if (sf.swdg !is null)
+                if (sf.swdg !is null)
                     sf.swdg();
             }
         }
 
     private:
 
-        bool isControlMsg(Message* msg) @safe @nogc pure nothrow
+        bool isControlMsg (Message* msg) @safe @nogc pure nothrow
         {
             return msg.type != MsgType.standard;
         }
 
-        bool isLinkDeadMsg(Message* msg) @safe @nogc pure nothrow
+        bool isLinkDeadMsg (Message* msg) @safe @nogc pure nothrow
         {
             return msg.type == MsgType.linkDead;
         }
@@ -1288,6 +1326,18 @@ private
 
         /// collection of equest waiters
         DList!(SudoFiber) queue;
+
+        /// size of queue
+        size_t qsize;
+
+
+        Duration timeout;
+
+        bool timed_wait;
+
+        Duration timed_wait_period;
+        
+        MonoTime limit;
     }
 }
 
@@ -1296,10 +1346,10 @@ private alias StopWaitDg = void delegate ();
 ///
 private struct SudoFiber
 {
-    public Fiber fiber;
     public Message* req_msg;
     public Message* res_msg;
     public StopWaitDg swdg;
+    public MonoTime create_time;
 }
 
 private @property shared(Mutex) initOnceLock()
