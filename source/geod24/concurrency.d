@@ -1051,7 +1051,6 @@ private
         this() @trusted nothrow /* TODO: make @safe after relevant druntime PR gets merged */
         {
             this.mutex = new Mutex();
-            this.qsize = 64;
             this.closed = false;
             this.timeout = Duration.init;
         }
@@ -1146,7 +1145,6 @@ private
                 this.timed_wait = false;
             }
 
-
             return res_msg;
         }
 
@@ -1172,7 +1170,7 @@ private
                 this.timed_wait = false;
                 this.timed_wait_period = Duration.init;
             }
-            
+
             bool onStandardMsg (Message* req_msg, Message* res_msg = null)
             {
                 foreach (i, t; Ops)
@@ -1189,7 +1187,7 @@ private
                             else
                                 (*req_msg).map(op);
                             return true;
-                        } 
+                        }
                         else if (is(ReturnType!(t) == bool))
                         {
                             return (*req_msg).map(op);
@@ -1203,7 +1201,7 @@ private
                 }
                 return false;
             }
-            
+
             bool onLinkDeadMsg(Message* msg)
             {
                 assert(msg.convertsTo!(Tid));
@@ -1271,6 +1269,12 @@ private
 
                 if (sf.swdg !is null)
                     sf.swdg();
+
+                if (this.timed_wait)
+                {
+                    this.waitFromBase(sf.msg.create_time, this.timed_wait_period);
+                    this.timed_wait = false;
+                }
 
                 return true;
             }
@@ -1354,16 +1358,12 @@ private
         /// collection of equest waiters
         DList!(SudoFiber) queue;
 
-        /// size of queue
-        size_t qsize;
-
-
         Duration timeout;
 
         bool timed_wait;
 
         Duration timed_wait_period;
-        
+
         MonoTime limit;
     }
 }
