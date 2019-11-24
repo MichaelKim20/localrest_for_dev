@@ -1781,85 +1781,203 @@ private
             }
         }
 
-
-        public Message put (ref Message req_msg)
+        public Message _put (ref Message req_msg)
         {
             import std.algorithm;
             import std.range : popBackN, walkLength;
 
             this.mutex.lock();
-
             if (this.closed)
             {
                 this.mutex.unlock();
                 return Message(MsgType.standard, Response(Status.Failed, ""));
             }
 
-            Message res_msg;
+            if (this.recvq[].walkLength > 0)
+            {
+                Message res_msg;
+                SudoFiber sf = this.recvq.front;
+                this.recvq.removeFront();
+                sf.req_msg = &req_msg;
+                sf.res_msg = &res_msg;
+
+                if (sf.swdg !is null)
+                    sf.swdg();
+
+                this.mutex.unlock();
+
+                return res_msg;
+            }
+
 
             //writefln("request %s", req_msg);
 
-            shared(bool) is_waiting = true;
-            void stopWait ()
             {
-                is_waiting = false;
-            }
-            SudoFiber new_sf;
-            new_sf.req_msg = &req_msg;
-            new_sf.res_msg = &res_msg;
-            new_sf.swdg = &stopWait;
-            new_sf.create_time = MonoTime.currTime;
-
-            this.queue.insertBack(new_sf);
-            this.mutex.unlock();
-
-            if (this.timeout > Duration.init)
-            {
-                auto start = MonoTime.currTime;
-                while (is_waiting)
+                Message res_msg;
+                shared(bool) is_waiting = true;
+                void stopWait ()
                 {
-                    auto end = MonoTime.currTime();
-                    auto elapsed = end - start;
-                    if (elapsed > this.timeout)
+                    is_waiting = false;
+                }
+
+                SudoFiber new_sf;
+                new_sf.req_msg = &req_msg;
+                new_sf.res_msg = &res_msg;
+                new_sf.swdg = &stopWait;
+                new_sf.create_time = MonoTime.currTime;
+
+                this.sendq.insertBack(new_sf);
+                this.mutex.unlock();
+
+                if (this.timeout > Duration.init)
+                {
+                    auto start = MonoTime.currTime;
+                    while (is_waiting)
                     {
-                        // remove timeout element
-                        this.mutex.lock();
-                        auto range = find(this.queue[], new_sf);
-                        if (!range.empty)
+                        auto end = MonoTime.currTime();
+                        auto elapsed = end - start;
+                        if (elapsed > this.timeout)
                         {
-                            popBackN(range, range.walkLength-1);
-                            this.queue.remove(range);
+                            // remove timeout element
+                            this.mutex.lock();
+                            auto range = find(this.sendq[], new_sf);
+                            if (!range.empty)
+                            {
+                                popBackN(range, range.walkLength-1);
+                                this.sendq.remove(range);
+                            }
+                            scope(exit) this.mutex.unlock();
+                            return Message(MsgType.standard, Response(Status.Timeout, ""));
                         }
-                        scope(exit) this.mutex.unlock();
-                        return Message(MsgType.standard, Response(Status.Timeout, ""));
+
+                        if (Fiber.getThis() !is null)
+                            Fiber.yield();
+                        else
+                            Thread.sleep(1.msecs);
                     }
-
-                    if (Fiber.getThis() !is null)
-                        Fiber.yield();
-                    else
-                        Thread.sleep(1.msecs);
                 }
-            }
-            else
-            {
-                while (is_waiting)
+                else
                 {
-                    if (Fiber.getThis() !is null)
-                        Fiber.yield();
-                    else
-                        Thread.sleep(1.msecs);
+                    while (is_waiting)
+                    {
+                        if (Fiber.getThis() !is null)
+                            Fiber.yield();
+                        else
+                            Thread.sleep(1.msecs);
+                    }
                 }
-            }
 
-            if (this.timed_wait)
-            {
-                this.waitFromBase(new_sf.create_time, this.timed_wait_period);
-                this.timed_wait = false;
-            }
+                if (this.timed_wait)
+                {
+                    this.waitFromBase(new_sf.create_time, this.timed_wait_period);
+                    this.timed_wait = false;
+                }
 
-            return res_msg;
+                return res_msg;
+            }
         }
 
+        private bool _get (Message* msg)
+        {
+            this.mutex.lock();
+
+            if (this.closed)
+            {
+                this.mutex.unlock();
+                return false;
+            }
+
+            if (this.sendq[].walkLength > 0)
+            {
+                SudoFiber sf = this.sendq.front;
+                this.sendq.removeFront();
+
+                //*sf.res_msg = *sf.req_msg;
+
+                if (sf.swdg !is null)
+                    sf.swdg();
+
+                this.mutex.unlock();
+
+                if (this.timed_wait)
+                {
+                    this.waitFromBase(sf.msg.create_time, this.timed_wait_period);
+                    this.timed_wait = false;
+                }
+
+                return true;
+            }
+
+
+            {
+                shared(bool) is_waiting1 = true;
+
+                void stopWait1() {
+                    is_waiting1 = false;
+                }
+
+                SudoFiber new_sf;
+                new_sf.req_msg = &req_msg;
+                new_sf.res_msg = &res_msg;
+                new_sf.swdg = &stopWait1;
+                new_sf.create_time = MonoTime.currTime;
+
+                this.recvq.insertBack(new_sf);
+                this.mutex.unlock();
+
+                while (is_waiting1)
+                {
+                    if (Fiber.getThis() !is null)
+                        Fiber.yield();
+                    else
+                        Thread.sleep(1.msecs);
+                }
+
+                if (this.timed_wait)
+                {
+                    this.waitFromBase(new_sf.create_time, this.timed_wait_period);
+                    this.timed_wait = false;
+                }
+
+                return true;
+            }
+        }
+
+        /*
+         * If maxMsgs is not set, the message is added to the queue and the
+         * owner is notified.  If the queue is full, the message will still be
+         * accepted if it is a control message, otherwise onCrowdingDoThis is
+         * called.  If the routine returns true, this call will block until
+         * the owner has made space available in the queue.  If it returns
+         * false, this call will abort.
+         *
+         * Params:
+         *  msg = The message to put in the queue.
+         *
+         * Throws:
+         *  An exception if the queue is full and onCrowdingDoThis throws.
+         */
+        public Message put (ref Message req_msg)
+        {
+            return this._put(msg);
+        }
+
+        /*
+         * Matches ops against each message in turn until a match is found.
+         *
+         * Params:
+         *  ops = The operations to match.  Each may return a bool to indicate
+         *        whether a message with a matching type is truly a match.
+         *
+         * Returns:
+         *  true if a message was retrieved and false if not (such as if a
+         *  timeout occurred).
+         *
+         * Throws:
+         *  LinkTerminated if a linked thread terminated, or OwnerTerminated
+         * if the owner thread terminates and no existing messages match the
+         * supplied ops.
+         */
         public bool get (T...)(scope T vals)
         {
             import std.meta : AliasSeq;
@@ -1967,11 +2085,11 @@ private
                 return false;
             }
 
-            if (this.queue[].walkLength > 0)
+            if (this.sendq[].walkLength > 0)
             {
                 SudoFiber sf = this.queue.front;
 
-                this.queue.removeFront();
+                this.sendq.removeFront();
 
                 if (isControlMsg(sf.req_msg))
                     onControlMsg(sf.req_msg);
@@ -2068,8 +2186,17 @@ private
         /// lock
         Mutex mutex;
 
-        /// collection of equest waiters
-        DList!(SudoFiber) queue;
+        /// size of queue
+        size_t qsize;
+
+        /// queue of data
+        DList!Message queue;
+
+        /// collection of send waiters
+        DList!SudoFiber sendq;
+
+        /// collection of recv waiters
+        DList!SudoFiber recvq;
 
         Duration timeout;
 
