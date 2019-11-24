@@ -112,11 +112,6 @@ private struct TimeCommand
     bool drop = false;
 }
 
-/// Ask the node to shut down
-private struct ShutdownCommand
-{
-}
-
 /// Filter out requests before they reach a node
 private struct FilterAPI
 {
@@ -798,17 +793,6 @@ public final class RemoteAPI (API) : API
         public C.Tid tid () @nogc pure nothrow
         {
             return this.childTid;
-        }
-
-        /***********************************************************************
-
-            Send an async message to the thread to immediately shut down.
-
-        ***********************************************************************/
-
-        public void shutdown () @trusted
-        {
-            C.send(this.childTid, ShutdownCommand());
         }
 
         /***********************************************************************

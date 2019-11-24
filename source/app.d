@@ -3,7 +3,7 @@ module test;
 import vibe.data.json;
 import geod24.LocalRest;
 import std.stdio;
-import geod24.concurrency;
+import C = geod24.concurrency;
 import core.sync.mutex;
 import core.thread;
 import std.datetime.systime;
@@ -11,6 +11,12 @@ import std.variant;
 
 
 void main()
+{
+    test1();
+    //test2();
+}
+
+void test1()
 {
     static interface API
     {
@@ -45,46 +51,41 @@ void main()
     test.ctrl.shutdown();
 }
 
-/*
-void main()
+void test2()
 {
     import std.stdio;
-
     import std.conv;
 
-    auto child = spawn({
+    auto child = C.spawn({
         bool terminated = false;
-        auto sleep_inteval = dur!("msecs")(1);
         while (!terminated)
         {
-            thisTid.process((ref Message msg) {
-                Message res_msg;
-                if (msg.type == MsgType.shutdown)
+            C.process(
+                (C.OwnerTerminated e)
                 {
                     terminated = true;
-                    return Message(MsgType.shutdown, Response(Status.Success));
-                }
-
-                if (msg.convertsTo!(Request))
+                },
+                (C.Shutdown e)
                 {
-                    auto req = msg.get!(Request);
+                    terminated = true;
+                    C.thisTid().shutdowned = true;
+                },
+                (C.Request req)
+                {
                     if (req.method == "pow")
                     {
                         immutable int value = to!int(req.args);
-                        return Message(MsgType.standard, Response(Status.Success, to!string(value * value)));
+                        return C.Response(C.Status.Success, to!string(value * value));
                     }
+                    return C.Response(C.Status.Failed);
                 }
-                return Message(MsgType.standard, Response(Status.Failed));
-            });
-            Thread.sleep(sleep_inteval);
+            );
         }
     });
 
-    auto req = Request(thisTid(), "pow", "2");
-    auto res = child.query(req);
+    auto req = C.Request(C.thisTid(), "pow", "2");
+    auto res = C.query(child, req);
     assert(res.data == "4");
 
-    child.shutdown();
-    thisInfo.cleanup();
+    C.shutdown(child);
 }
-*/

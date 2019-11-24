@@ -83,6 +83,7 @@ import vibe.data.json;
 static import C = geod24.concurrency;
 import std.meta : AliasSeq;
 import std.traits : Parameters, ReturnType;
+import std.stdio;
 
 import core.atomic;
 import core.sync.condition;
@@ -97,6 +98,12 @@ private struct TimeCommand
     Duration dur;
     /// Whether or not affected messages should be dropped
     bool drop = false;
+}
+
+/// Ask the node to shut down
+private struct ShutdownCommand
+{
+
 }
 
 /// Filter out requests before they reach a node
@@ -118,146 +125,10 @@ private struct ArgWrapper (T...)
     T args;
 }
 
-
-/*******************************************************************************
-
-    Provide eventloop-like functionalities
-
-    Since nodes instantiated via this modules are Vibe.d server,
-    they expect the ability to run an asynchronous task ,
-    usually provided by `vibe.core.core : runTask`.
-
-    In order for them to properly work, we need to integrate them to our event
-    loop by providing the ability to spawn a task, and wait on some condition,
-    optionally with a timeout.
-
-    The following functions do that.
-    Note that those facilities are not available from the main thread,
-    while is supposed to do tests and doesn't have a scheduler.
-
-*******************************************************************************/
-
-public void runTask (scope void delegate() dg)
-{
-    //assert(scheduler !is null, "Cannot call this function from the main thread");
-    //scheduler.spawn(dg);
-}
-
-/// Ditto
-public void sleep (Duration timeout)
-{
-    //assert(scheduler !is null, "Cannot call this function from the main thread");
-    //scope cond = scheduler.new FiberCondition();
-    //cond.wait(timeout);
-}
-
 /**
- * A Scheduler controls how threading is performed by spawn.
- *
- * Implementing a Scheduler allows the concurrency mechanism used by this
- * module to be customized according to different needs.  By default, a call
- * to spawn will create a new kernel thread that executes the supplied routine
- * and terminates when finished.  But it is possible to create Schedulers that
- * reuse threads, that multiplex Fibers (coroutines) across a single thread,
- * or any number of other approaches.  By making the choice of Scheduler a
- * user-level option, std.concurrency may be used for far more types of
- * application than if this behavior were predefined.
- *
- * Example:
- * ---
- * import std.concurrency;
- * import std.stdio;
- *
- * void main()
- * {
- *     scheduler = new FiberScheduler;
- *     scheduler.start(
- *     {
- *         writeln("the rest of main goes here");
- *     });
- * }
- * ---
- *
- * Some schedulers have a dispatching loop that must run if they are to work
- * properly, so for the sake of consistency, when using a scheduler, start()
- * must be called within main().  This yields control to the scheduler and
- * will ensure that any spawned threads are executed in an expected manner.
+ * Copied from geod24.concurrency.FiberScheduler, increased the stack size to 16MB.
  */
-interface Scheduler
-{
-    /**
-     * Spawns the supplied op and starts the Scheduler.
-     *
-     * This is intended to be called at the start of the program to yield all
-     * scheduling to the active Scheduler instance.  This is necessary for
-     * schedulers that explicitly dispatch threads rather than simply relying
-     * on the operating system to do so, and so start should always be called
-     * within main() to begin normal program execution.
-     *
-     * Params:
-     *  op = A wrapper for whatever the main thread would have done in the
-     *       absence of a custom scheduler.  It will be automatically executed
-     *       via a call to spawn by the Scheduler.
-     */
-    void start(void delegate() op);
-
-    /**
-     * Assigns a logical thread to execute the supplied op.
-     *
-     * This routine is called by spawn.  It is expected to instantiate a new
-     * logical thread and run the supplied operation.  This thread must call
-     * thisInfo.cleanup() when the thread terminates if the scheduled thread
-     * is not a kernel thread--all kernel threads will have their ThreadInfo
-     * cleaned up automatically by a thread-local destructor.
-     *
-     * Params:
-     *  op = The function to execute.  This may be the actual function passed
-     *       by the user to spawn itself, or may be a wrapper function.
-     */
-    void spawn(void delegate() op);
-
-    /**
-     * Yields execution to another logical thread.
-     *
-     * This routine is called at various points within concurrency-aware APIs
-     * to provide a scheduler a chance to yield execution when using some sort
-     * of cooperative multithreading model.  If this is not appropriate, such
-     * as when each logical thread is backed by a dedicated kernel thread,
-     * this routine may be a no-op.
-     */
-    void yield() nothrow;
-
-    /**
-     * Returns an appropriate ThreadInfo instance.
-     *
-     * Returns an instance of ThreadInfo specific to the logical thread that
-     * is calling this routine or, if the calling thread was not create by
-     * this scheduler, returns ThreadInfo.thisInfo instead.
-     */
-    @property ref C.ThreadInfo thisInfo() nothrow;
-
-    /**
-     * Creates a Condition variable analog for signaling.
-     *
-     * Creates a new Condition variable analog which is used to check for and
-     * to signal the addition of messages to a thread's message queue.  Like
-     * yield, some schedulers may need to define custom behavior so that calls
-     * to Condition.wait() yield to another thread when no new messages are
-     * available instead of blocking.
-     *
-     * Params:
-     *  m = The Mutex that will be associated with this condition.  It will be
-     *      locked prior to any operation on the condition, and so in some
-     *      cases a Scheduler may need to hold this reference and unlock the
-     *      mutex before yielding execution to another logical thread.
-     */
-    Condition newCondition(Mutex m) nothrow;
-}
-
-/**
- * Copied from std.concurrency.FiberScheduler, increased the stack size to 16MB.
- */
-class BaseFiberScheduler : Scheduler
+class BaseFiberScheduler : C.Scheduler
 {
     static class InfoFiber : Fiber
     {
@@ -268,7 +139,6 @@ class BaseFiberScheduler : Scheduler
             super(op, 16 * 1024 * 1024);  // 16Mb
         }
     }
-
 
     /**
      * This creates a new Fiber for the supplied op and then starts the
@@ -432,55 +302,10 @@ private final class LocalScheduler : BaseFiberScheduler
     import core.sync.condition;
     import core.sync.mutex;
 
-    /// Just a FiberCondition with a state
-    private struct Waiting { FiberCondition c; bool busy; }
-
-    /// The 'Response' we are currently processing, if any
-    private C.Response pending;
-
-    /// Request IDs waiting for a response
-    private Waiting[ulong] waiting;
-
     /// Should never be called from outside
     public override Condition newCondition(Mutex m = null) nothrow
     {
         assert(0);
-    }
-
-    /// Get the next available request ID
-    public size_t getNextResponseId ()
-    {
-        static size_t last_idx;
-        return last_idx++;
-    }
-
-    public C.Response waitResponse (size_t id, Duration duration) nothrow
-    {
-        if (id !in this.waiting)
-            this.waiting[id] = Waiting(new FiberCondition, false);
-
-        Waiting* ptr = &this.waiting[id];
-        if (ptr.busy)
-            assert(0, "Trying to override a pending request");
-
-        // We yield and wait for an answer
-        ptr.busy = true;
-
-        if (duration == Duration.init)
-            ptr.c.wait();
-        else if (!ptr.c.wait(duration))
-            this.pending = C.Response(C.Status.Timeout);
-
-        ptr.busy = false;
-        // After control returns to us, `pending` has been filled
-        scope(exit) this.pending = C.Response.init;
-        return this.pending;
-    }
-
-    /// Called when a waiting condition was handled and can be safely removed
-    public void remove (size_t id)
-    {
-        this.waiting.remove(id);
     }
 
     /// Override `FiberScheduler.FiberCondition` to avoid mutexes
@@ -531,11 +356,44 @@ private final class LocalScheduler : BaseFiberScheduler
 
 
 /// We need a scheduler to simulate an event loop and to be re-entrant
-/// However, the one in `std.concurrency` is process-global (`__gshared`)
+/// However, the one in `geod24.concurrency` is process-global (`__gshared`)
 private LocalScheduler scheduler;
 
 /// Whether this is the main thread
 private bool is_main_thread;
+
+
+/*******************************************************************************
+
+    Provide eventloop-like functionalities
+
+    Since nodes instantiated via this modules are Vibe.d server,
+    they expect the ability to run an asynchronous task ,
+    usually provided by `vibe.core.core : runTask`.
+
+    In order for them to properly work, we need to integrate them to our event
+    loop by providing the ability to spawn a task, and wait on some condition,
+    optionally with a timeout.
+
+    The following functions do that.
+    Note that those facilities are not available from the main thread,
+    while is supposed to do tests and doesn't have a scheduler.
+
+*******************************************************************************/
+
+public void runTask (scope void delegate() dg)
+{
+    assert(scheduler !is null, "Cannot call this function from the main thread");
+    scheduler.spawn(dg);
+}
+
+/// Ditto
+public void sleep (Duration timeout)
+{
+    assert(scheduler !is null, "Cannot call this function from the main thread");
+    scope cond = scheduler.new FiberCondition();
+    cond.wait(timeout);
+}
 
 /*******************************************************************************
 
@@ -584,6 +442,7 @@ public final class RemoteAPI (API) : API
         Duration timeout = Duration.init)
     {
         auto childTid = C.spawn(&spawned!(Impl), args);
+        childTid.setTimeout(timeout);
         return new RemoteAPI(childTid, true, timeout);
     }
 
@@ -610,7 +469,7 @@ public final class RemoteAPI (API) : API
 
     ***************************************************************************/
 
-    private static C.Response handle_process (ref C.Request req, API node, FilterAPI filter)
+    private static C.Response handleCommand (ref C.Request req, API node, FilterAPI filter)
     {
         import std.format;
         switch (req.method)
@@ -660,7 +519,7 @@ public final class RemoteAPI (API) : API
        which is a struct with the sender's Tid, the method's mangleof,
        and the method's arguments as a tuple, serialized to a JSON string.
 
-       `std.concurrency.receive` is not `@safe`, so neither is this.
+       `geod24.concurrency.receive` is not `@safe`, so neither is this.
 
        Params:
            Implementation = Type of the implementation to instantiate
@@ -675,6 +534,7 @@ public final class RemoteAPI (API) : API
         import std.range;
 
         scope node = new Implementation(cargs);
+        scheduler = new LocalScheduler;
         scope exc = new Exception("You should never see this exception - please report a bug");
 
         // used for controling filtering / sleep
@@ -687,51 +547,68 @@ public final class RemoteAPI (API) : API
 
         Control control;
 
-        try scheduler.start(()
+        bool isSleeping()
         {
-            bool terminated = false;
-            auto sleep_inteval = dur!("msecs")(1);
-            while (!terminated)
-            {
-                /*
-                C.process(C.thisTid, (ref C.Message msg) {
-                    C.Message res_msg;
-                    if (msg.type == C.MsgType.shutdown)
-                    {
-                        terminated = true;
-                        return C.Message(C.MsgType.shutdown, C.Response(C.Status.Success));
-                    }
+            return control.sleep_until != SysTime.init
+                && Clock.currTime < control.sleep_until;
+        }
 
-                    if (msg.convertsTo!(C.Request))
-                    {
-                        auto req = msg.get!(C.Request);
-                        return C.Message(C.MsgType.standard, handle_process(req, node, control.filter));
-                    }
+        try
+            scheduler.start(() {
+                //writefln("[spawned] start");
+                bool terminated = false;
+                while (!terminated)
+                {
+                    C.receiveTimeout(10.msecs,
+                        (C.LinkTerminated e)
+                        {
+                            terminated = true;
+                        },
+                        (C.OwnerTerminated e) {
+                            terminated = true;
+                        },
+                        (ShutdownCommand e) {
+                            terminated = true;
+                            C.thisTid().shutdowned = true;
+                        },
+                        (TimeCommand s) {
+                            control.sleep_until = Clock.currTime + s.dur;
+                            control.drop = s.drop;
+                        },
+                        (FilterAPI filter_api) {
+                            control.filter = filter_api;
+                        },
+                        (C.Request req) {
+                            //writefln("[spawned] Request");
+                            if (!isSleeping())
+                            {
+                                //writefln("[spawned] 1 %s", req);
+                                return handleCommand(req, node, control.filter);
+                            }
+                            else if (!control.drop)
+                            {
+                                //writefln("[spawned] 2 %s", req);
+                                scheduler.spawn({
+                                    while (isSleeping())
+                                        Fiber.yield();
+                                });
+                                return handleCommand(req, node, control.filter);
+                            }
+                            else
+                            {
+                                //writefln("[spawned] 3 %s", req);
+                                return C.Response(C.Status.Timeout, "");
+                            }
+                        }
+                    );
 
-                    else if (msg.convertsTo!(TimeCommand))
-                    {
-                        auto param = msg.get!(TimeCommand);
-                        control.sleep_until = Clock.currTime + param.dur;
-                        control.drop = param.drop;
-                    }
-
-                    else if (msg.convertsTo!(FilterAPI))
-                    {
-                        auto param = msg.get!(FilterAPI);
-                        control.filter = param;
-                    }
-
-                    return C.Message(C.MsgType.standard, C.Response(C.Status.Failed));
-
-                });
-                */
-                Thread.sleep(sleep_inteval);
-            }
-        });
+                }
+                // Make sure the scheduler is not waiting for polling tasks
+                throw exc;
+            });
         catch (Exception e)
             if (e !is exc)
                 throw e;
-
     }
 
     /// Where to send message to
@@ -754,8 +631,8 @@ public final class RemoteAPI (API) : API
         In order to instantiate a node, see the static `spawn` function.
 
         Params:
-          tid = `std.concurrency.Tid` of the node.
-                This can usually be obtained by `std.concurrency.locate`.
+          tid = `geod24.concurrency.Tid` of the node.
+                This can usually be obtained by `geod24.concurrency.locate`.
           timeout = any timeout to use
 
     ***************************************************************************/
@@ -771,6 +648,8 @@ public final class RemoteAPI (API) : API
         this.childTid = tid;
         this.owner = isOwner;
         this.timeout = timeout;
+
+        this.childTid.setTimeout(timeout);
     }
 
     /***************************************************************************
@@ -793,7 +672,7 @@ public final class RemoteAPI (API) : API
 
             Returns the `Tid` this `RemoteAPI` wraps
 
-            This can be useful for calling `std.concurrency.register` or similar.
+            This can be useful for calling `geod24.concurrency.register` or similar.
             Note that the `Tid` should not be used directly, as our event loop,
             would error out on an unknown message.
 
@@ -812,7 +691,8 @@ public final class RemoteAPI (API) : API
 
         public void shutdown () @trusted
         {
-            ///this.childTid.shutdown();
+            C.send(this.childTid, ShutdownCommand());
+            this.childTid.shutdowned = true;
         }
 
         /***********************************************************************
@@ -949,9 +829,13 @@ public final class RemoteAPI (API) : API
                         is_main_thread = true;
                     }
 
-                    // `std.concurrency.send/receive[Only]` is not `@safe` but
+                    if (this.childTid.shutdowned)
+                        throw new Exception(serializeToJsonString("Request timed-out"));
+
+                    // `geod24.concurrency.send/receive[Only]` is not `@safe` but
                     // this overload needs to be
-                    auto res = () @trusted {
+                    auto res = () @trusted
+                    {
                         auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                             .serializeToJsonString();
                         auto req = C.Request(C.thisTid(), ovrld.mangleof, serialized);
@@ -975,6 +859,7 @@ public final class RemoteAPI (API) : API
 /// Simple usage example
 unittest
 {
+    writeln("test1");
     static interface API
     {
         @safe:
@@ -999,18 +884,18 @@ unittest
 
     scope test = RemoteAPI!API.spawn!MockAPI();
     import std.stdio;
-    writeln("test1");
 
     assert(test.pubkey() == 42);
     test.ctrl.shutdown();
+    writeln("test1");
 }
-
 
 /// In a real world usage, users will most likely need to use the registry
 unittest
 {
+    writeln("test2");
     import std.conv;
-    static import std.concurrency;
+    static import geod24.concurrency;
 
     static interface API
     {
@@ -1089,13 +974,12 @@ unittest
     auto testerFiber = C.spawn(&testFunc, C.thisTid);
     // Make sure our main thread terminates after everyone else
     //C.receiveOnly!int();
-    import std.stdio;
     writeln("test2");
 }
-
 /// This network have different types of nodes in it
 unittest
 {
+    writeln("test3");
     import geod24.concurrency;
 
     static interface API
@@ -1169,14 +1053,13 @@ unittest
     assert(nodes[0].requests() == 7);
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
-    import std.stdio;
     writeln("test3");
 }
-
+/*
 /// Support for circular nodes call
 unittest
 {
-    /*
+    writeln("test4");
     static import geod24.concurrency;
     import std.format;
 
@@ -1223,12 +1106,11 @@ unittest
     assert(210 == nodes[0].call(20, 0));
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
-    */
-    import std.stdio;
+
     writeln("test4");
 }
-
-
+*/
+/*
 /// Nodes can start tasks
 unittest
 {
@@ -1271,19 +1153,20 @@ unittest
     assert(node.getCounter() == 0);
     node.start();
     import std.stdio;
-    writefln("%s", node.getCounter());
+    //writefln("%s", node.getCounter());
     assert(node.getCounter() == 1);
     assert(node.getCounter() == 0);
     core.thread.Thread.sleep(1.seconds);
     // It should be 19 but some machines are very slow
     // (e.g. Travis Mac testers) so be safe
+    writefln("%s", node.getCounter());
     assert(node.getCounter() >= 9);
     assert(node.getCounter() == 0);
     node.ctrl.shutdown();
     import std.stdio;
     writeln("test5");
 }
-
+*/
 // Sane name insurance policy
 unittest
 {
@@ -1384,7 +1267,8 @@ unittest
     import std.stdio;
     writeln("test7");
 }
-
+*/
+/*
 // Filter commands
 unittest
 {
@@ -1528,7 +1412,6 @@ unittest
 }
 */
 
-/*
 // request timeouts (from main thread)
 unittest
 {
@@ -1569,9 +1452,10 @@ unittest
     import std.stdio;
     writeln("test9");
 }
+/*
 */
 
-/*
+
 // test-case for responses to re-used requests (from main thread)
 unittest
 {
@@ -1614,8 +1498,10 @@ unittest
 
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
+    import std.stdio;
+    writeln("test10");
 }
-
+/*
 // request timeouts (foreign node to another node)
 unittest
 {
@@ -1654,6 +1540,8 @@ unittest
     node_1.check();
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
+    import std.stdio;
+    writeln("test11");
 }
 
 // test-case for zombie responses
@@ -1696,6 +1584,8 @@ unittest
     node_1.check();
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
+    import std.stdio;
+    writeln("test12");
 }
 
 // request timeouts with dropped messages
@@ -1733,6 +1623,8 @@ unittest
     node_1.check();
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
+    import std.stdio;
+    writeln("test13");
 }
 
 // Test a node that gets a replay while it's delayed
@@ -1774,8 +1666,10 @@ unittest
     assert(node_1.ping() == 42);
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
+    import std.stdio;
+    writeln("test14");
 }
-
+*/
 // Test explicit shutdown
 unittest
 {
@@ -1796,7 +1690,7 @@ unittest
 
     auto node = RemoteAPI!API.spawn!Node(1.seconds);
     assert(node.myping(42) == 42);
-    node.ctrl.shutdown();
+    node.shutdown();
 
     try
     {
@@ -1807,5 +1701,6 @@ unittest
     {
         assert(ex.msg == `"Request timed-out"`);
     }
+    import std.stdio;
+    writeln("test15");
 }
-*/
