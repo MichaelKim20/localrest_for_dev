@@ -248,18 +248,6 @@ class PriorityMessageException : Exception
     Variant message;
 }
 
-/// Ask the node to shut down
-class Shutdown : Exception
-{
-    ///
-    this(Tid t, string msg = "Shut down") @safe pure nothrow @nogc
-    {
-        super(msg);
-        tid = t;
-    }
-
-    Tid tid;
-}
 
 /// Data sent by the caller
 struct Request
@@ -578,8 +566,22 @@ private void _send(T...)(Tid tid, T vals)
  */
 private void _send(T...)(MsgType type, Tid tid, T vals)
 {
-    auto msg = Message(type, vals);
-    tid.mbox.put(msg);
+    if (Fiber.getThis() !is null)
+    {
+        auto msg = Message(type, vals);
+        tid.mbox.put(msg);
+    }
+    else
+    {
+        bool done = false;
+        new Fiber(
+        {
+            auto msg = Message(type, vals);
+            tid.mbox.put(msg);
+            done = true;
+        }).call();
+        while (!done) Fiber.yield();
+    }
 }
 
 /**
@@ -595,7 +597,7 @@ private void _send(T...)(MsgType type, Tid tid, T vals)
  * the `Variant` will contain a $(REF Tuple, std,typecons) of all values
  * sent.
  */
-void receive(T...)( T ops )
+void receive (T...)( T ops )
 in
 {
     assert(thisInfo.ident.mbox !is null,
@@ -605,11 +607,25 @@ in
 do
 {
     checkops( ops );
+    auto tid = thisInfo.ident;
 
-    thisInfo.ident.mbox.get( ops );
+    if (Fiber.getThis() !is null)
+    {
+        tid.mbox.get( ops );
+    }
+    else
+    {
+        bool done = false;
+        auto f = new Fiber(
+        {
+            tid.mbox.get( ops );
+            done = true;
+        }).call();
+        while (!done) f.yield();
+    }
 }
 ///
-public Response query(Tid tid, ref Request data)
+Response query(Tid tid, ref Request data)
 {
     auto req = Message(MsgType.standard, data);
     auto res = request(tid, req);
@@ -617,30 +633,24 @@ public Response query(Tid tid, ref Request data)
 }
 
 ///
-public Message request(Tid tid, ref Message msg)
+Message request(Tid tid, ref Message msg)
 {
-    return tid.mbox.put(msg);
-}
-
-public void process (T...)( T ops )
-in
-{
-    assert(thisInfo.ident.mbox !is null,
-           "Cannot receive a message until a thread was spawned "
-           ~ "or thisTid was passed to a running thread.");
-}
-do
-{
-    checkops(ops);
-
-    thisInfo.ident.mbox.get (ops);
-}
-
-///
-void shutdown (Tid tid) @trusted
-{
-    _send(tid, new Shutdown(tid));
-    tid.shutdowned = true;
+    if (Fiber.getThis() !is null)
+    {
+        return tid.mbox.put(msg);
+    }
+    else
+    {
+        Message res;
+        bool done = false;
+        new Fiber(
+        {
+            res = tid.mbox.put(msg);
+            done = true;
+        }).call();
+        while (!done) Fiber.yield();
+        return res;
+    }
 }
 
 private
@@ -794,6 +804,334 @@ struct ThreadInfo
     }
 }
 
+/**
+ * A Scheduler controls how threading is performed by spawn.
+ *
+ * Implementing a Scheduler allows the concurrency mechanism used by this
+ * module to be customized according to different needs.  By default, a call
+ * to spawn will create a new kernel thread that executes the supplied routine
+ * and terminates when finished.  But it is possible to create Schedulers that
+ * reuse threads, that multiplex Fibers (coroutines) across a single thread,
+ * or any number of other approaches.  By making the choice of Scheduler a
+ * user-level option, std.concurrency may be used for far more types of
+ * application than if this behavior were predefined.
+ *
+ * Example:
+ * ---
+ * import std.concurrency;
+ * import std.stdio;
+ *
+ * void main()
+ * {
+ *     scheduler = new FiberScheduler;
+ *     scheduler.start(
+ *     {
+ *         writeln("the rest of main goes here");
+ *     });
+ * }
+ * ---
+ *
+ * Some schedulers have a dispatching loop that must run if they are to work
+ * properly, so for the sake of consistency, when using a scheduler, start()
+ * must be called within main().  This yields control to the scheduler and
+ * will ensure that any spawned threads are executed in an expected manner.
+ */
+interface Scheduler
+{
+    /**
+     * Spawns the supplied op and starts the Scheduler.
+     *
+     * This is intended to be called at the start of the program to yield all
+     * scheduling to the active Scheduler instance.  This is necessary for
+     * schedulers that explicitly dispatch threads rather than simply relying
+     * on the operating system to do so, and so start should always be called
+     * within main() to begin normal program execution.
+     *
+     * Params:
+     *  op = A wrapper for whatever the main thread would have done in the
+     *       absence of a custom scheduler.  It will be automatically executed
+     *       via a call to spawn by the Scheduler.
+     */
+    void start(void delegate() op);
+
+    /**
+     * Assigns a logical thread to execute the supplied op.
+     *
+     * This routine is called by spawn.  It is expected to instantiate a new
+     * logical thread and run the supplied operation.  This thread must call
+     * thisInfo.cleanup() when the thread terminates if the scheduled thread
+     * is not a kernel thread--all kernel threads will have their ThreadInfo
+     * cleaned up automatically by a thread-local destructor.
+     *
+     * Params:
+     *  op = The function to execute.  This may be the actual function passed
+     *       by the user to spawn itself, or may be a wrapper function.
+     */
+    void spawn(void delegate() op);
+
+    /**
+     * Yields execution to another logical thread.
+     *
+     * This routine is called at various points within concurrency-aware APIs
+     * to provide a scheduler a chance to yield execution when using some sort
+     * of cooperative multithreading model.  If this is not appropriate, such
+     * as when each logical thread is backed by a dedicated kernel thread,
+     * this routine may be a no-op.
+     */
+    void yield() nothrow;
+
+    /**
+     * Returns an appropriate ThreadInfo instance.
+     *
+     * Returns an instance of ThreadInfo specific to the logical thread that
+     * is calling this routine or, if the calling thread was not create by
+     * this scheduler, returns ThreadInfo.thisInfo instead.
+     */
+    @property ref ThreadInfo thisInfo() nothrow;
+
+    /**
+     * Creates a Condition variable analog for signaling.
+     *
+     * Creates a new Condition variable analog which is used to check for and
+     * to signal the addition of messages to a thread's message queue.  Like
+     * yield, some schedulers may need to define custom behavior so that calls
+     * to Condition.wait() yield to another thread when no new messages are
+     * available instead of blocking.
+     *
+     * Params:
+     *  m = The Mutex that will be associated with this condition.  It will be
+     *      locked prior to any operation on the condition, and so in some
+     *      cases a Scheduler may need to hold this reference and unlock the
+     *      mutex before yielding execution to another logical thread.
+     */
+    Condition newCondition(Mutex m) nothrow;
+}
+
+/**
+ * An example Scheduler using kernel threads.
+ *
+ * This is an example Scheduler that mirrors the default scheduling behavior
+ * of creating one kernel thread per call to spawn.  It is fully functional
+ * and may be instantiated and used, but is not a necessary part of the
+ * default functioning of this module.
+ */
+class ThreadScheduler : Scheduler
+{
+    /**
+     * This simply runs op directly, since no real scheduling is needed by
+     * this approach.
+     */
+    void start(void delegate() op)
+    {
+        op();
+    }
+
+    /**
+     * Creates a new kernel thread and assigns it to run the supplied op.
+     */
+    void spawn(void delegate() op)
+    {
+        auto t = new Thread(op);
+        t.start();
+    }
+
+    /**
+     * This scheduler does no explicit multiplexing, so this is a no-op.
+     */
+    void yield() nothrow
+    {
+        // no explicit yield needed
+    }
+
+    /**
+     * Returns ThreadInfo.thisInfo, since it is a thread-local instance of
+     * ThreadInfo, which is the correct behavior for this scheduler.
+     */
+    @property ref ThreadInfo thisInfo() nothrow
+    {
+        return ThreadInfo.thisInfo;
+    }
+
+    /**
+     * Creates a new Condition variable.  No custom behavior is needed here.
+     */
+    Condition newCondition(Mutex m) nothrow
+    {
+        return new Condition(m);
+    }
+}
+
+/**
+ * An example Scheduler using Fibers.
+ *
+ * This is an example scheduler that creates a new Fiber per call to spawn
+ * and multiplexes the execution of all fibers within the main thread.
+ */
+class FiberScheduler : Scheduler
+{
+    /**
+     * This creates a new Fiber for the supplied op and then starts the
+     * dispatcher.
+     */
+    void start(void delegate() op)
+    {
+        create(op);
+        dispatch();
+    }
+
+    /**
+     * This created a new Fiber for the supplied op and adds it to the
+     * dispatch list.
+     */
+    void spawn(void delegate() op) nothrow
+    {
+        create(op);
+    }
+
+    /**
+     * If the caller is a scheduled Fiber, this yields execution to another
+     * scheduled Fiber.
+     */
+    void yield() nothrow
+    {
+        // NOTE: It's possible that we should test whether the calling Fiber
+        //       is an InfoFiber before yielding, but I think it's reasonable
+        //       that any (non-Generator) fiber should yield here.
+        if (Fiber.getThis())
+            Fiber.yield();
+    }
+
+    /**
+     * Returns an appropriate ThreadInfo instance.
+     *
+     * Returns a ThreadInfo instance specific to the calling Fiber if the
+     * Fiber was created by this dispatcher, otherwise it returns
+     * ThreadInfo.thisInfo.
+     */
+    @property ref ThreadInfo thisInfo() nothrow
+    {
+        auto f = cast(InfoFiber) Fiber.getThis();
+
+        if (f !is null)
+            return f.info;
+        return ThreadInfo.thisInfo;
+    }
+
+    /**
+     * Returns a Condition analog that yields when wait or notify is called.
+     */
+    Condition newCondition(Mutex m) nothrow
+    {
+        return new FiberCondition(m);
+    }
+
+private:
+    static class InfoFiber : Fiber
+    {
+        ThreadInfo info;
+
+        this(void delegate() op) nothrow
+        {
+            super(op);
+        }
+    }
+
+    class FiberCondition : Condition
+    {
+        this(Mutex m) nothrow
+        {
+            super(m);
+            notified = false;
+        }
+
+        override void wait() nothrow
+        {
+            scope (exit) notified = false;
+
+            while (!notified)
+                switchContext();
+        }
+
+        override bool wait(Duration period) nothrow
+        {
+            import core.time : MonoTime;
+
+            scope (exit) notified = false;
+
+            for (auto limit = MonoTime.currTime + period;
+                 !notified && !period.isNegative;
+                 period = limit - MonoTime.currTime)
+            {
+                yield();
+            }
+            return notified;
+        }
+
+        override void notify() nothrow
+        {
+            notified = true;
+            switchContext();
+        }
+
+        override void notifyAll() nothrow
+        {
+            notified = true;
+            switchContext();
+        }
+
+    private:
+        void switchContext() nothrow
+        {
+            mutex_nothrow.unlock_nothrow();
+            scope (exit) mutex_nothrow.lock_nothrow();
+            yield();
+        }
+
+        private bool notified;
+    }
+
+private:
+    void dispatch()
+    {
+        import std.algorithm.mutation : remove;
+
+        while (m_fibers.length > 0)
+        {
+            auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
+            if (t !is null && !(cast(OwnerTerminated) t))
+            {
+                throw t;
+            }
+            if (m_fibers[m_pos].state == Fiber.State.TERM)
+            {
+                if (m_pos >= (m_fibers = remove(m_fibers, m_pos)).length)
+                    m_pos = 0;
+            }
+            else if (m_pos++ >= m_fibers.length - 1)
+            {
+                m_pos = 0;
+            }
+        }
+    }
+
+    void create(void delegate() op) nothrow
+    {
+        void wrap()
+        {
+            scope (exit)
+            {
+                thisInfo.cleanup();
+            }
+            op();
+        }
+
+        m_fibers ~= new InfoFiber(&wrap);
+    }
+
+private:
+    Fiber[] m_fibers;
+    size_t m_pos;
+}
 // Generator
 
 /**
@@ -1039,7 +1377,6 @@ private
         this() @trusted nothrow /* TODO: make @safe after relevant druntime PR gets merged */
         {
             this.mutex = new Mutex();
-            this.qsize = 64;
             this.closed = false;
             this.timeout = Duration.init;
         }
@@ -1058,10 +1395,26 @@ private
             }
         }
 
-        public Message _put (ref Message req_msg)
+        /*
+         * If maxMsgs is not set, the message is added to the queue and the
+         * owner is notified.  If the queue is full, the message will still be
+         * accepted if it is a control message, otherwise onCrowdingDoThis is
+         * called.  If the routine returns true, this call will block until
+         * the owner has made space available in the queue.  If it returns
+         * false, this call will abort.
+         *
+         * Params:
+         *  msg = The message to put in the queue.
+         *
+         * Throws:
+         *  An exception if the queue is full and onCrowdingDoThis throws.
+         */
+        public Message put (ref Message req_msg)
         {
             import std.algorithm;
             import std.range : popBackN, walkLength;
+
+            writefln("request %s %s", Fiber.getThis(), req_msg);
 
             this.mutex.lock();
             if (this.closed)
@@ -1072,22 +1425,17 @@ private
 
             if (this.recvq[].walkLength > 0)
             {
-                Message res_msg;
                 SudoFiber sf = this.recvq.front;
                 this.recvq.removeFront();
-                sf.req_msg = &req_msg;
-                sf.res_msg = &res_msg;
+                *sf.req_msg = req_msg;
 
                 if (sf.swdg !is null)
                     sf.swdg();
 
                 this.mutex.unlock();
 
-                return res_msg;
+                return *sf.res_msg;
             }
-
-
-            //writefln("request %s", req_msg);
 
             {
                 Message res_msg;
@@ -1115,7 +1463,6 @@ private
                         auto elapsed = end - start;
                         if (elapsed > this.timeout)
                         {
-                            // remove timeout element
                             this.mutex.lock();
                             auto range = find(this.sendq[], new_sf);
                             if (!range.empty)
@@ -1126,22 +1473,13 @@ private
                             scope(exit) this.mutex.unlock();
                             return Message(MsgType.standard, Response(Status.Timeout, ""));
                         }
-
-                        if (Fiber.getThis() !is null)
-                            Fiber.yield();
-                        else
-                            Thread.sleep(1.msecs);
+                        Fiber.yield();
                     }
                 }
                 else
                 {
                     while (is_waiting)
-                    {
-                        if (Fiber.getThis() !is null)
-                            Fiber.yield();
-                        else
-                            Thread.sleep(1.msecs);
-                    }
+                        Fiber.yield();
                 }
 
                 if (this.timed_wait)
@@ -1152,25 +1490,6 @@ private
 
                 return res_msg;
             }
-        }
-
-        /*
-         * If maxMsgs is not set, the message is added to the queue and the
-         * owner is notified.  If the queue is full, the message will still be
-         * accepted if it is a control message, otherwise onCrowdingDoThis is
-         * called.  If the routine returns true, this call will block until
-         * the owner has made space available in the queue.  If it returns
-         * false, this call will abort.
-         *
-         * Params:
-         *  msg = The message to put in the queue.
-         *
-         * Throws:
-         *  An exception if the queue is full and onCrowdingDoThis throws.
-         */
-        public Message put (ref Message req_msg)
-        {
-            return this._put(req_msg);
         }
 
         /*
@@ -1195,11 +1514,24 @@ private
 
             static assert(T.length);
 
-            alias Ops = AliasSeq!(T);
-            alias ops = vals[0 .. $];
+            static if (isImplicitlyConvertible!(T[0], Duration))
+            {
+                alias Ops = AliasSeq!(T[1 .. $]);
+                alias ops = vals[1 .. $];
 
-            this.timed_wait = false;
-            this.timed_wait_period = Duration.init;
+                this.timed_wait = true;
+                this.timed_wait_period = vals[0];
+            }
+            else
+            {
+                alias Ops = AliasSeq!(T);
+                alias ops = vals[0 .. $];
+
+                this.timed_wait = false;
+                this.timed_wait_period = Duration.init;
+            }
+
+            writefln("get %s", Fiber.getThis());
 
             bool onStandardMsg (Message* req_msg, Message* res_msg = null)
             {
@@ -1266,18 +1598,23 @@ private
                 return false;
             }
 
-            bool onControlMsg(Message* msg)
+            bool onControlMsg(Message* req_msg, Message* res_msg)
             {
-                switch (msg.type)
+                switch (req_msg.type)
                 {
                     case MsgType.linkDead:
-                        return onLinkDeadMsg(msg);
+                        auto result = onLinkDeadMsg(req_msg);
+                        if (res_msg !is null)
+                            *res_msg = Message(MsgType.standard, Response(Status.Success, ""));
+                        return result;
                     default:
+                        if (res_msg !is null)
+                            *res_msg = Message(MsgType.standard, Response(Status.Failed, ""));
                         return false;
                 }
             }
-/*
-            private bool _get (Message* msg)
+
+            bool processMsg ()
             {
                 this.mutex.lock();
 
@@ -1292,7 +1629,10 @@ private
                     SudoFiber sf = this.sendq.front;
                     this.sendq.removeFront();
 
-                    //*sf.res_msg = *sf.req_msg;
+                    if (isControlMsg(sf.req_msg))
+                        onControlMsg(sf.req_msg, sf.res_msg);
+                    else
+                        onStandardMsg(sf.req_msg, sf.res_msg);
 
                     if (sf.swdg !is null)
                         sf.swdg();
@@ -1308,30 +1648,31 @@ private
                     return true;
                 }
 
-
                 {
-                    shared(bool) is_waiting1 = true;
 
-                    void stopWait1() {
-                        is_waiting1 = false;
-                    }
-
+                    Message req_msg;
+                    Message res_msg;
                     SudoFiber new_sf;
                     new_sf.req_msg = &req_msg;
                     new_sf.res_msg = &res_msg;
-                    new_sf.swdg = &stopWait1;
                     new_sf.create_time = MonoTime.currTime;
+
+                    shared(bool) is_waiting1 = true;
+                    void stopWait1() {
+                        if (isControlMsg(new_sf.req_msg))
+                            onControlMsg(new_sf.req_msg, new_sf.res_msg);
+                        else
+                            onStandardMsg(new_sf.req_msg, new_sf.res_msg);
+
+                        is_waiting1 = false;
+                    }
+                    new_sf.swdg = &stopWait1;
 
                     this.recvq.insertBack(new_sf);
                     this.mutex.unlock();
 
                     while (is_waiting1)
-                    {
-                        if (Fiber.getThis() !is null)
-                            Fiber.yield();
-                        else
-                            Thread.sleep(1.msecs);
-                    }
+                        Fiber.yield();
 
                     if (this.timed_wait)
                     {
@@ -1343,40 +1684,7 @@ private
                 }
             }
 
-            this.mutex.lock();
-            scope (exit) this.mutex.unlock();
-
-            if (this.closed)
-            {
-                return false;
-            }
-
-            if (this.sendq[].walkLength > 0)
-            {
-                SudoFiber sf = this.queue.front;
-
-                this.sendq.removeFront();
-
-                if (isControlMsg(sf.req_msg))
-                    onControlMsg(sf.req_msg);
-                else
-                    onStandardMsg(sf.req_msg, sf.res_msg);
-
-                // writefln("process %s %s", *sf.req_msg, *sf.res_msg);
-
-                if (sf.swdg !is null)
-                    sf.swdg();
-
-                if (this.timed_wait)
-                {
-                    this.waitFromBase(sf.req_msg.create_time, this.timed_wait_period);
-                    this.timed_wait = false;
-                }
-
-                return true;
-            }
-*/
-            return false;
+            return processMsg();
         }
 
         private void waitFromBase (MonoTime base, Duration period)
@@ -1416,7 +1724,7 @@ private
             scope (exit) this.mutex.unlock();
 
             this.closed = true;
-
+/*
             while (true)
             {
                 if (this.queue[].walkLength == 0)
@@ -1432,6 +1740,7 @@ private
                 if (sf.swdg !is null)
                     sf.swdg();
             }
+*/
         }
 
     private:
@@ -1451,12 +1760,6 @@ private
 
         /// lock
         Mutex mutex;
-
-        /// size of queue
-        size_t qsize;
-
-        /// queue of data
-        DList!Message queue;
 
         /// collection of send waiters
         DList!SudoFiber sendq;
@@ -1483,7 +1786,6 @@ private struct SudoFiber
     public Message* res_msg;
     public StopWaitDg swdg;
     public MonoTime create_time;
-    public alias Ops;
 }
 
 private @property shared(Mutex) initOnceLock()
@@ -1575,11 +1877,6 @@ auto ref initOnce(alias var)(lazy typeof(var) init, Mutex mutex)
                 {
                     terminated = true;
                 },
-                (Shutdown e)
-                {
-                    terminated = true;
-                    thisTid.shutdowned = true;
-                },
                 (Request req)
                 {
                     if (req.method == "pow")
@@ -1597,5 +1894,4 @@ auto ref initOnce(alias var)(lazy typeof(var) init, Mutex mutex)
     auto res = query(child, req);
     assert(res.data == "4");
 
-    shutdown(child);
 }

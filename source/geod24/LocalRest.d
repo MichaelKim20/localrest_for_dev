@@ -128,7 +128,7 @@ private struct ArgWrapper (T...)
 /**
  * Copied from geod24.concurrency.FiberScheduler, increased the stack size to 16MB.
  */
-class BaseFiberScheduler
+class BaseFiberScheduler : C.Scheduler
 {
     static class InfoFiber : Fiber
     {
@@ -549,63 +549,54 @@ public final class RemoteAPI (API) : API
 
         bool isSleeping()
         {
-            return control.sleep_until != SysTime.init
-                && Clock.currTime < control.sleep_until;
+            return control.sleep_until != SysTime.init && Clock.currTime < control.sleep_until;
         }
 
-        try
-            scheduler.start(() {
-                //writefln("[spawned] start");
-                bool terminated = false;
-                while (!terminated)
-                {
-                    C.receive(
-                        (C.LinkTerminated e)
+        
+        try scheduler.start(() {
+            bool terminated = false;
+            while (!terminated)
+            {
+                C.receive(
+                    (C.LinkTerminated e)
+                    {
+                        terminated = true;
+                    },
+                    (C.OwnerTerminated e) {
+                        terminated = true;
+                    },
+                    (ShutdownCommand e) {
+                        terminated = true;
+                        C.thisTid().shutdowned = true;
+                    },
+                    (TimeCommand s) {
+                        control.sleep_until = Clock.currTime + s.dur;
+                        control.drop = s.drop;
+                    },
+                    (FilterAPI filter_api) {
+                        control.filter = filter_api;
+                    },
+                    (C.Request req) {
+                        if (!isSleeping())
                         {
-                            terminated = true;
-                        },
-                        (C.OwnerTerminated e) {
-                            terminated = true;
-                        },
-                        (ShutdownCommand e) {
-                            terminated = true;
-                            C.thisTid().shutdowned = true;
-                        },
-                        (TimeCommand s) {
-                            control.sleep_until = Clock.currTime + s.dur;
-                            control.drop = s.drop;
-                        },
-                        (FilterAPI filter_api) {
-                            control.filter = filter_api;
-                        },
-                        (C.Request req) {
-                            //writefln("[spawned] Request");
-                            if (!isSleeping())
-                            {
-                                //writefln("[spawned] 1 %s", req);
-                                return handleCommand(req, node, control.filter);
-                            }
-                            else if (!control.drop)
-                            {
-                                //writefln("[spawned] 2 %s", req);
-                                scheduler.spawn({
-                                    while (isSleeping())
-                                        Fiber.yield();
-                                });
-                                return handleCommand(req, node, control.filter);
-                            }
-                            else
-                            {
-                                //writefln("[spawned] 3 %s", req);
-                                return C.Response(C.Status.Timeout, "");
-                            }
+                            return handleCommand(req, node, control.filter);
                         }
-                    );
-
-                }
-                // Make sure the scheduler is not waiting for polling tasks
-                throw exc;
+                        
+                        else if (!control.drop)
+                        {
+                            while (isSleeping())
+                                Fiber.yield();
+                            return handleCommand(req, node, control.filter);
+                        }
+                        else
+                        {
+                            return C.Response(C.Status.Timeout, "");
+                        }
+                    }
+                );
             });
+            
+
         catch (Exception e)
             if (e !is exc)
                 throw e;
@@ -822,6 +813,7 @@ public final class RemoteAPI (API) : API
             mixin(q{
                 override ReturnType!(ovrld) } ~ member ~ q{ (Parameters!ovrld params)
                 {
+                    writeln("[main] start");
                     // we are in the main thread
                     if (scheduler is null)
                     {
@@ -829,7 +821,7 @@ public final class RemoteAPI (API) : API
                         is_main_thread = true;
                     }
 
-                    if (this.childTid.shutdowned)
+                    if (this.childTid.shutdowned) 
                         throw new Exception(serializeToJsonString("Request timed-out"));
 
                     // `geod24.concurrency.send/receive[Only]` is not `@safe` but
@@ -838,8 +830,12 @@ public final class RemoteAPI (API) : API
                     {
                         auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                             .serializeToJsonString();
+
                         auto req = C.Request(C.thisTid(), ovrld.mangleof, serialized);
-                        return C.query(this.childTid, req);
+                        C.Response res;
+                        bool done = false;
+                        res = C.query(this.childTid, req);
+                        return res;
                     }();
 
                     if (res.status == C.Status.Failed)
@@ -848,13 +844,14 @@ public final class RemoteAPI (API) : API
                     if (res.status == C.Status.Timeout)
                         throw new Exception(serializeToJsonString("Request timed-out"));
 
+                    writeln("[main] stop");
                     static if (!is(ReturnType!(ovrld) == void))
                         return res.data.deserializeJson!(typeof(return));
                 }
                 });
         }
-}
 
+}
 
 /// Simple usage example
 unittest
@@ -1055,6 +1052,7 @@ unittest
     nodes.each!(node => node.ctrl.shutdown());
     writeln("test3");
 }
+
 /*
 /// Support for circular nodes call
 unittest
