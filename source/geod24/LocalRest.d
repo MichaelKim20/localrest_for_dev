@@ -128,7 +128,7 @@ private struct ArgWrapper (T...)
 /**
  * Copied from geod24.concurrency.FiberScheduler, increased the stack size to 16MB.
  */
-class BaseFiberScheduler : C.Scheduler
+class BaseFiberScheduler
 {
     static class InfoFiber : Fiber
     {
@@ -559,7 +559,7 @@ public final class RemoteAPI (API) : API
                 bool terminated = false;
                 while (!terminated)
                 {
-                    C.receiveTimeout(10.msecs,
+                    C.receive(
                         (C.LinkTerminated e)
                         {
                             terminated = true;
