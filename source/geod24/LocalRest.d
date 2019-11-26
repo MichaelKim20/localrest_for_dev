@@ -125,10 +125,6 @@ private struct ArgWrapper (T...)
     T args;
 }
 
-
-/// Whether this is the main thread
-private bool is_main_thread;
-
 /*******************************************************************************
 
     Provide eventloop-like functionalities
@@ -207,7 +203,6 @@ public final class RemoteAPI (API) : API
     public static RemoteAPI!(API) spawn (Impl) (CtorParams!Impl args,
         Duration timeout = Duration.init)
     {
-        writefln("[RemoteAPI] start");
         auto childTid = C.spawn(&spawned!(Impl), args);
         childTid.timeout = timeout;
         return new RemoteAPI(childTid, true, timeout);
@@ -319,33 +314,27 @@ public final class RemoteAPI (API) : API
             return control.sleep_until != SysTime.init && Clock.currTime < control.sleep_until;
         }
 
-        writefln("[spawned] start %s", C.scheduler);
-        
-        try C.scheduler.start(() 
+        C.scheduler.start(()
         {
             bool terminated = false;
             while (!terminated)
             {
                 bool done = false;
-                writefln("[spawned] %s thisTid() : %s", Fiber.getThis(), C.thisTid());
                 C.receive(
                     (C.LinkTerminated e)
                     {
-                        writefln("[C.receive] %s", e);
                         terminated = true;
                     },
-                    (C.OwnerTerminated e) 
+                    (C.OwnerTerminated e)
                     {
-                        writefln("[C.receive] %s", e);
                         terminated = true;
                     },
-                    (ShutdownCommand e) 
+                    (ShutdownCommand e)
                     {
-                        writefln("[C.receive] %s", e);
                         terminated = true;
                         C.thisTid().shutdown = true;
                     },
-                    (TimeCommand s) 
+                    (TimeCommand s)
                     {
                         control.sleep_until = Clock.currTime + s.dur;
                         control.drop = s.drop;
@@ -354,32 +343,25 @@ public final class RemoteAPI (API) : API
                     {
                         control.filter = filter_api;
                     },
-                    (C.Request req) 
+                    (C.Request req)
                     {
-                        writefln("[C.receive] %s", req);
-                        //if (!isSleeping())
-                        //{
+                        if (!isSleeping())
                             return handleCommand(req, node, control.filter);
-                        //}
-                        /*
                         else if (!control.drop)
                         {
                             while (isSleeping())
-                                Fiber.yield();
+                            {
+                                if (Fiber.getThis())
+                                    Fiber.yield();
+                            }
                             return handleCommand(req, node, control.filter);
                         }
                         else
-                        {
                             return C.Response(C.Status.Timeout, "");
-                        }
-                        */
                     }
                 );
             }
-       });
-        catch (Exception e)
-            if (e !is exc)
-                throw e;
+        });
     }
 
     /// Where to send message to
@@ -419,7 +401,6 @@ public final class RemoteAPI (API) : API
         this.childTid = tid;
         this.owner = isOwner;
         this.timeout = timeout;
-
         this.childTid.timeout = timeout;
     }
 
@@ -593,35 +574,20 @@ public final class RemoteAPI (API) : API
             mixin(q{
                 override ReturnType!(ovrld) } ~ member ~ q{ (Parameters!ovrld params)
                 {
+                    C.createScheduler();
 
-                    writeln("[main] start");
-
-                    // we are in the main thread
-                    if (C.scheduler is null)
-                    {
-                        C.createScheduler();
-                        is_main_thread = true;
-                    }
-
-                    if (this.childTid.shutdown) 
+                    if (this.childTid.shutdown)
                         throw new Exception(serializeToJsonString("Request timed-out"));
 
-                    // `geod24.LogicalNode.send/receive[Only]` is not `@safe` but
+                    // `geod24.LogicalNode.Request` is not `@safe` but
                     // this overload needs to be
                     auto res = () @trusted
                     {
                         auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                             .serializeToJsonString();
 
-                        writefln("[API] thisTid() : %s", C.thisTid());
                         auto req = C.Request(C.thisTid(), ovrld.mangleof, serialized);
-                        C.Response res;
-                        //shared(bool) done = false;
-                        //C.scheduler.start({
-                            res = C.query(this.childTid, req);
-                            //done = true;
-                        //});
-                        return res;
+                        return C.query(this.childTid, req);
                     }();
 
                     if (res.status == C.Status.Failed)
@@ -630,17 +596,13 @@ public final class RemoteAPI (API) : API
                     if (res.status == C.Status.Timeout)
                         throw new Exception(serializeToJsonString("Request timed-out"));
 
-                    writeln("[main] stop");
                     static if (!is(ReturnType!(ovrld) == void))
                         return res.data.deserializeJson!(typeof(return));
-
-                    
                 }
                 });
         }
-
 }
-
+/*
 /// Simple usage example
 unittest
 {
@@ -840,7 +802,7 @@ unittest
     nodes.each!(node => node.ctrl.shutdown());
     writeln("test3");
 }
-
+*/
 /*
 /// Support for circular nodes call
 unittest
@@ -895,8 +857,7 @@ unittest
 
     writeln("test4");
 }
-*/
-/*
+
 /// Nodes can start tasks
 unittest
 {
@@ -952,7 +913,7 @@ unittest
     import std.stdio;
     writeln("test5");
 }
-*/
+
 // Sane name insurance policy
 unittest
 {
@@ -980,7 +941,7 @@ unittest
     node.ctrl.shutdown();
     import std.stdio;
     writeln("test6");
-}
+}*/
 /*
 // Simulate temporary outage
 unittest
@@ -1198,9 +1159,12 @@ unittest
 }
 */
 
+
 // request timeouts (from main thread)
 unittest
 {
+    import std.stdio;
+    writeln("test9");
     import core.thread;
     import std.exception;
 
@@ -1213,11 +1177,14 @@ unittest
     {
         override size_t sleepFor (long dur)
         {
+            writefln("Start API -------- %s", dur);
             Thread.sleep(msecs(dur));
+            writefln("End API -------- %s", dur);
             return 42;
         }
     }
-
+    writeln("test9 A");
+        import std.stdio;
     // node with no timeout
     auto node = RemoteAPI!API.spawn!Node();
     assert(node.sleepFor(80) == 42);  // no timeout
@@ -1225,18 +1192,25 @@ unittest
     // node with a configured timeout
     auto to_node = RemoteAPI!API.spawn!Node(500.msecs);
 
+    writeln("test9 B");
     /// none of these should time out
     assert(to_node.sleepFor(10) == 42);
+    writeln("test9 C");
     assert(to_node.sleepFor(20) == 42);
+    writeln("test9 D");
     assert(to_node.sleepFor(30) == 42);
+    writeln("test9 E");
     assert(to_node.sleepFor(40) == 42);
-
+    writeln("test9 0");
     assertThrown!Exception(to_node.sleepFor(2000));
+    writeln("test9 1");
     Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
+    writeln("test9 2");
     to_node.ctrl.shutdown();
+    writeln("test9 3");
     node.ctrl.shutdown();
-    import std.stdio;
-    writeln("test9");
+
+    writeln("test9 4");
 }
 /*
 */

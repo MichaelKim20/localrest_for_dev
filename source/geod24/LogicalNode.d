@@ -33,7 +33,7 @@ public void checkops (T...)(T ops)
                 alias a2 = Parameters!(t2);
 
                 static assert(!is(a1 == a2),
-                    "function with arguments " ~ 
+                    "function with arguments " ~
                     a1.stringof ~ " occludes successive function");
             }
         }
@@ -55,7 +55,7 @@ static ~this()
 /*******************************************************************************
 
     Message
-    
+
 *******************************************************************************/
 
 
@@ -63,6 +63,7 @@ public enum MsgType
 {
     standard,
     linkDead,
+    close,
 }
 
 public struct Message
@@ -189,7 +190,7 @@ private class MessageBox
     /***************************************************************************
 
 
-        
+
     ***************************************************************************/
 
     public void setTimeout (Duration d) @safe pure nothrow @nogc
@@ -201,7 +202,7 @@ private class MessageBox
     /***************************************************************************
 
 
-        
+
     ***************************************************************************/
 
     public @property bool isClosed () @safe @nogc pure
@@ -215,7 +216,7 @@ private class MessageBox
     /***************************************************************************
 
 
-        
+
     ***************************************************************************/
 
     public Message put (ref Message req_msg)
@@ -258,14 +259,12 @@ private class MessageBox
             new_sf.swdg = &stopWait;
             new_sf.create_time = MonoTime.currTime;
 
-            writefln("[sendq] %s thisTid() : %s", Fiber.getThis(), thisTid());
-
             this.sendq.insertBack(new_sf);
             this.mutex.unlock();
 
             if (this.timeout > Duration.init)
             {
-                auto start = MonoTime.currTime;
+                auto start = req_msg.create_time;
                 while (is_waiting)
                 {
                     auto end = MonoTime.currTime();
@@ -279,32 +278,24 @@ private class MessageBox
                             popBackN(range, range.walkLength-1);
                             this.sendq.remove(range);
                         }
-                        scope(exit) this.mutex.unlock();
+                        this.mutex.unlock();
                         return Message(MsgType.standard, Response(Status.Timeout, ""));
                     }
-                    
-                    if (Fiber.getThis() !is null)
-                    {
+
+                    if (Fiber.getThis())
                         Fiber.yield();
-                    } 
                     else
-                    {
                         Thread.sleep(1.msecs);
-                    }
                 }
             }
             else
             {
                 while (is_waiting)
                 {
-                    if (Fiber.getThis() !is null)
-                    {
+                    if (Fiber.getThis())
                         Fiber.yield();
-                    } 
                     else
-                    {
                         Thread.sleep(1.msecs);
-                    }
                 }
             }
 
@@ -315,7 +306,7 @@ private class MessageBox
     /***************************************************************************
 
 
-        
+
     ***************************************************************************/
 
     public bool get (T...) (scope T vals)
@@ -330,7 +321,7 @@ private class MessageBox
         /***********************************************************************
 
 
-            
+
         ***********************************************************************/
 
         bool onStandardMsg (Message* req_msg, Message* res_msg = null)
@@ -345,9 +336,44 @@ private class MessageBox
                     static if (is(ReturnType!(t) == Response))
                     {
                         if (res_msg !is null)
-                            *res_msg = Message(MsgType.standard, (*req_msg).map(op));
+                        {
+                            if (this.timeout > Duration.init)
+                            {
+                                //writefln("%s", this.timeout);
+                                bool done = false;
+                                Message res;
+                                new Fiber({
+                                    res = Message(MsgType.standard, (*req_msg).map(op));
+                                    if (res_msg ) *res_msg = res;
+                                    done = true;
+                                }).call();
+                                auto start = req_msg.create_time;
+                                    writefln("%s %s", this.timeout, start);
+                                while (!done)
+                                {
+                                    auto end = MonoTime.currTime();
+                                    auto elapsed = end - start;
+                                    writefln("%s %s", this.timeout, elapsed);
+                                    if (elapsed > this.timeout)
+                                    {
+                                        *res_msg = Message(MsgType.standard, Response(Status.Timeout, ""));
+                                        res_msg = null;
+                                        return true;
+                                    }
+                                    if (Fiber.getThis())
+                                        Fiber.yield();
+                                }
+                            }
+                            else
+                            {
+                                *res_msg = Message(MsgType.standard, (*req_msg).map(op));
+                            }
+                        }
                         else
+                        {
                             (*req_msg).map(op);
+                        }
+
                         return true;
                     }
                     else if (is(ReturnType!(t) == bool))
@@ -369,7 +395,7 @@ private class MessageBox
         /***********************************************************************
 
 
-            
+
         ***********************************************************************/
 
         bool onLinkDeadMsg(Message* msg)
@@ -408,7 +434,7 @@ private class MessageBox
         /***********************************************************************
 
 
-            
+
         ***********************************************************************/
 
         bool onControlMsg(Message* req_msg, Message* res_msg)
@@ -420,6 +446,12 @@ private class MessageBox
                     if (res_msg !is null)
                         *res_msg = Message(MsgType.standard, Response(Status.Success, ""));
                     return result;
+
+                case MsgType.close:
+                    if (res_msg !is null)
+                        *res_msg = Message(MsgType.standard, Response(Status.Success, ""));
+                    return false;
+
                 default:
                     if (res_msg !is null)
                         *res_msg = Message(MsgType.standard, Response(Status.Failed, ""));
@@ -430,7 +462,7 @@ private class MessageBox
         /***********************************************************************
 
 
-            
+
         ***********************************************************************/
 
         bool processMsg ()
@@ -470,7 +502,7 @@ private class MessageBox
                 new_sf.create_time = MonoTime.currTime;
 
                 shared(bool) is_waiting1 = true;
-                void stopWait1() 
+                void stopWait1()
                 {
                     if (isControlMsg(&req_msg))
                         onControlMsg(&req_msg, &res_msg);
@@ -486,14 +518,10 @@ private class MessageBox
 
                 while (is_waiting1)
                 {
-                    if (Fiber.getThis() !is null)
-                    {
+                    if (Fiber.getThis())
                         Fiber.yield();
-                    } 
                     else
-                    {
                         Thread.sleep(1.msecs);
-                    }
                 }
 
                 return true;
@@ -507,12 +535,11 @@ private class MessageBox
     /***************************************************************************
 
 
-        
+
     ***************************************************************************/
 
     public void close ()
     {
-/*
         ///
         static void onLinkDeadMsg (Message* msg)
         {
@@ -524,8 +551,6 @@ private class MessageBox
                 thisInfo.owner = Tid.init;
         }
 
-        writefln("close");
-
         SudoFiber sf;
 
         this.mutex.lock();
@@ -533,22 +558,18 @@ private class MessageBox
 
         this.closed = true;
 
-        writefln("close1");
-
         while (true)
         {
             if (this.recvq[].walkLength == 0)
                 break;
             sf = this.recvq.front;
             this.recvq.removeFront();
-                
-            *sf.req_msg = Message(MsgType.standard, new LinkTerminated(thisTid));
+
+            *sf.req_msg = Message(MsgType.close, "");
 
             if (sf.swdg !is null)
                 sf.swdg();
         }
-
-        writefln("close2");
 
         while (true)
         {
@@ -563,16 +584,13 @@ private class MessageBox
             if (sf.swdg !is null)
                 sf.swdg();
         }
-
-        writefln("close3");
-        */
     }
 
 
     /***************************************************************************
 
 
-        
+
     ***************************************************************************/
 
     private bool isControlMsg (Message* msg) @safe @nogc pure nothrow
@@ -583,7 +601,7 @@ private class MessageBox
     /***************************************************************************
 
 
-        
+
     ***************************************************************************/
 
     private bool isLinkDeadMsg (Message* msg) @safe @nogc pure nothrow
@@ -612,7 +630,7 @@ public struct Tid
     /***************************************************************************
 
 
-        
+
     ***************************************************************************/
 
     public this (MessageBox m) @safe pure nothrow @nogc
@@ -626,7 +644,7 @@ public struct Tid
     /***************************************************************************
 
 
-        
+
     ***************************************************************************/
 
     public @property void timeout (Duration value) @safe pure nothrow @nogc
@@ -638,7 +656,7 @@ public struct Tid
     /***************************************************************************
 
 
-        
+
     ***************************************************************************/
 
     public @property Duration timeout () @safe @nogc pure
@@ -650,7 +668,7 @@ public struct Tid
     /***************************************************************************
 
 
-        
+
     ***************************************************************************/
 
     public @property void shutdown (bool value) @safe pure nothrow @nogc
@@ -662,7 +680,7 @@ public struct Tid
     /***************************************************************************
 
 
-        
+
     ***************************************************************************/
 
     public @property bool shutdown () @safe @nogc pure
@@ -674,7 +692,7 @@ public struct Tid
     /***************************************************************************
 
 
-        
+
     ***************************************************************************/
 
     public void toString(scope void delegate(const(char)[]) sink)
@@ -787,7 +805,7 @@ private template isSpawnable(F, T...)
 public Tid spawn (F, T...)(F fn, T args)
 if (isSpawnable!(F, T))
 {
-    static assert(!hasLocalAliasing!(T), 
+    static assert(!hasLocalAliasing!(T),
         "Aliases to mutable thread-local data not allowed.");
     return _spawn(true, fn, args);
 }
@@ -822,13 +840,13 @@ if (isSpawnable!(F, T))
 /*******************************************************************************
 
 
-    
+
 *******************************************************************************/
 
 public Tid spawnLinked(F, T...)(F fn, T args)
 if (isSpawnable!(F, T))
 {
-    static assert(!hasLocalAliasing!(T), 
+    static assert(!hasLocalAliasing!(T),
         "Aliases to mutable thread-local data not allowed.");
     return _spawn(true, fn, args);
 }
@@ -917,7 +935,7 @@ if (isSpawnable!(F, T))
 
 public void send (T...)(Tid tid, T vals)
 {
-    static assert(!hasLocalAliasing!(T), 
+    static assert(!hasLocalAliasing!(T),
         "Aliases to mutable thread-local data not allowed.");
     _send(tid, vals);
 }
@@ -945,26 +963,18 @@ private void _send (T...)(Tid tid, T vals)
 private void _send(T...)(MsgType type, Tid tid, T vals)
 {
     auto msg = Message(type, vals);
-    writefln("[send] %s", msg);
-    tid.mbox.put(msg);
-    /*
-    if (Fiber.getThis() !is null)
-    {
+
+    if (Fiber.getThis())
         tid.mbox.put(msg);
-    }
     else
     {
-        bool done = false;
-        new Fiber(
-        {
+        auto condition = scheduler.newCondition();
+        scheduler.start(() {
             tid.mbox.put(msg);
-            done = true;
-        }).call();
-        while (!done) {
-            Fiber.yield();
-        }
+            condition.notify();
+        });
+        condition.wait();
     }
-    */
 }
 
 /*******************************************************************************
@@ -974,7 +984,7 @@ private void _send(T...)(MsgType type, Tid tid, T vals)
     Receive a message from another thread, or block if no messages of the
     specified types are available.  This function works by pattern matching
     a message against a set of delegates and executing the first match found.
-    
+
     If a delegate that accepts a $(REF Variant, std,variant) is included as
     the last argument to `receive`, it will match any message that was not
     matched by an earlier delegate.  If more than one argument is sent,
@@ -986,53 +996,39 @@ private void _send(T...)(MsgType type, Tid tid, T vals)
 public void receive (T...)( T ops )
 in
 {
-    writefln("[receive] %s thisTid() : %s", Fiber.getThis(), thisTid());
     assert(thisInfo.ident.mbox !is null,
            "Cannot receive a message until a thread was spawned "
            ~ "or thisTid was passed to a running thread.");
 }
 do
 {
-    writefln("[receive] %s", 1);
-    thisInfo.ident.mbox.get(ops);
-    /*
-    writefln("[receive] %s", 0);
     checkops( ops );
-    auto tid = thisInfo.ident;
 
-    if (Fiber.getThis() !is null)
-    {
-        writefln("[receive] %s", 1);
-        tid.mbox.get(ops);
-    }
+    if (Fiber.getThis())
+        thisInfo.ident.mbox.get(ops);
     else
     {
-        writefln("[receive] %s", 2);
-        bool done = false;
-        new Fiber(
+        auto condition = scheduler.newCondition();
+        scheduler.start(
         {
-            tid.mbox.get(ops);
-            done = true;
-        }).call();
-        while (!done) {
-            Fiber.yield();
-        }
+            thisInfo.ident.mbox.get(ops);
+            condition.notify();
+        });
+        condition.wait();
     }
-    */
 }
 
 
 /*******************************************************************************
 
 
-    
+
 *******************************************************************************/
 
 public Response query (Tid tid, ref Request data)
 {
     auto req = Message(MsgType.standard, data);
     auto res = request(tid, req);
-    writefln("[query] %s", res);
     return *res.data.peek!(Response);
 }
 
@@ -1040,40 +1036,33 @@ public Response query (Tid tid, ref Request data)
 /*******************************************************************************
 
 
-    
+
 *******************************************************************************/
 
 public Message request (Tid tid, ref Message msg)
 {
-    writefln("[request] %s thisTid() : %s", Fiber.getThis(), thisTid());
-    return tid.mbox.put(msg);
-    /*
-    if (Fiber.getThis() !is null)
-    {
+    if (Fiber.getThis())
         return tid.mbox.put(msg);
-    }
     else
     {
         Message res;
-        bool done = false;
-        new Fiber(
+        auto condition = scheduler.newCondition();
+        scheduler.start(
         {
             res = tid.mbox.put(msg);
-            done = true;
-        }).call();
-        while (!done) {
-            Fiber.yield();
-        }
+            condition.notify();
+        });
+        condition.wait();
+
         return res;
     }
-    */
 }
 
 
 /*******************************************************************************
 
     Register of Tid's name
-    
+
 *******************************************************************************/
 
 private
@@ -1089,7 +1078,7 @@ private
 /*******************************************************************************
 
 
-    
+
 *******************************************************************************/
 
 private @property Mutex registryLock ()
@@ -1103,7 +1092,7 @@ private @property Mutex registryLock ()
 /*******************************************************************************
 
 
-    
+
 *******************************************************************************/
 
 private void unregisterMe ()
@@ -1131,7 +1120,7 @@ private void unregisterMe ()
     Associates name with tid in a process-local map.  When the thread
     represented by tid terminates, any names associated with it will be
     automatically unregistered.
- 
+
     Params:
         name = The name to associate with tid.
         tid  = The tid register by name.
@@ -1139,7 +1128,7 @@ private void unregisterMe ()
     Returns:
         true if the name is available and tid is not known to represent a
         defunct thread.
-    
+
 *******************************************************************************/
 
 bool register(string name, Tid tid)
@@ -1213,8 +1202,8 @@ Tid locate (string name)
 
 /*******************************************************************************
 
-    Struct of Data 
-    
+    Struct of Data
+
 
 *******************************************************************************/
 
@@ -1259,7 +1248,7 @@ struct Response
 /*******************************************************************************
 
     Exceptions
-    
+
 
 *******************************************************************************/
 
@@ -1316,12 +1305,12 @@ public class LinkTerminated : Exception
 }
 
 /*******************************************************************************
- 
+
     Thrown when a Tid is missing, e.g. when `ownerTid` doesn't
     find an owner thread.
 
  *******************************************************************************/
- 
+
 public class TidMissingException : Exception
 {
     import std.exception : basicExceptionCtors;
@@ -1329,8 +1318,8 @@ public class TidMissingException : Exception
 }
 
 /*******************************************************************************
- 
- 
+
+
  *******************************************************************************/
 
 private bool hasLocalAliasing (Types...)()
@@ -1357,14 +1346,14 @@ private bool hasLocalAliasing (Types...)()
 
 
 /*******************************************************************************
- 
+
     ThreadInfo
 
     Encapsulates all implementation-level data needed for scheduling.
     When defining a Scheduler, an instance of this struct must be associated
     with each logical thread.  It contains all implementation-level information
     needed by the internal API.
- 
+
  *******************************************************************************/
 
 struct ThreadInfo
@@ -1405,7 +1394,6 @@ struct ThreadInfo
     }
 }
 
-
 /*******************************************************************************
 
     A Scheduler controls how threading is performed by spawn.
@@ -1438,7 +1426,7 @@ struct ThreadInfo
     properly, so for the sake of consistency, when using a scheduler, start()
     must be called within main().  This yields control to the scheduler and
     will ensure that any spawned threads are executed in an expected manner.
- 
+
  *******************************************************************************/
 
 interface Scheduler
@@ -1515,7 +1503,7 @@ interface Scheduler
 /*******************************************************************************
 
     FiberScheduler
-    
+
     Scheduler using Fibers.
 
  *******************************************************************************/
@@ -1524,8 +1512,6 @@ public class FiberScheduler : Scheduler
 {
     static class InfoFiber : Fiber
     {
-        ThreadInfo info;
-
         this(void delegate() op) nothrow
         {
             super(op, 16 * 1024 * 1024);  // 16Mb
@@ -1540,7 +1526,7 @@ public class FiberScheduler : Scheduler
     {
         create(op);
         dispatch();
-    }   
+    }
 
     /**
      * This created a new Fiber for the supplied op and adds it to the
@@ -1574,10 +1560,6 @@ public class FiberScheduler : Scheduler
      */
     @property ref ThreadInfo thisInfo() nothrow
     {
-        auto f = cast(InfoFiber) Fiber.getThis();
-
-        if (f !is null)
-            return f.info;
         return ThreadInfo.thisInfo;
     }
 
@@ -1601,7 +1583,7 @@ private:
         override void wait() nothrow
         {
             scope (exit) notified = false;
-            
+
             while (!notified)
                 this.outer.yield();
         }
@@ -1664,10 +1646,6 @@ private:
     {
         void wrap()
         {
-            scope (exit)
-            {
-                thisInfo.cleanup();
-            }
             op();
         }
 

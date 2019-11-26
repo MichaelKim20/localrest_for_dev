@@ -12,12 +12,10 @@ import std.variant;
 void main()
 {
     test1();
-    writeln("sample");
 }
 
 void test1()
 {
-    //core.thread.thread_joinAll();
     static interface API
     {
         @safe:
@@ -43,9 +41,8 @@ void test1()
     import std.stdio;
 
     scope test = RemoteAPI!API.spawn!MockAPI();
-    writefln("test %s", test.tid);
     auto v = test.pubkey();
     writefln("end %s", v);
 
-    //test.ctrl.shutdown();
+    test.ctrl.shutdown();
 }
