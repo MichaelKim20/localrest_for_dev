@@ -577,11 +577,11 @@ public final class RemoteAPI (API) : API
                         control.filter = filter_api;
                     },
                     (C.Request req) {
-                        if (!isSleeping())
-                        {
+                        //if (!isSleeping())
+                        //{
                             return handleCommand(req, node, control.filter);
-                        }
-                        
+                        //}
+                        /*
                         else if (!control.drop)
                         {
                             while (isSleeping())
@@ -592,11 +592,11 @@ public final class RemoteAPI (API) : API
                         {
                             return C.Response(C.Status.Timeout, "");
                         }
+                        */
                     }
                 );
-            });
-            
-
+            }
+       });
         catch (Exception e)
             if (e !is exc)
                 throw e;
@@ -833,8 +833,12 @@ public final class RemoteAPI (API) : API
 
                         auto req = C.Request(C.thisTid(), ovrld.mangleof, serialized);
                         C.Response res;
-                        bool done = false;
-                        res = C.query(this.childTid, req);
+                        shared(bool) done = false;
+                        scheduler.start({
+                            res = C.query(this.childTid, req);
+                            done = true;
+                        });
+                        while (!done) scheduler.yield();
                         return res;
                     }();
 

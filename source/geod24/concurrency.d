@@ -174,7 +174,9 @@ void checkops (T...)(T ops)
 
 @property ref ThreadInfo thisInfo() nothrow
 {
-    return ThreadInfo.thisInfo;
+    if (scheduler is null)
+        return ThreadInfo.thisInfo;
+    return scheduler.thisInfo;
 }
 
 static ~this()
@@ -429,11 +431,11 @@ private template isSpawnable(F, T...)
  *  pointer indirection.  This is necessary for enforcing isolation among
  *  threads.
  */
-Tid spawn(F, T...)(F fn, T args)
+Tid spawn (F, T...)(F fn, T args)
 if (isSpawnable!(F, T))
 {
     static assert(!hasLocalAliasing!(T), "Aliases to mutable thread-local data not allowed.");
-    return _spawn(false, fn, args);
+    return _spawn(true, fn, args);
 }
 
 ///
@@ -563,25 +565,11 @@ private void _send(T...)(Tid tid, T vals)
 /*
  * Implementation of send.  This allows parameter checking to be different for
  * both Tid.send() and .send().
- */
+ */ 
 private void _send(T...)(MsgType type, Tid tid, T vals)
 {
-    if (Fiber.getThis() !is null)
-    {
-        auto msg = Message(type, vals);
-        tid.mbox.put(msg);
-    }
-    else
-    {
-        bool done = false;
-        new Fiber(
-        {
-            auto msg = Message(type, vals);
-            tid.mbox.put(msg);
-            done = true;
-        }).call();
-        while (!done) Fiber.yield();
-    }
+    auto msg = Message(type, vals);
+    tid.mbox.put(msg);
 }
 
 /**
@@ -606,23 +594,8 @@ in
 }
 do
 {
-    checkops( ops );
-    auto tid = thisInfo.ident;
-
-    if (Fiber.getThis() !is null)
-    {
-        tid.mbox.get( ops );
-    }
-    else
-    {
-        bool done = false;
-        auto f = new Fiber(
-        {
-            tid.mbox.get( ops );
-            done = true;
-        }).call();
-        while (!done) f.yield();
-    }
+    checkops(ops);
+    thisInfo.ident.mbox.get(ops);
 }
 ///
 Response query(Tid tid, ref Request data)
@@ -635,22 +608,7 @@ Response query(Tid tid, ref Request data)
 ///
 Message request(Tid tid, ref Message msg)
 {
-    if (Fiber.getThis() !is null)
-    {
-        return tid.mbox.put(msg);
-    }
-    else
-    {
-        Message res;
-        bool done = false;
-        new Fiber(
-        {
-            res = tid.mbox.put(msg);
-            done = true;
-        }).call();
-        while (!done) Fiber.yield();
-        return res;
-    }
+    return tid.mbox.put(msg);
 }
 
 private
@@ -986,6 +944,7 @@ class FiberScheduler : Scheduler
     void spawn(void delegate() op) nothrow
     {
         create(op);
+        yield();
     }
 
     /**
@@ -1132,6 +1091,16 @@ private:
     Fiber[] m_fibers;
     size_t m_pos;
 }
+
+/**
+ * Sets the Scheduler behavior within the program.
+ *
+ * This variable sets the Scheduler behavior within this program.  Typically,
+ * when setting a Scheduler, scheduler.start() should be called in main.  This
+ * routine will not return until program execution is complete.
+ */
+__gshared Scheduler scheduler;
+
 // Generator
 
 /**
@@ -1143,8 +1112,13 @@ void yield() nothrow
     auto fiber = Fiber.getThis();
     if (!(cast(IsGenerator) fiber))
     {
-        if (fiber)
-            return Fiber.yield();
+        if (scheduler is null)
+        {
+            if (fiber)
+                return Fiber.yield();
+        }
+        else
+            scheduler.yield();
     }
 }
 
@@ -1473,13 +1447,22 @@ private
                             scope(exit) this.mutex.unlock();
                             return Message(MsgType.standard, Response(Status.Timeout, ""));
                         }
-                        Fiber.yield();
+                        
+                        if (Fiber.getThis() !is null)
+                            Fiber.yield();
+                        else
+                            Thread.sleep(1.msecs);
                     }
                 }
                 else
                 {
                     while (is_waiting)
-                        Fiber.yield();
+                    {
+                        if (Fiber.getThis() !is null)
+                            Fiber.yield();
+                        else
+                            Thread.sleep(1.msecs);
+                    }
                 }
 
                 if (this.timed_wait)
@@ -1649,7 +1632,6 @@ private
                 }
 
                 {
-
                     Message req_msg;
                     Message res_msg;
                     SudoFiber new_sf;
@@ -1658,11 +1640,12 @@ private
                     new_sf.create_time = MonoTime.currTime;
 
                     shared(bool) is_waiting1 = true;
-                    void stopWait1() {
-                        if (isControlMsg(new_sf.req_msg))
-                            onControlMsg(new_sf.req_msg, new_sf.res_msg);
+                    void stopWait1() 
+                    {
+                        if (isControlMsg(&req_msg))
+                            onControlMsg(&req_msg, &res_msg);
                         else
-                            onStandardMsg(new_sf.req_msg, new_sf.res_msg);
+                            onStandardMsg(&req_msg, &res_msg);
 
                         is_waiting1 = false;
                     }
@@ -1672,7 +1655,12 @@ private
                     this.mutex.unlock();
 
                     while (is_waiting1)
-                        Fiber.yield();
+                    {
+                        if (Fiber.getThis() !is null)
+                            Fiber.yield();
+                        else
+                            Thread.sleep(1.msecs);
+                    }
 
                     if (this.timed_wait)
                     {
@@ -1717,30 +1705,47 @@ private
                     thisInfo.owner = Tid.init;
             }
 
+            writefln("close");
+
             SudoFiber sf;
-            bool res;
 
             this.mutex.lock();
             scope (exit) this.mutex.unlock();
 
             this.closed = true;
-/*
+
+            writefln("close1");
+
             while (true)
             {
-                if (this.queue[].walkLength == 0)
+                if (this.recvq[].walkLength == 0)
                     break;
-
-                //sf = this.queue.front;
-
-                if (sf.req_msg.type == MsgType.linkDead)
-                    onLinkDeadMsg (sf.req_msg);
-
-                this.queue.removeFront();
+                sf = this.recvq.front;
+                this.recvq.removeFront();
+                    
+                *sf.req_msg = Message(MsgType.standard, new LinkTerminated(thisTid));
 
                 if (sf.swdg !is null)
                     sf.swdg();
             }
-*/
+
+            writefln("close2");
+
+            while (true)
+            {
+                if (this.sendq[].walkLength == 0)
+                    break;
+                sf = this.sendq.front;
+                this.sendq.removeFront();
+
+                if (sf.req_msg.type == MsgType.linkDead)
+                    onLinkDeadMsg(sf.req_msg);
+
+                if (sf.swdg !is null)
+                    sf.swdg();
+            }
+
+            writefln("close3");
         }
 
     private:
