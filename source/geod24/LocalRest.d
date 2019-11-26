@@ -321,11 +321,13 @@ public final class RemoteAPI (API) : API
 
         writefln("[spawned] start %s", C.scheduler);
         
-        try C.scheduler.start(() {
+        try C.scheduler.start(() 
+        {
             bool terminated = false;
             while (!terminated)
             {
-                writefln("[spawned] receive");
+                bool done = false;
+                writefln("[spawned] %s thisTid() : %s", Fiber.getThis(), C.thisTid());
                 C.receive(
                     (C.LinkTerminated e)
                     {
@@ -374,12 +376,10 @@ public final class RemoteAPI (API) : API
                     }
                 );
             }
-            throw exc;
        });
         catch (Exception e)
             if (e !is exc)
                 throw e;
-        writefln("[spawned] end");
     }
 
     /// Where to send message to
@@ -593,6 +593,7 @@ public final class RemoteAPI (API) : API
             mixin(q{
                 override ReturnType!(ovrld) } ~ member ~ q{ (Parameters!ovrld params)
                 {
+
                     writeln("[main] start");
 
                     // we are in the main thread
@@ -612,6 +613,7 @@ public final class RemoteAPI (API) : API
                         auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                             .serializeToJsonString();
 
+                        writefln("[API] thisTid() : %s", C.thisTid());
                         auto req = C.Request(C.thisTid(), ovrld.mangleof, serialized);
                         C.Response res;
                         //shared(bool) done = false;

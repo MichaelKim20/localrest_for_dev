@@ -221,11 +221,9 @@ private class MessageBox
     public Message put (ref Message req_msg)
     {
         import std.algorithm;
-        import std.range : popBackN, walkLength;
-
-        writefln("request 1 %s %s", Fiber.getThis(), req_msg);
 
         this.mutex.lock();
+
         if (this.closed)
         {
             this.mutex.unlock();
@@ -260,7 +258,8 @@ private class MessageBox
             new_sf.swdg = &stopWait;
             new_sf.create_time = MonoTime.currTime;
 
-        writefln("request 2 %s %s", Fiber.getThis(), req_msg);
+            writefln("[sendq] %s thisTid() : %s", Fiber.getThis(), thisTid());
+
             this.sendq.insertBack(new_sf);
             this.mutex.unlock();
 
@@ -285,22 +284,28 @@ private class MessageBox
                     }
                     
                     if (Fiber.getThis() !is null)
+                    {
                         Fiber.yield();
+                    } 
                     else
+                    {
                         Thread.sleep(1.msecs);
+                    }
                 }
             }
             else
             {
-                writefln("request 3 %s %s", Fiber.getThis(), req_msg);
                 while (is_waiting)
                 {
                     if (Fiber.getThis() !is null)
+                    {
                         Fiber.yield();
+                    } 
                     else
+                    {
                         Thread.sleep(1.msecs);
+                    }
                 }
-                writefln("request 4 %s %s", Fiber.getThis(), req_msg);
             }
 
             return res_msg;
@@ -321,8 +326,6 @@ private class MessageBox
 
         alias Ops = AliasSeq!(T);
         alias ops = vals[0 .. $];
-
-        writefln("get %s", Fiber.getThis());
 
         /***********************************************************************
 
@@ -443,8 +446,6 @@ private class MessageBox
             if (this.sendq[].walkLength > 0)
             {
                 SudoFiber sf = this.sendq.front;
-                this.sendq.removeFront();
-
                 if (isControlMsg(sf.req_msg))
                     onControlMsg(sf.req_msg, sf.res_msg);
                 else
@@ -453,7 +454,9 @@ private class MessageBox
                 if (sf.swdg !is null)
                     sf.swdg();
 
+                this.sendq.removeFront();
                 this.mutex.unlock();
+
 
                 return true;
             }
@@ -484,9 +487,13 @@ private class MessageBox
                 while (is_waiting1)
                 {
                     if (Fiber.getThis() !is null)
+                    {
                         Fiber.yield();
+                    } 
                     else
+                    {
                         Thread.sleep(1.msecs);
+                    }
                 }
 
                 return true;
@@ -845,14 +852,10 @@ if (isSpawnable!(F, T))
         fn(args);
     }
 
+
     // TODO: MessageList and &exec should be shared.
     auto t = new Thread(&exec);
     t.start();
-
-    if (scheduler is null)
-    {
-        scheduler = new FiberScheduler();
-    }
 
     thisInfo.links[spawnTid] = linked;
     return spawnTid;
@@ -912,7 +915,7 @@ if (isSpawnable!(F, T))
 
 *******************************************************************************/
 
-public void send(T...)(Tid tid, T vals)
+public void send (T...)(Tid tid, T vals)
 {
     static assert(!hasLocalAliasing!(T), 
         "Aliases to mutable thread-local data not allowed.");
@@ -927,7 +930,7 @@ public void send(T...)(Tid tid, T vals)
 
 *******************************************************************************/
 
-private void _send(T...)(Tid tid, T vals)
+private void _send (T...)(Tid tid, T vals)
 {
     _send(MsgType.standard, tid, vals);
 }
@@ -943,8 +946,8 @@ private void _send(T...)(MsgType type, Tid tid, T vals)
 {
     auto msg = Message(type, vals);
     writefln("[send] %s", msg);
-    //tid.mbox.put(msg);
-    ///*
+    tid.mbox.put(msg);
+    /*
     if (Fiber.getThis() !is null)
     {
         tid.mbox.put(msg);
@@ -952,17 +955,16 @@ private void _send(T...)(MsgType type, Tid tid, T vals)
     else
     {
         bool done = false;
-        scheduler.start(
+        new Fiber(
         {
             tid.mbox.put(msg);
             done = true;
-        });
+        }).call();
         while (!done) {
-            scheduler.yield();
-            //Thread.sleep(1.msecs);
+            Fiber.yield();
         }
     }
-    //*/
+    */
 }
 
 /*******************************************************************************
@@ -984,12 +986,16 @@ private void _send(T...)(MsgType type, Tid tid, T vals)
 public void receive (T...)( T ops )
 in
 {
+    writefln("[receive] %s thisTid() : %s", Fiber.getThis(), thisTid());
     assert(thisInfo.ident.mbox !is null,
            "Cannot receive a message until a thread was spawned "
            ~ "or thisTid was passed to a running thread.");
 }
 do
 {
+    writefln("[receive] %s", 1);
+    thisInfo.ident.mbox.get(ops);
+    /*
     writefln("[receive] %s", 0);
     checkops( ops );
     auto tid = thisInfo.ident;
@@ -1003,16 +1009,16 @@ do
     {
         writefln("[receive] %s", 2);
         bool done = false;
-        scheduler.start(
+        new Fiber(
         {
             tid.mbox.get(ops);
             done = true;
-        });
+        }).call();
         while (!done) {
-            scheduler.yield();
-            Thread.sleep(1.msecs);
+            Fiber.yield();
         }
     }
+    */
 }
 
 
@@ -1039,8 +1045,9 @@ public Response query (Tid tid, ref Request data)
 
 public Message request (Tid tid, ref Message msg)
 {
-    //return tid.mbox.put(msg);
-    ///*
+    writefln("[request] %s thisTid() : %s", Fiber.getThis(), thisTid());
+    return tid.mbox.put(msg);
+    /*
     if (Fiber.getThis() !is null)
     {
         return tid.mbox.put(msg);
@@ -1049,18 +1056,17 @@ public Message request (Tid tid, ref Message msg)
     {
         Message res;
         bool done = false;
-        scheduler.start(
+        new Fiber(
         {
             res = tid.mbox.put(msg);
             done = true;
-        });
+        }).call();
         while (!done) {
-            scheduler.yield();
-            //Thread.sleep(1.msecs);
+            Fiber.yield();
         }
         return res;
     }
-    //*/
+    */
 }
 
 
