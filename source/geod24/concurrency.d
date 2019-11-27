@@ -1860,13 +1860,6 @@ private
                 return SendStatus.success;
             }
 
-            if (this.queue[].walkLength < this.qsize)
-            {
-                this.queue.insertBack(msg);
-                this.mutex.unlock();
-                return SendStatus.queue;
-            }
-
             shared(bool) is_waiting = true;
             void stopWait1() {
                 is_waiting = false;
@@ -1952,20 +1945,6 @@ private
             }
 
 
-            if (this.queue[].walkLength > 0)
-            {
-                *msg = this.queue.front;
-                this.queue.removeFront();
-                this.mutex.unlock();
-
-                if (this.timed_wait)
-                {
-                    this.waitFromBase(msg.create_time, this.timed_wait_period);
-                    this.timed_wait = false;
-                }
-
-                return true;
-            }
             shared(bool) is_waiting1 = true;
 
             void stopWait1() {

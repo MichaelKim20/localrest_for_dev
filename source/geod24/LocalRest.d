@@ -527,7 +527,6 @@ public final class RemoteAPI (API) : API
         Duration timeout = Duration.init)
     {
         auto childTid = C.spawn(&spawned!(Impl), args);
-        childTid.setTimeout(timeout);
         return new RemoteAPI(childTid, true, timeout);
     }
 
