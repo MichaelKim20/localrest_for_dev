@@ -314,8 +314,8 @@ public final class RemoteAPI (API) : API
             return control.sleep_until != SysTime.init && Clock.currTime < control.sleep_until;
         }
 
-        C.scheduler.start(()
-        {
+        //C.scheduler.start(()
+        //{
             bool terminated = false;
             while (!terminated)
             {
@@ -361,7 +361,7 @@ public final class RemoteAPI (API) : API
                     }
                 );
             }
-        });
+        //});
     }
 
     /// Where to send message to
@@ -1177,9 +1177,7 @@ unittest
     {
         override size_t sleepFor (long dur)
         {
-            writefln("Start API -------- %s", dur);
             Thread.sleep(msecs(dur));
-            writefln("End API -------- %s", dur);
             return 42;
         }
     }
@@ -1261,6 +1259,7 @@ unittest
     import std.stdio;
     writeln("test10");
 }
+
 /*
 // request timeouts (foreign node to another node)
 unittest

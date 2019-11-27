@@ -13,52 +13,13 @@ import core.sync.condition;
 import core.sync.mutex;
 import core.thread;
 
-public void checkops (T...)(T ops)
-{
-    foreach (i, t1; T)
-    {
-        static assert(isFunctionPointer!t1 || isDelegate!t1);
-        alias a1 = Parameters!(t1);
-        alias r1 = ReturnType!(t1);
-
-        static if (i < T.length - 1 && is(r1 == void))
-        {
-            static assert(a1.length != 1 || !is(a1[0] == Variant),
-                            "function with arguments " ~ a1.stringof ~
-                            " occludes successive function");
-
-            foreach (t2; T[i + 1 .. $])
-            {
-                static assert(isFunctionPointer!t2 || isDelegate!t2);
-                alias a2 = Parameters!(t2);
-
-                static assert(!is(a1 == a2),
-                    "function with arguments " ~
-                    a1.stringof ~ " occludes successive function");
-            }
-        }
-    }
-}
-
-static ~this()
-{
-    thisInfo.cleanup();
-}
-
-@property ref ThreadInfo thisInfo() nothrow
-{
-    if (scheduler is null)
-        return ThreadInfo.thisInfo;
-    return scheduler.thisInfo;
-}
-
 /*******************************************************************************
 
     Message
 
 *******************************************************************************/
 
-
+///
 public enum MsgType
 {
     standard,
@@ -66,6 +27,7 @@ public enum MsgType
     close,
 }
 
+///
 public struct Message
 {
     MsgType type;
@@ -164,7 +126,7 @@ private class MessageBox
     private DList!SudoFiber recvq;
 
     ///
-    private Duration timeout;
+    private Duration _timeout;
 
     ///
     private alias StopWaitDg = void delegate ();
@@ -183,7 +145,7 @@ private class MessageBox
     {
         this.mutex = new Mutex();
         this.closed = false;
-        this.timeout = Duration.init;
+        this._timeout = Duration.init;
     }
 
 
@@ -193,11 +155,10 @@ private class MessageBox
 
     ***************************************************************************/
 
-    public void setTimeout (Duration d) @safe pure nothrow @nogc
+    public @property void timeout (Duration value) @safe pure nothrow @nogc
     {
-        this.timeout = d;
+        this._timeout = value;
     }
-
 
     /***************************************************************************
 
@@ -262,14 +223,14 @@ private class MessageBox
             this.sendq.insertBack(new_sf);
             this.mutex.unlock();
 
-            if (this.timeout > Duration.init)
+            if (this._timeout > Duration.init)
             {
                 auto start = req_msg.create_time;
                 while (is_waiting)
                 {
                     auto end = MonoTime.currTime();
                     auto elapsed = end - start;
-                    if (elapsed > this.timeout)
+                    if (elapsed > this._timeout)
                     {
                         this.mutex.lock();
                         auto range = find(this.sendq[], new_sf);
@@ -337,29 +298,47 @@ private class MessageBox
                     {
                         if (res_msg !is null)
                         {
-                            if (this.timeout > Duration.init)
+                            /*
+                            *res_msg = Message(MsgType.standard, (*req_msg).map(op));
+                            if (this._timeout > Duration.init)
                             {
-                                //writefln("%s", this.timeout);
-                                bool done = false;
-                                Message res;
-                                new Fiber({
-                                    res = Message(MsgType.standard, (*req_msg).map(op));
-                                    if (res_msg ) *res_msg = res;
-                                    done = true;
-                                }).call();
+                                auto elapsed = MonoTime.currTime() - req_msg.create_time;
+                                if (elapsed > this._timeout)
+                                {
+                                    writefln("F 0");
+                                    *res_msg = Message(MsgType.standard, Response(Status.Timeout, ""));
+                                }
+                            }
+                            */
+
+                            writefln("Fiber %s", Fiber.getThis());
+
+                            if (this._timeout > Duration.init)
+                            {
+                                shared(bool) timeovered = false; 
+                                shared(bool) done = false;
                                 auto start = req_msg.create_time;
-                                    writefln("%s %s", this.timeout, start);
+
+                                new Thread({
+                                    new Fiber({
+                                        auto res = Message(MsgType.standard, (*req_msg).map(op));
+                                        if (!timeovered) *res_msg = res;
+                                        done = true;
+                                    }).call();
+                                }).start();
+
                                 while (!done)
                                 {
                                     auto end = MonoTime.currTime();
                                     auto elapsed = end - start;
-                                    writefln("%s %s", this.timeout, elapsed);
-                                    if (elapsed > this.timeout)
+
+                                    if (elapsed > this._timeout)
                                     {
+                                        timeovered = true;
                                         *res_msg = Message(MsgType.standard, Response(Status.Timeout, ""));
-                                        res_msg = null;
-                                        return true;
+                                        break;
                                     }
+
                                     if (Fiber.getThis())
                                         Fiber.yield();
                                 }
@@ -488,7 +467,6 @@ private class MessageBox
 
                 this.sendq.removeFront();
                 this.mutex.unlock();
-
 
                 return true;
             }
@@ -650,7 +628,7 @@ public struct Tid
     public @property void timeout (Duration value) @safe pure nothrow @nogc
     {
         this._timeout = value;
-        this.mbox.setTimeout(value);
+        this.mbox.timeout = value;
     }
 
     /***************************************************************************
@@ -778,7 +756,6 @@ private template isSpawnable(F, T...)
             && (isFunctionPointer!F || !hasUnsharedAliasing!F);
 }
 
-
 /*******************************************************************************
  * Starts fn(args) in a new logical thread.
  *
@@ -834,8 +811,6 @@ if (isSpawnable!(F, T))
     static assert(!__traits(compiles, spawn(&f2, msg.dup)));
     static assert(!__traits(compiles, spawn(&f2, msg.idup)));
 }
-
-
 
 /*******************************************************************************
 
@@ -960,7 +935,7 @@ private void _send (T...)(Tid tid, T vals)
 
 *******************************************************************************/
 
-private void _send(T...)(MsgType type, Tid tid, T vals)
+private void _send (T...)(MsgType type, Tid tid, T vals)
 {
     auto msg = Message(type, vals);
 
@@ -1131,7 +1106,7 @@ private void unregisterMe ()
 
 *******************************************************************************/
 
-bool register(string name, Tid tid)
+bool register (string name, Tid tid)
 {
     synchronized (registryLock)
     {
@@ -1199,7 +1174,6 @@ Tid locate (string name)
     }
 }
 
-
 /*******************************************************************************
 
     Struct of Data
@@ -1218,6 +1192,18 @@ struct Request
 
     /// Arguments to the method, JSON formatted
     string args;
+
+    /// 
+    MonoTime create_time;
+
+    ///
+    this (Tid s, string m, string a)
+    {
+        this.sender = s;
+        this.method = m;
+        this.args = a;
+        this.create_time = MonoTime.currTime;
+    }
 }
 
 /// Status of a request
@@ -1382,7 +1368,7 @@ struct ThreadInfo
      * the messaging system for the thread and notifies interested parties of
      * the thread's termination.
      */
-    void cleanup()
+    void cleanup ()
     {
         if (ident.mbox !is null)
             ident.mbox.close();
@@ -1445,7 +1431,7 @@ interface Scheduler
      *       absence of a custom scheduler.  It will be automatically executed
      *       via a call to spawn by the Scheduler.
      */
-    void start(void delegate() op);
+    void start (void delegate() op);
 
     /**
      * Assigns a logical thread to execute the supplied op.
@@ -1460,7 +1446,7 @@ interface Scheduler
      *  op = The function to execute.  This may be the actual function passed
      *       by the user to spawn itself, or may be a wrapper function.
      */
-    void spawn(void delegate() op);
+    void spawn (void delegate() op);
 
     /**
      * Yields execution to another logical thread.
@@ -1480,7 +1466,7 @@ interface Scheduler
      * is calling this routine or, if the calling thread was not create by
      * this scheduler, returns ThreadInfo.thisInfo instead.
      */
-    @property ref ThreadInfo thisInfo() nothrow;
+    @property ref ThreadInfo thisInfo () nothrow;
 
     /**
      * Creates a Condition variable analog for signaling.
@@ -1497,7 +1483,7 @@ interface Scheduler
      *      cases a Scheduler may need to hold this reference and unlock the
      *      mutex before yielding execution to another logical thread.
      */
-    Condition newCondition(Mutex m = null) nothrow;
+    Condition newCondition (Mutex m = null) nothrow;
 }
 
 /*******************************************************************************
@@ -1512,7 +1498,7 @@ public class FiberScheduler : Scheduler
 {
     static class InfoFiber : Fiber
     {
-        this(void delegate() op) nothrow
+        this (void delegate() op) nothrow
         {
             super(op, 16 * 1024 * 1024);  // 16Mb
         }
@@ -1522,7 +1508,7 @@ public class FiberScheduler : Scheduler
      * This creates a new Fiber for the supplied op and then starts the
      * dispatcher.
      */
-    void start(void delegate() op)
+    void start (void delegate() op)
     {
         create(op);
         dispatch();
@@ -1532,7 +1518,7 @@ public class FiberScheduler : Scheduler
      * This created a new Fiber for the supplied op and adds it to the
      * dispatch list.
      */
-    void spawn(void delegate() op) nothrow
+    void spawn (void delegate() op) nothrow
     {
         create(op);
         yield();
@@ -1542,7 +1528,7 @@ public class FiberScheduler : Scheduler
      * If the caller is a scheduled Fiber, this yields execution to another
      * scheduled Fiber.
      */
-    void yield() nothrow
+    void yield () nothrow
     {
         // NOTE: It's possible that we should test whether the calling Fiber
         //       is an InfoFiber before yielding, but I think it's reasonable
@@ -1558,7 +1544,7 @@ public class FiberScheduler : Scheduler
      * Fiber was created by this dispatcher, otherwise it returns
      * ThreadInfo.thisInfo.
      */
-    @property ref ThreadInfo thisInfo() nothrow
+    @property ref ThreadInfo thisInfo () nothrow
     {
         return ThreadInfo.thisInfo;
     }
@@ -1566,7 +1552,7 @@ public class FiberScheduler : Scheduler
     /**
      * Returns a Condition analog that yields when wait or notify is called.
      */
-    Condition newCondition(Mutex m = null) nothrow
+    Condition newCondition (Mutex m = null) nothrow
     {
         return new FiberCondition(m);
     }
@@ -1574,13 +1560,13 @@ public class FiberScheduler : Scheduler
 private:
     class FiberCondition : Condition
     {
-        this(Mutex m = null) nothrow
+        this (Mutex m = null) nothrow
         {
             super(m);
             notified = false;
         }
 
-        override void wait() nothrow
+        override void wait () nothrow
         {
             scope (exit) notified = false;
 
@@ -1588,7 +1574,7 @@ private:
                 this.outer.yield();
         }
 
-        override bool wait(Duration period) nothrow
+        override bool wait (Duration period) nothrow
         {
             import core.time : MonoTime;
 
@@ -1603,13 +1589,13 @@ private:
             return notified;
         }
 
-        override void notify() nothrow
+        override void notify () nothrow
         {
             notified = true;
             this.outer.yield();
         }
 
-        override void notifyAll() nothrow
+        override void notifyAll () nothrow
         {
             notified = true;
             this.outer.yield();
@@ -1619,7 +1605,7 @@ private:
     }
 
 private:
-    void dispatch()
+    void dispatch ()
     {
         import std.algorithm.mutation : remove;
 
@@ -1642,7 +1628,7 @@ private:
         }
     }
 
-    void create(void delegate() op) nothrow
+    void create (void delegate() op) nothrow
     {
         void wrap()
         {
@@ -1690,7 +1676,7 @@ class Generator(T) :
      * In:
      *  fn must not be null.
      */
-    this(void function() fn)
+    this (void function () fn)
     {
         super(fn);
         call();
@@ -1708,7 +1694,7 @@ class Generator(T) :
      * In:
      *  fn must not be null.
      */
-    this(void function() fn, size_t sz)
+    this (void function () fn, size_t sz)
     {
         super(fn, sz);
         call();
@@ -1729,7 +1715,7 @@ class Generator(T) :
      * In:
      *  fn must not be null.
      */
-    this(void function() fn, size_t sz, size_t guardPageSize)
+    this (void function () fn, size_t sz, size_t guardPageSize)
     {
         super(fn, sz, guardPageSize);
         call();
@@ -1746,7 +1732,7 @@ class Generator(T) :
      * In:
      *  dg must not be null.
      */
-    this(void delegate() dg)
+    this (void delegate () dg)
     {
         super(dg);
         call();
@@ -1764,7 +1750,7 @@ class Generator(T) :
      * In:
      *  dg must not be null.
      */
-    this(void delegate() dg, size_t sz)
+    this (void delegate () dg, size_t sz)
     {
         super(dg, sz);
         call();
@@ -1785,7 +1771,7 @@ class Generator(T) :
      * In:
      *  dg must not be null.
      */
-    this(void delegate() dg, size_t sz, size_t guardPageSize)
+    this (void delegate () dg, size_t sz, size_t guardPageSize)
     {
         super(dg, sz, guardPageSize);
         call();
@@ -1794,7 +1780,7 @@ class Generator(T) :
     /**
      * Returns true if the generator is empty.
      */
-    final bool empty() @property
+    final bool empty () @property
     {
         return m_value is null || state == State.TERM;
     }
@@ -1802,7 +1788,7 @@ class Generator(T) :
     /**
      * Obtains the next value from the underlying function.
      */
-    final void popFront()
+    final void popFront ()
     {
         call();
     }
@@ -1810,7 +1796,7 @@ class Generator(T) :
     /**
      * Returns the most recently generated value by shallow copy.
      */
-    final T front() @property
+    final T front () @property
     {
         return *m_value;
     }
@@ -1820,7 +1806,7 @@ class Generator(T) :
      * copy contructor. Will not compile for element types defining a
      * postblit, because Generator does not return by reference.
      */
-    final T moveFront()
+    final T moveFront ()
     {
         static if (!hasElaborateCopyConstructor!T)
         {
@@ -1833,7 +1819,7 @@ class Generator(T) :
         }
     }
 
-    final int opApply(scope int delegate(T) loopBody)
+    final int opApply (scope int delegate(T) loopBody)
     {
         int broken;
         for (; !empty; popFront())
@@ -1844,7 +1830,7 @@ class Generator(T) :
         return broken;
     }
 
-    final int opApply(scope int delegate(size_t, T) loopBody)
+    final int opApply (scope int delegate(size_t, T) loopBody)
     {
         int broken;
         for (size_t i; !empty; ++i, popFront())
@@ -1858,7 +1844,7 @@ private:
     T* m_value;
 }
 
-private @property shared(Mutex) initOnceLock()
+private @property shared (Mutex) initOnceLock ()
 {
     static shared Mutex lock;
     if (auto mtx = atomicLoad!(MemoryOrder.acq)(lock))
@@ -1885,7 +1871,7 @@ private @property shared(Mutex) initOnceLock()
  * Returns:
  *   A reference to the initialized variable
  */
-auto ref initOnce(alias var)(lazy typeof(var) init)
+auto ref initOnce (alias var)(lazy typeof(var) init)
 {
     return initOnce!var(init, initOnceLock);
 }
@@ -1906,7 +1892,7 @@ auto ref initOnce(alias var)(lazy typeof(var) init)
  * Returns:
  *   A reference to the initialized variable
  */
-auto ref initOnce(alias var)(lazy typeof(var) init, shared Mutex mutex)
+auto ref initOnce (alias var)(lazy typeof(var) init, shared Mutex mutex)
 {
     // check that var is global, can't take address of a TLS variable
     static assert(is(typeof({ __gshared p = &var; })),
@@ -1929,7 +1915,46 @@ auto ref initOnce(alias var)(lazy typeof(var) init, shared Mutex mutex)
 }
 
 /// ditto
-auto ref initOnce(alias var)(lazy typeof(var) init, Mutex mutex)
+auto ref initOnce (alias var)(lazy typeof(var) init, Mutex mutex)
 {
     return initOnce!var(init, cast(shared) mutex);
+}
+
+static ~this ()
+{
+    thisInfo.cleanup();
+}
+
+public void checkops (T...)(T ops)
+{
+    foreach (i, t1; T)
+    {
+        static assert(isFunctionPointer!t1 || isDelegate!t1);
+        alias a1 = Parameters!(t1);
+        alias r1 = ReturnType!(t1);
+
+        static if (i < T.length - 1 && is(r1 == void))
+        {
+            static assert(a1.length != 1 || !is(a1[0] == Variant),
+                            "function with arguments " ~ a1.stringof ~
+                            " occludes successive function");
+
+            foreach (t2; T[i + 1 .. $])
+            {
+                static assert(isFunctionPointer!t2 || isDelegate!t2);
+                alias a2 = Parameters!(t2);
+
+                static assert(!is(a1 == a2),
+                    "function with arguments " ~
+                    a1.stringof ~ " occludes successive function");
+            }
+        }
+    }
+}
+
+@property ref ThreadInfo thisInfo () nothrow
+{
+    if (scheduler is null)
+        return ThreadInfo.thisInfo;
+    return scheduler.thisInfo;
 }

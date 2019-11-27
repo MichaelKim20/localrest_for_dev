@@ -11,7 +11,8 @@ import std.variant;
 
 void main()
 {
-    test1();
+    //test1();
+    test9();
 }
 
 void test1()
@@ -45,4 +46,59 @@ void test1()
     writefln("end %s", v);
 
     test.ctrl.shutdown();
+}
+
+void test9()
+{
+    import std.stdio;
+    writeln("test9");
+    import core.thread;
+    import std.exception;
+
+    static interface API
+    {
+        size_t sleepFor (long dur);
+    }
+
+    static class Node : API
+    {
+        override size_t sleepFor (long dur)
+        {
+            //writefln("Start API -------- %s", dur);
+            Thread.sleep(msecs(dur));
+            writefln("End API -------- %s", dur);
+            return 42;
+        }
+    }
+    writeln("test9 A");
+        import std.stdio;
+    // node with no timeout
+    auto node = RemoteAPI!API.spawn!Node(500.msecs);
+    assertThrown!Exception(node.sleepFor(2000));
+    writeln("test9 B");
+/*
+    // node with a configured timeout
+    auto to_node = RemoteAPI!API.spawn!Node(500.msecs);
+
+    writeln("test9 B");
+    /// none of these should time out
+    assert(to_node.sleepFor(10) == 42);
+    writeln("test9 C");
+    assert(to_node.sleepFor(20) == 42);
+    writeln("test9 D");
+    assert(to_node.sleepFor(30) == 42);
+    writeln("test9 E");
+    assert(to_node.sleepFor(40) == 42);
+    writeln("test9 0");
+    assert(to_node.sleepFor(2000) == 42);
+    //assertThrown!Exception(to_node.sleepFor(2000));
+    writeln("test9 1");
+    Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
+    writeln("test9 2");
+    to_node.ctrl.shutdown();
+    writeln("test9 3");
+*/
+    node.ctrl.shutdown();
+
+    writeln("test9 4");
 }
