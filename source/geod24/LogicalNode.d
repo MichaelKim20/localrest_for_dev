@@ -13,13 +13,8 @@ import core.sync.condition;
 import core.sync.mutex;
 import core.thread;
 
-/*******************************************************************************
 
-    Message
-
-*******************************************************************************/
-
-///
+/// Type of Message
 public enum MsgType
 {
     standard,
@@ -27,13 +22,14 @@ public enum MsgType
     close,
 }
 
-///
+/// A data package used to exchange data.
 public struct Message
 {
     MsgType type;
     Variant data;
     MonoTime create_time;
-
+ 
+    /// Creator
     this (T...)(MsgType t, T vals) if (T.length > 0)
     {
         static if (T.length == 1)
@@ -51,6 +47,7 @@ public struct Message
         create_time = MonoTime.currTime;
     }
 
+    /// To change into a specific type.
     @property auto convertsTo (T...)()
     {
         static if (T.length == 1)
@@ -64,6 +61,7 @@ public struct Message
         }
     }
 
+    /// Returns the value of a particular type.
     @property auto get (T...)()
     {
         static if (T.length == 1)
@@ -80,6 +78,7 @@ public struct Message
         }
     }
 
+    /// Execute the registered delegate.
     auto map (Op)(Op op)
     {
         alias Args = Parameters!(Op);
@@ -106,8 +105,7 @@ public struct Message
     A MessageBox is a message queue for one thread.  Other threads may send
     messages to this owner by calling put(), and the owner receives them by
     calling get().  The put() call is therefore effectively shared and the
-    get() call is effectively local.  setMaxMsgs may be used by any thread
-    to limit the size of the message queue.
+    get() call is effectively local.
 
 *******************************************************************************/
 
@@ -125,22 +123,24 @@ private class MessageBox
     /// collection of recv waiters
     private DList!SudoFiber recvq;
 
-    ///
+    /// timeout 
     private Duration _timeout;
 
-    ///
+    /// Delegate to perform when the wait is finished
     private alias StopWaitDg = void delegate ();
 
-    ///
+    /// Context stored in queue
     private struct SudoFiber
     {
+        ///  Request message
         public Message* req_msg;
+        ///  Response message
         public Message* res_msg;
+        ///  Delegate to perform when the wait is finished
         public StopWaitDg swdg;
-        public MonoTime create_time;
     }
 
-    ///
+    /// Ctor
     public this () @trusted nothrow
     {
         this.mutex = new Mutex();
@@ -151,7 +151,13 @@ private class MessageBox
 
     /***************************************************************************
 
+        Remove all contents of the queue and close them.
 
+        Params:
+            address = the address to increase the fail count for
+
+        Returns:
+            the un-ban time, or 0 if address was never banned.
 
     ***************************************************************************/
 
@@ -162,7 +168,13 @@ private class MessageBox
 
     /***************************************************************************
 
+        Remove all contents of the queue and close them.
 
+        Params:
+            address = the address to increase the fail count for
+
+        Returns:
+            the un-ban time, or 0 if address was never banned.
 
     ***************************************************************************/
 
@@ -218,7 +230,6 @@ private class MessageBox
             new_sf.req_msg = &req_msg;
             new_sf.res_msg = &res_msg;
             new_sf.swdg = &stopWait;
-            new_sf.create_time = MonoTime.currTime;
 
             this.sendq.insertBack(new_sf);
             this.mutex.unlock();
@@ -298,28 +309,12 @@ private class MessageBox
                     {
                         if (res_msg !is null)
                         {
-                            /*
-                            *res_msg = Message(MsgType.standard, (*req_msg).map(op));
-                            if (this._timeout > Duration.init)
-                            {
-                                auto elapsed = MonoTime.currTime() - req_msg.create_time;
-                                if (elapsed > this._timeout)
-                                {
-                                    writefln("F 0");
-                                    *res_msg = Message(MsgType.standard, Response(Status.Timeout, ""));
-                                }
-                            }
-                            */
-
-                            writefln("Fiber %s", Fiber.getThis());
-
                             if (this._timeout > Duration.init)
                             {
                                 shared(bool) timeovered = false; 
                                 shared(bool) done = false;
-                                auto start = req_msg.create_time;
 
-                                new Thread({
+                                auto handler = new Thread({
                                     new Fiber({
                                         auto res = Message(MsgType.standard, (*req_msg).map(op));
                                         if (!timeovered) *res_msg = res;
@@ -327,20 +322,18 @@ private class MessageBox
                                     }).call();
                                 }).start();
 
+                                auto start = req_msg.create_time;
                                 while (!done)
                                 {
-                                    auto end = MonoTime.currTime();
-                                    auto elapsed = end - start;
-
+                                    auto elapsed = MonoTime.currTime() - start;
                                     if (elapsed > this._timeout)
                                     {
                                         timeovered = true;
                                         *res_msg = Message(MsgType.standard, Response(Status.Timeout, ""));
+                                        thread_detachInstance(handler);
                                         break;
                                     }
-
-                                    if (Fiber.getThis())
-                                        Fiber.yield();
+                                    Thread.sleep(5.msecs);
                                 }
                             }
                             else
@@ -350,14 +343,37 @@ private class MessageBox
                         }
                         else
                         {
-                            (*req_msg).map(op);
+                            if (this._timeout > Duration.init)
+                            {
+                                shared(bool) timeovered = false; 
+                                shared(bool) done = false;
+
+                                auto handler = new Thread({
+                                    new Fiber({
+                                        (*req_msg).map(op);
+                                        done = true;
+                                    }).call();
+                                }).start();
+
+                                auto start = req_msg.create_time;
+                                while (!done)
+                                {
+                                    auto elapsed = MonoTime.currTime() - start;
+                                    if (elapsed > this._timeout)
+                                    {
+                                        timeovered = true;
+                                        thread_detachInstance(handler);
+                                        break;
+                                    }
+                                    Thread.sleep(5.msecs);
+                                }
+                            }
+                            else
+                            {
+                                (*req_msg).map(op);
+                            }
                         }
 
-                        return true;
-                    }
-                    else if (is(ReturnType!(t) == bool))
-                    {
-                        (*req_msg).map(op);
                         return true;
                     }
                     else
@@ -477,7 +493,6 @@ private class MessageBox
                 SudoFiber new_sf;
                 new_sf.req_msg = &req_msg;
                 new_sf.res_msg = &res_msg;
-                new_sf.create_time = MonoTime.currTime;
 
                 shared(bool) is_waiting1 = true;
                 void stopWait1()
@@ -576,6 +591,7 @@ private class MessageBox
         return msg.type != MsgType.standard;
     }
 
+
     /***************************************************************************
 
 
@@ -602,7 +618,7 @@ public struct Tid
 {
     private MessageBox mbox;
     private Duration _timeout;
-    private bool _shutdowned;
+    private bool _shutdown;
 
 
     /***************************************************************************
@@ -615,7 +631,7 @@ public struct Tid
     {
         this.mbox = m;
         this._timeout = Duration.init;
-        this._shutdowned = false;
+        this._shutdown = false;
     }
 
 
@@ -651,7 +667,7 @@ public struct Tid
 
     public @property void shutdown (bool value) @safe pure nothrow @nogc
     {
-        this._shutdowned = value;
+        this._shutdown = value;
     }
 
 
@@ -663,7 +679,7 @@ public struct Tid
 
     public @property bool shutdown () @safe @nogc pure
     {
-        return this._shutdowned;
+        return this._shutdown;
     }
 
 
@@ -1192,18 +1208,6 @@ struct Request
 
     /// Arguments to the method, JSON formatted
     string args;
-
-    /// 
-    MonoTime create_time;
-
-    ///
-    this (Tid s, string m, string a)
-    {
-        this.sender = s;
-        this.method = m;
-        this.args = a;
-        this.create_time = MonoTime.currTime;
-    }
 }
 
 /// Status of a request

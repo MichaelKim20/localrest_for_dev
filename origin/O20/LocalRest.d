@@ -568,7 +568,7 @@ public final class RemoteAPI (API) : API
                     },
                     (ShutdownCommand e) {
                         terminated = true;
-                        C.thisTid().shutdowned = true;
+                        C.thisTid().shutdown = true;
                     },
                     (TimeCommand s) {
                         control.sleep_until = Clock.currTime + s.dur;
@@ -684,7 +684,7 @@ public final class RemoteAPI (API) : API
         public void shutdown () @trusted
         {
             C.send(this.childTid, ShutdownCommand());
-            this.childTid.shutdowned = true;
+            this.childTid.shutdown = true;
         }
 
         /***********************************************************************
@@ -822,7 +822,7 @@ public final class RemoteAPI (API) : API
                         is_main_thread = true;
                     }
 
-                    if (this.childTid.shutdowned) 
+                    if (this.childTid.shutdown) 
                         throw new Exception(serializeToJsonString("Request timed-out"));
 
                     // `geod24.concurrency.send/receive[Only]` is not `@safe` but

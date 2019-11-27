@@ -12,7 +12,7 @@ import std.variant;
 void main()
 {
     //test1();
-    test9();
+    test15();
 }
 
 void test1()
@@ -101,4 +101,41 @@ void test9()
     node.ctrl.shutdown();
 
     writeln("test9 4");
+}
+
+
+// Test explicit shutdown
+void test15()
+{
+    import std.stdio;
+    writeln("test15");
+    import std.exception;
+
+    static interface API
+    {
+        int myping (int value);
+    }
+
+    static class Node : API
+    {
+        override int myping (int value)
+        {
+            return value;
+        }
+    }
+
+    auto node = RemoteAPI!API.spawn!Node(1.seconds);
+    assert(node.myping(42) == 42);
+    node.ctrl.shutdown();
+    try
+    {
+        node.myping(69);
+        assert(0);
+    }
+    catch (Exception ex)
+    {
+        assert(ex.msg == `"Request timed-out"`);
+    }
+    import std.stdio;
+    writeln("test15");
 }

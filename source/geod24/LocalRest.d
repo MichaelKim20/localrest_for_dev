@@ -314,54 +314,61 @@ public final class RemoteAPI (API) : API
             return control.sleep_until != SysTime.init && Clock.currTime < control.sleep_until;
         }
 
-        //C.scheduler.start(()
-        //{
+        C.Response handle (ref C.Request req)
+        {
+            C.Response res;
+            C.scheduler.spawn({
+                res = handleCommand(req, node, control.filter);
+            });
+            return res;
+        }
+
             bool terminated = false;
             while (!terminated)
             {
-                bool done = false;
-                C.receive(
-                    (C.LinkTerminated e)
-                    {
-                        terminated = true;
-                    },
-                    (C.OwnerTerminated e)
-                    {
-                        terminated = true;
-                    },
-                    (ShutdownCommand e)
-                    {
-                        terminated = true;
-                        C.thisTid().shutdown = true;
-                    },
-                    (TimeCommand s)
-                    {
-                        control.sleep_until = Clock.currTime + s.dur;
-                        control.drop = s.drop;
-                    },
-                    (FilterAPI filter_api)
-                    {
-                        control.filter = filter_api;
-                    },
-                    (C.Request req)
-                    {
-                        if (!isSleeping())
-                            return handleCommand(req, node, control.filter);
-                        else if (!control.drop)
+                C.scheduler.start(()
+                {
+                    bool done = false;
+                    C.receive(
+                        (C.LinkTerminated e)
                         {
-                            while (isSleeping())
+                            terminated = true;
+                        },
+                        (C.OwnerTerminated e)
+                        {
+                            terminated = true;
+                        },
+                        (ShutdownCommand e)
+                        {
+                            terminated = true;
+                            C.thisTid().shutdown = true;
+                            writeln("C.thisTid().shutdown");
+                        },
+                        (TimeCommand s)
+                        {
+                            control.sleep_until = Clock.currTime + s.dur;
+                            control.drop = s.drop;
+                        },
+                        (FilterAPI filter_api)
+                        {
+                            control.filter = filter_api;
+                        },
+                        (C.Request req)
+                        {
+                            if (!isSleeping())
+                                return handle(req);
+                            else if (!control.drop)
                             {
-                                if (Fiber.getThis())
-                                    Fiber.yield();
+                                while (isSleeping())
+                                    Thread.sleep(5.msecs);
+                                return handleCommand(req, node, control.filter);
                             }
-                            return handleCommand(req, node, control.filter);
+                            else
+                                return C.Response(C.Status.Timeout, "");
                         }
-                        else
-                            return C.Response(C.Status.Timeout, "");
-                    }
-                );
+                    );
+                });
             }
-        //});
     }
 
     /// Where to send message to
@@ -577,7 +584,10 @@ public final class RemoteAPI (API) : API
                     C.createScheduler();
 
                     if (this.childTid.shutdown)
+                    {
+                        writeln("shutdown/shutdown/shutdown");
                         throw new Exception(serializeToJsonString("Request timed-out"));
+                    }
 
                     // `geod24.LogicalNode.Request` is not `@safe` but
                     // this overload needs to be
@@ -602,7 +612,7 @@ public final class RemoteAPI (API) : API
                 });
         }
 }
-/*
+
 /// Simple usage example
 unittest
 {
@@ -723,6 +733,7 @@ unittest
     //C.receiveOnly!int();
     writeln("test2");
 }
+
 /// This network have different types of nodes in it
 unittest
 {
@@ -802,7 +813,6 @@ unittest
     nodes.each!(node => node.ctrl.shutdown());
     writeln("test3");
 }
-*/
 /*
 /// Support for circular nodes call
 unittest
@@ -857,10 +867,12 @@ unittest
 
     writeln("test4");
 }
+*/
 
 /// Nodes can start tasks
 unittest
 {
+    writeln("test5");
     static import core.thread;
     import core.time;
 
@@ -895,14 +907,17 @@ unittest
         private ulong counter;
     }
 
+    writeln("test5 A");
     import std.format;
     auto node = RemoteAPI!API.spawn!Node();
     assert(node.getCounter() == 0);
+    writeln("test5 B");
     node.start();
     import std.stdio;
     //writefln("%s", node.getCounter());
     assert(node.getCounter() == 1);
     assert(node.getCounter() == 0);
+    writeln("test5 B");
     core.thread.Thread.sleep(1.seconds);
     // It should be 19 but some machines are very slow
     // (e.g. Travis Mac testers) so be safe
@@ -941,7 +956,7 @@ unittest
     node.ctrl.shutdown();
     import std.stdio;
     writeln("test6");
-}*/
+}
 /*
 // Simulate temporary outage
 unittest
@@ -1159,7 +1174,7 @@ unittest
 }
 */
 
-
+/*
 // request timeouts (from main thread)
 unittest
 {
@@ -1181,7 +1196,6 @@ unittest
             return 42;
         }
     }
-    writeln("test9 A");
         import std.stdio;
     // node with no timeout
     auto node = RemoteAPI!API.spawn!Node();
@@ -1190,30 +1204,21 @@ unittest
     // node with a configured timeout
     auto to_node = RemoteAPI!API.spawn!Node(500.msecs);
 
-    writeln("test9 B");
     /// none of these should time out
     assert(to_node.sleepFor(10) == 42);
-    writeln("test9 C");
     assert(to_node.sleepFor(20) == 42);
-    writeln("test9 D");
     assert(to_node.sleepFor(30) == 42);
-    writeln("test9 E");
     assert(to_node.sleepFor(40) == 42);
-    writeln("test9 0");
     assertThrown!Exception(to_node.sleepFor(2000));
-    writeln("test9 1");
     Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
-    writeln("test9 2");
     to_node.ctrl.shutdown();
-    writeln("test9 3");
     node.ctrl.shutdown();
 
     writeln("test9 4");
 }
-/*
 */
 
-
+/*
 // test-case for responses to re-used requests (from main thread)
 unittest
 {
@@ -1239,15 +1244,18 @@ unittest
     // node with no timeout
     auto node = RemoteAPI!API.spawn!Node();
     assert(node.sleepFor(80) == 42);  // no timeout
+    writeln("test10 A");
 
     // node with a configured timeout
     auto to_node = RemoteAPI!API.spawn!Node(500.msecs);
+    writeln("test10 B");
 
     /// none of these should time out
     assert(to_node.sleepFor(10) == 42);
     assert(to_node.sleepFor(20) == 42);
     assert(to_node.sleepFor(30) == 42);
     assert(to_node.sleepFor(40) == 42);
+    writeln("test10 C");
 
     assertThrown!Exception(to_node.sleepFor(2000));
     Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
@@ -1260,10 +1268,12 @@ unittest
     writeln("test10");
 }
 
-/*
+
 // request timeouts (foreign node to another node)
 unittest
 {
+    import std.stdio;
+    writeln("test11");
     static import geod24.LogicalNode;
     import std.exception;
 
@@ -1306,6 +1316,8 @@ unittest
 // test-case for zombie responses
 unittest
 {
+    import std.stdio;
+    writeln("test12");
     static import geod24.LogicalNode;
     import std.exception;
 
@@ -1350,6 +1362,8 @@ unittest
 // request timeouts with dropped messages
 unittest
 {
+    import std.stdio;
+    writeln("test13");
     static import geod24.LogicalNode;
     import std.exception;
 
@@ -1385,10 +1399,13 @@ unittest
     import std.stdio;
     writeln("test13");
 }
-
+*/
+/*
 // Test a node that gets a replay while it's delayed
 unittest
 {
+    import std.stdio;
+    writeln("test14");
     static import geod24.LogicalNode;
     import std.exception;
 
@@ -1432,6 +1449,8 @@ unittest
 // Test explicit shutdown
 unittest
 {
+    import std.stdio;
+    writeln("test15");
     import std.exception;
 
     static interface API
@@ -1448,12 +1467,16 @@ unittest
     }
 
     auto node = RemoteAPI!API.spawn!Node(1.seconds);
+    writeln("test15-2");
     assert(node.myping(42) == 42);
-    node.shutdown();
-
+    writeln("test15-3");
+    node.ctrl.shutdown();
+    writeln("test15-4");
     try
     {
+    writeln("test15-5");
         node.myping(69);
+    writeln("test15-6");
         assert(0);
     }
     catch (Exception ex)

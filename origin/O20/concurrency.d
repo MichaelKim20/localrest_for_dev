@@ -313,14 +313,14 @@ private:
     {
         mbox = m;
         timeout = Duration.init;
-        shutdowned = false;
+        shutdown = false;
     }
 
     MessageBox mbox;
 
 public:
     Duration timeout;
-    bool shutdowned;
+    bool shutdown;
 
     /**
      * Generate a convenient string for identifying this Tid.  This is only
