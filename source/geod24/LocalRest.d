@@ -83,7 +83,6 @@ import vibe.data.json;
 static import C = geod24.concurrency;
 import std.meta : AliasSeq;
 import std.traits : Parameters, ReturnType;
-import std.stdio;
 
 import core.thread;
 import core.time;
@@ -166,7 +165,7 @@ private struct ArgWrapper (T...)
 }
 
 /**
- * Copied from std.concurrency.FiberScheduler, increased the stack size to 16MB.
+ * Copied from geod24.concurrency.FiberScheduler, increased the stack size to 16MB.
  */
 class BaseFiberScheduler : C.Scheduler
 {
@@ -179,7 +178,6 @@ class BaseFiberScheduler : C.Scheduler
             super(op, 16 * 1024 * 1024);  // 16Mb
         }
     }
-
 
     /**
      * This creates a new Fiber for the supplied op and then starts the
@@ -198,7 +196,7 @@ class BaseFiberScheduler : C.Scheduler
     void spawn(void delegate() op) nothrow
     {
         create(op);
-        //yield();
+        yield();
     }
 
     /**
@@ -442,7 +440,7 @@ private final class LocalScheduler : BaseFiberScheduler
 
 
 /// We need a scheduler to simulate an event loop and to be re-entrant
-/// However, the one in `std.concurrency` is process-global (`__gshared`)
+/// However, the one in `geod24.concurrency` is process-global (`__gshared`)
 private LocalScheduler scheduler;
 
 /// Whether this is the main thread
@@ -616,7 +614,7 @@ public final class RemoteAPI (API) : API
        which is a struct with the sender's Tid, the method's mangleof,
        and the method's arguments as a tuple, serialized to a JSON string.
 
-       `std.concurrency.receive` is not `@safe`, so neither is this.
+       `geod24.concurrency.receive` is not `@safe`, so neither is this.
 
        Params:
            Implementation = Type of the implementation to instantiate
@@ -687,21 +685,43 @@ public final class RemoteAPI (API) : API
 
         try scheduler.start(() {
                 bool terminated = false;
+                scheduler.spawn({
+                    while (!terminated)
+                    {
+                        // now handle any leftover messages after any sleep() call
+                        if (!isSleeping())
+                        {
+                            await_msgs.each!(msg => msg.tag == 0 ? handle(msg.res) : handle(msg.cmd));
+                            await_msgs.length = 0;
+                            assumeSafeAppend(await_msgs);
+                        }
+                        scheduler.yield();
+                        Thread.sleep(1.msecs);
+                    }
+                });
                 while (!terminated)
                 {
                     C.receiveTimeout(10.msecs,
-                        (C.OwnerTerminated e) { terminated = true; },
-                        (ShutdownCommand e) {
+                        (C.OwnerTerminated e)
+                        {
                             terminated = true;
                         },
-                        (TimeCommand s)      {
+                        (ShutdownCommand e)
+                        {
+                            terminated = true;
+                            C.thisTid().shutdown = true;
+                        },
+                        (TimeCommand s)
+                        {
                             control.sleep_until = Clock.currTime + s.dur;
                             control.drop = s.drop;
                         },
-                        (FilterAPI filter_api) {
+                        (FilterAPI filter_api)
+                        {
                             control.filter = filter_api;
                         },
-                        (Response res) {
+                        (Response res)
+                        {
                             if (!isSleeping())
                                 handle(res);
                             else if (!control.drop)
@@ -714,14 +734,8 @@ public final class RemoteAPI (API) : API
                             else if (!control.drop)
                                 await_msgs ~= Variant(cmd);
                         });
-
-                    // now handle any leftover messages after any sleep() call
-                    if (!isSleeping())
-                    {
-                        await_msgs.each!(msg => msg.tag == 0 ? handle(msg.res) : handle(msg.cmd));
-                        await_msgs.length = 0;
-                        assumeSafeAppend(await_msgs);
-                    }
+                        scheduler.yield();
+                        Thread.sleep(1.msecs);
                 }
                 // Make sure the scheduler is not waiting for polling tasks
                 throw exc;
@@ -729,6 +743,7 @@ public final class RemoteAPI (API) : API
         catch (Exception e)
             if (e !is exc)
                 throw e;
+
     }
 
     /// Where to send message to
@@ -768,6 +783,8 @@ public final class RemoteAPI (API) : API
         this.childTid = tid;
         this.owner = isOwner;
         this.timeout = timeout;
+
+        this.childTid.setTimeout(timeout);
     }
 
     /***************************************************************************
@@ -810,6 +827,7 @@ public final class RemoteAPI (API) : API
         public void shutdown () @trusted
         {
             C.send(this.childTid, ShutdownCommand());
+            this.childTid.shutdown = true;
         }
 
         /***********************************************************************
@@ -914,7 +932,6 @@ public final class RemoteAPI (API) : API
             C.send(this.childTid, FilterAPI(mangled, pretty));
         }
 
-
         /***********************************************************************
 
             Clear out any filtering set by a call to filter()
@@ -946,70 +963,84 @@ public final class RemoteAPI (API) : API
                         is_main_thread = true;
                     }
 
+                    if (this.childTid.shutdown)
+                        throw new Exception(serializeToJsonString("Request timed-out"));
+
                     // `geod24.concurrency.send/receive[Only]` is not `@safe` but
                     // this overload needs to be
-
                     auto res = () @trusted {
                         auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                             .serializeToJsonString();
 
+                        MonoTime start_time = MonoTime.currTime;
                         auto command = Command(C.thisTid(), scheduler.getNextResponseId(), ovrld.mangleof, serialized);
-                        C.send(this.childTid, command);
-                        writeln("Command ", command);
-/*
-                        // for the main thread, we run the "event loop" until
-                        // the request we're interested in receives a response.
-                        if (is_main_thread)
+
+                        C.SendStatus status;
+                        bool done = false;
+                        new Fiber({
+                            status = C.send(this.childTid, command);
+                            done = true;
+                        }).call();
+                        while (!done)
+                            if (Fiber.getThis())
+                                Fiber.yield();
+
+                        MonoTime end_time = MonoTime.currTime;
+
+                        if ((status == C.SendStatus.queue) || (status == C.SendStatus.success))
                         {
-                            bool terminated = false;
+                            Duration timeout = this.timeout;
+                            if (this.timeout != Duration.init)
+                            {
+                                timeout = this.timeout - (end_time - start_time);
+                                if (timeout.isNegative)
+                                    timeout = Duration.init;
+                            }
 
-                            
-                            //runTask(() {
-                                while (!terminated)
-                                {
-                                    writeln("Response1 ");
-                                    C.receiveTimeout(10.msecs,
-                                        (Response res) {
-                                            writeln("Response ", res);
-                                            res = Response(Status.Success, command.id);
-                                            //scheduler.pending = res;
-                                            //scheduler.waiting[res.id].c.notify();
+                            // for the main thread, we run the "event loop" until
+                            // the request we're interested in receives a response.
+                            if (is_main_thread)
+                            {
+                                bool terminated = false;
+                                runTask(() {
+                                    while (!terminated)
+                                    {
+                                        C.receiveTimeout(10.msecs,
+                                            (Response res) {
+                                                if (scheduler !is null)
+                                                {
+                                                    scheduler.pending = res;
+                                                    scheduler.waiting[res.id].c.notify();
+                                                }
+                                            });
+                                        if (scheduler !is null)
+                                            scheduler.yield();
+                                    }
+                                });
 
-                                            if (res.id == command.id) {
-                                                terminated = true;
-                                            }
-                                        });
-
-                                    //scheduler.yield();
-                                }
-                            //});
-                            
-                            writeln("Response2 ");
-                            Response res2;
-                            //scheduler.start(() {
-                                //res2 = scheduler.waitResponse(command.id, this.timeout);
-                                res2 = Response(Status.Success, command.id);
-                                terminated = true;
-                                writeln("terminated ", terminated);
-                            //});
-                            return res2;
+                                Response res;
+                                scheduler.start(() {
+                                    res = scheduler.waitResponse(command.id, timeout);
+                                    terminated = true;
+                                });
+                                return res;
+                            }
+                            else
+                            {
+                                return scheduler.waitResponse(command.id, timeout);
+                            }
                         }
                         else
                         {
-                            return scheduler.waitResponse(command.id, this.timeout);
+                            return Response(Status.Timeout, command.id);
                         }
-                        */
-                        return Response(Status.Success, 0, "42");
                     }();
 
-                    //Thread.sleep(dur!("msecs")(5000));
+                    if (res.status == Status.Failed)
+                        throw new Exception(res.data);
 
-                    //if (res.status == Status.Failed)
-                        //throw new Exception(res.data);
-
-                    //if (res.status == Status.Timeout)
-                        //throw new Exception(serializeToJsonString("Request timed-out"));
-                    writeln("res.data ", res.data);
+                    if (res.status == Status.Timeout)
+                        throw new Exception(serializeToJsonString("Request timed-out"));
 
                     static if (!is(ReturnType!(ovrld) == void))
                         return res.data.deserializeJson!(typeof(return));
@@ -1017,7 +1048,7 @@ public final class RemoteAPI (API) : API
                 });
         }
 }
-/*
+
 /// Simple usage example
 unittest
 {
@@ -1263,7 +1294,6 @@ unittest
     nodes.each!(node => node.ctrl.shutdown());
 }
 
-
 /// Nodes can start tasks
 unittest
 {
@@ -1392,11 +1422,11 @@ unittest
     assert(current4 - current2 >= 1.seconds);
 
     // Now drop many messages
-    n1.sleep(1.seconds, true);
-    for (size_t i = 0; i < 500; i++)
+    n1.sleep(3.seconds, true);
+    for (size_t i = 0; i < 100; i++)
         n2.asyncCall();
     // Make sure we don't end up blocked forever
-    Thread.sleep(1.seconds);
+    Thread.sleep(3.seconds);
     assert(3 == n1.call());
 
     // Debug output, uncomment if needed
@@ -1740,7 +1770,7 @@ unittest
 
             // Requests are dropped, so it times out
             assert(node.ping() == 42);
-            node.ctrl.sleep(10.msecs, true);
+            node.ctrl.sleep(20.msecs, true);
             assertThrown!Exception(node.ping());
         }
     }
@@ -1758,6 +1788,7 @@ unittest
 {
     static import geod24.concurrency;
     import std.exception;
+    import std.stdio;
 
     __gshared C.Tid node_tid;
 
@@ -1826,4 +1857,3 @@ unittest
         assert(ex.msg == `"Request timed-out"`);
     }
 }
-*/
