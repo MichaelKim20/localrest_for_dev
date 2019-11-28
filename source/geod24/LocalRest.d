@@ -80,14 +80,10 @@ module geod24.LocalRest;
 
 import vibe.data.json;
 
-static import C = geod24.LogicalNode;
+static import C = geod24.concurrency;
 import std.meta : AliasSeq;
 import std.traits : Parameters, ReturnType;
-import std.stdio;
 
-import core.atomic;
-import core.sync.condition;
-import core.sync.mutex;
 import core.thread;
 import core.time;
 
@@ -103,7 +99,6 @@ private struct TimeCommand
 /// Ask the node to shut down
 private struct ShutdownCommand
 {
-
 }
 
 /// Filter out requests before they reach a node
@@ -125,6 +120,9 @@ private struct ArgWrapper (T...)
     T args;
 }
 
+/// Whether this is the main thread
+private bool is_main_thread;
+
 /*******************************************************************************
 
     Provide eventloop-like functionalities
@@ -139,7 +137,7 @@ private struct ArgWrapper (T...)
 
     The following functions do that.
     Note that those facilities are not available from the main thread,
-    while is supposed to do tests and doesn't have a scheduler.
+    while is supposed to do tests and doesn't have a C.scheduler.
 
 *******************************************************************************/
 
@@ -156,6 +154,7 @@ public void sleep (Duration timeout)
     scope cond = C.scheduler.newCondition();
     cond.wait(timeout);
 }
+
 
 /*******************************************************************************
 
@@ -204,7 +203,6 @@ public final class RemoteAPI (API) : API
         Duration timeout = Duration.init)
     {
         auto childTid = C.spawn(&spawned!(Impl), args);
-        childTid.timeout = timeout;
         return new RemoteAPI(childTid, true, timeout);
     }
 
@@ -231,10 +229,11 @@ public final class RemoteAPI (API) : API
 
     ***************************************************************************/
 
-    private static C.Response handleCommand (ref C.Request req, API node, FilterAPI filter)
+    private static void handleCommand (C.Command cmd, API node, FilterAPI filter)
     {
         import std.format;
-        switch (req.method)
+
+        switch (cmd.method)
         {
             static foreach (member; __traits(allMembers, API))
             static foreach (ovrld; __traits(getOverloads, API, member))
@@ -242,37 +241,47 @@ public final class RemoteAPI (API) : API
                 mixin(
                 q{
                     case `%2$s`:
-                    C.Response res;
                     try
                     {
-                        if (req.method == filter.func_mangleof)
+                        if (cmd.method == filter.func_mangleof)
                         {
+                            // we have to send back a message
                             import std.format;
-                            res = C.Response(C.Status.Failed, format("Filtered method '%%s'", filter.pretty_func));
+                            C.send(cmd.sender, C.Response(C.Status.Failed, cmd.id,
+                                format("Filtered method '%%s'", filter.pretty_func)));
+                            return;
                         }
 
-                        auto args = req.args.deserializeJson!(ArgWrapper!(Parameters!ovrld));
+                        auto args = cmd.args.deserializeJson!(ArgWrapper!(Parameters!ovrld));
+
                         static if (!is(ReturnType!ovrld == void))
                         {
-                            res = C.Response(C.Status.Success, node.%1$s(args.args).serializeToJsonString());
+                            C.send(cmd.sender,
+                                C.Response(
+                                    C.Status.Success,
+                                    cmd.id,
+                                    node.%1$s(args.args).serializeToJsonString()));
                         }
                         else
                         {
                             node.%1$s(args.args);
-                            res = C.Response(C.Status.Success);
+                            C.send(cmd.sender, C.Response(C.Status.Success, cmd.id));
                         }
                     }
                     catch (Throwable t)
                     {
-                        res = C.Response(C.Status.Failed, t.toString());
+                        // Our sender expects a response
+                        C.send(cmd.sender, C.Response(C.Status.Failed, cmd.id, t.toString()));
                     }
-                    return res;
+
+                    return;
                 }.format(member, ovrld.mangleof));
             }
         default:
-            assert(0, "Unmatched method name: " ~ req.method);
+            assert(0, "Unmatched method name: " ~ cmd.method);
         }
     }
+
     /***************************************************************************
 
         Main dispatch function
@@ -281,7 +290,7 @@ public final class RemoteAPI (API) : API
        which is a struct with the sender's Tid, the method's mangleof,
        and the method's arguments as a tuple, serialized to a JSON string.
 
-       `geod24.LogicalNode.receive` is not `@safe`, so neither is this.
+       `geod24.concurrency.receive` is not `@safe`, so neither is this.
 
        Params:
            Implementation = Type of the implementation to instantiate
@@ -299,6 +308,22 @@ public final class RemoteAPI (API) : API
         scope node = new Implementation(cargs);
         scope exc = new Exception("You should never see this exception - please report a bug");
 
+        // very simple & limited variant, to keep it performant.
+        // should be replaced by a real Variant later
+        static struct Variant
+        {
+            this (C.Response res) { this.res = res; this.tag = 0; }
+            this (C.Command cmd) { this.cmd = cmd; this.tag = 1; }
+
+            union
+            {
+                C.Response res;
+                C.Command cmd;
+            }
+
+            ubyte tag;
+        }
+
         // used for controling filtering / sleep
         struct Control
         {
@@ -311,64 +336,82 @@ public final class RemoteAPI (API) : API
 
         bool isSleeping()
         {
-            return control.sleep_until != SysTime.init && Clock.currTime < control.sleep_until;
+            return control.sleep_until != SysTime.init
+                && Clock.currTime < control.sleep_until;
         }
 
-        C.Response handle (ref C.Request req)
+        void handle (T)(T arg)
         {
-            C.Response res;
-            C.scheduler.spawn({
-                res = handleCommand(req, node, control.filter);
-            });
-            return res;
+            static if (is(T == C.Command))
+            {
+                C.scheduler.spawn(() => handleCommand(arg, node, control.filter));
+            }
+            else static if (is(T == C.Response))
+            {
+                C.scheduler.pending = arg;
+                C.scheduler.waiting[arg.id].c.notify();
+                C.scheduler.remove(arg.id);
+            }
+            else static assert(0, "Unhandled type: " ~ T.stringof);
         }
 
-            bool terminated = false;
-            while (!terminated)
-            {
-                C.scheduler.start(()
+        // we need to keep track of messages which were ignored when
+        // node.sleep() was used, and then handle each message in sequence.
+        Variant[] await_msgs;
+
+        try C.scheduler.start(() {
+                bool terminated = false;
+                C.scheduler.spawn({
+                    while (!terminated)
+                    {
+                        // now handle any leftover messages after any sleep() call
+                        if (!isSleeping())
+                        {
+                            await_msgs.each!(msg => msg.tag == 0 ? handle(msg.res) : handle(msg.cmd));
+                            await_msgs.length = 0;
+                            assumeSafeAppend(await_msgs);
+                        }
+                        C.scheduler.yield();
+                        Thread.sleep(1.msecs);
+                    }
+                });
+                while (!terminated)
                 {
-                    bool done = false;
-                    C.receive(
-                        (C.LinkTerminated e)
-                        {
+                    C.receiveTimeout(10.msecs,
+                        (C.OwnerTerminated e) { terminated = true; },
+                        (ShutdownCommand e) {
                             terminated = true;
                         },
-                        (C.OwnerTerminated e)
-                        {
-                            terminated = true;
-                        },
-                        (ShutdownCommand e)
-                        {
-                            terminated = true;
-                            C.thisTid().shutdown = true;
-                            writeln("C.thisTid().shutdown");
-                        },
-                        (TimeCommand s)
-                        {
+                        (TimeCommand s)      {
                             control.sleep_until = Clock.currTime + s.dur;
                             control.drop = s.drop;
                         },
-                        (FilterAPI filter_api)
-                        {
+                        (FilterAPI filter_api) {
                             control.filter = filter_api;
                         },
-                        (C.Request req)
+                        (C.Response res) {
+                            if (!isSleeping())
+                                handle(res);
+                            else if (!control.drop)
+                                await_msgs ~= Variant(res);
+                        },
+                        (C.Command cmd)
                         {
                             if (!isSleeping())
-                                return handle(req);
+                                handle(cmd);
                             else if (!control.drop)
-                            {
-                                while (isSleeping())
-                                    Thread.sleep(5.msecs);
-                                return handleCommand(req, node, control.filter);
-                            }
-                            else
-                                return C.Response(C.Status.Timeout, "");
-                        }
-                    );
-                });
-            }
+                                await_msgs ~= Variant(cmd);
+                        });
+
+                        C.scheduler.yield();
+                        Thread.sleep(1.msecs);
+                }
+                // Make sure the C.scheduler is not waiting for polling tasks
+                throw exc;
+            });
+        catch (Exception e)
+            if (e !is exc)
+                throw e;
     }
 
     /// Where to send message to
@@ -391,8 +434,8 @@ public final class RemoteAPI (API) : API
         In order to instantiate a node, see the static `spawn` function.
 
         Params:
-          tid = `geod24.LogicalNode.Tid` of the node.
-                This can usually be obtained by `geod24.LogicalNode.locate`.
+          tid = `geod24.concurrency.Tid` of the node.
+                This can usually be obtained by `geod24.concurrency.locate`.
           timeout = any timeout to use
 
     ***************************************************************************/
@@ -408,7 +451,7 @@ public final class RemoteAPI (API) : API
         this.childTid = tid;
         this.owner = isOwner;
         this.timeout = timeout;
-        this.childTid.timeout = timeout;
+        this.childTid.setTimeout(timeout);
     }
 
     /***************************************************************************
@@ -431,7 +474,7 @@ public final class RemoteAPI (API) : API
 
             Returns the `Tid` this `RemoteAPI` wraps
 
-            This can be useful for calling `geod24.LogicalNode.register` or similar.
+            This can be useful for calling `geod24.concurrency.register` or similar.
             Note that the `Tid` should not be used directly, as our event loop,
             would error out on an unknown message.
 
@@ -581,23 +624,54 @@ public final class RemoteAPI (API) : API
             mixin(q{
                 override ReturnType!(ovrld) } ~ member ~ q{ (Parameters!ovrld params)
                 {
-                    C.createScheduler();
-
-                    if (this.childTid.shutdown)
+                    // we are in the main thread
+                    if (C.scheduler is null)
                     {
-                        writeln("shutdown/shutdown/shutdown");
-                        throw new Exception(serializeToJsonString("Request timed-out"));
+                        C.createScheduler();
+                        is_main_thread = true;
                     }
 
-                    // `geod24.LogicalNode.Request` is not `@safe` but
+                    if (this.childTid.shutdown)
+                        throw new Exception(serializeToJsonString("Request timed-out"));
+
+                    // `geod24.concurrency.send/receive[Only]` is not `@safe` but
                     // this overload needs to be
-                    auto res = () @trusted
-                    {
+                    auto res = () @trusted {
                         auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                             .serializeToJsonString();
 
-                        auto req = C.Request(C.thisTid(), ovrld.mangleof, serialized);
-                        return C.query(this.childTid, req);
+                        auto command = C.Command(C.thisTid(), C.scheduler.getNextResponseId(), ovrld.mangleof, serialized);
+                        C.send(this.childTid, command);
+
+                        // for the main thread, we run the "event loop" until
+                        // the request we're interested in receives a response.
+                        if (is_main_thread)
+                        {
+                            bool terminated = false;
+                            runTask(() {
+                                while (!terminated)
+                                {
+                                    C.receiveTimeout(10.msecs,
+                                        (C.Response res) {
+                                            C.scheduler.pending = res;
+                                            C.scheduler.waiting[res.id].c.notify();
+                                        });
+
+                                        C.scheduler.yield();
+                                }
+                            });
+
+                            C.Response res;
+                            C.scheduler.start(() {
+                                res = C.scheduler.waitResponse(command.id, this.timeout);
+                                terminated = true;
+                            });
+                            return res;
+                        }
+                        else
+                        {
+                            return C.scheduler.waitResponse(command.id, this.timeout);
+                        }
                     }();
 
                     if (res.status == C.Status.Failed)
@@ -613,10 +687,11 @@ public final class RemoteAPI (API) : API
         }
 }
 
+import std.stdio;
+
 /// Simple usage example
 unittest
 {
-    writeln("test1");
     static interface API
     {
         @safe:
@@ -640,19 +715,15 @@ unittest
     }
 
     scope test = RemoteAPI!API.spawn!MockAPI();
-    import std.stdio;
-
     assert(test.pubkey() == 42);
     test.ctrl.shutdown();
-    writeln("test1");
 }
 
 /// In a real world usage, users will most likely need to use the registry
 unittest
 {
-    writeln("test2");
     import std.conv;
-    static import geod24.LogicalNode;
+    static import geod24.concurrency;
 
     static interface API
     {
@@ -687,7 +758,7 @@ unittest
     static RemoteAPI!API factory (string type, ulong hash)
     {
         const name = hash.to!string;
-        auto tid = C.locate(name);
+        auto tid = geod24.concurrency.locate(name);
         if (tid != tid.init)
             return new RemoteAPI!API(tid);
 
@@ -695,11 +766,11 @@ unittest
         {
         case "normal":
             auto ret =  RemoteAPI!API.spawn!Node(false);
-            C.register(name, ret.tid());
+            geod24.concurrency.register(name, ret.tid());
             return ret;
         case "byzantine":
             auto ret =  RemoteAPI!API.spawn!Node(true);
-            C.register(name, ret.tid());
+            geod24.concurrency.register(name, ret.tid());
             return ret;
         default:
             assert(0, type);
@@ -709,7 +780,7 @@ unittest
     auto node1 = factory("normal", 1);
     auto node2 = factory("byzantine", 2);
 
-    static void testFunc(geod24.LogicalNode.Tid parent)
+    static void testFunc(geod24.concurrency.Tid parent)
     {
         auto node1 = factory("this does not matter", 1);
         auto node2 = factory("neither does this", 2);
@@ -725,20 +796,18 @@ unittest
         assert(node2.last() == "pubkey");
         node1.ctrl.shutdown();
         node2.ctrl.shutdown();
-        C.send(parent, 42);
+        geod24.concurrency.send(parent, 42);
     }
 
-    auto testerFiber = C.spawn(&testFunc, C.thisTid);
+    auto testerFiber = geod24.concurrency.spawn(&testFunc, geod24.concurrency.thisTid);
     // Make sure our main thread terminates after everyone else
-    //C.receiveOnly!int();
-    writeln("test2");
+    geod24.concurrency.receiveOnly!int();
 }
 
 /// This network have different types of nodes in it
 unittest
 {
-    writeln("test3");
-    import geod24.LogicalNode;
+    import geod24.concurrency;
 
     static interface API
     {
@@ -811,14 +880,12 @@ unittest
     assert(nodes[0].requests() == 7);
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
-    writeln("test3");
 }
-/*
+
 /// Support for circular nodes call
 unittest
 {
-    writeln("test4");
-    static import geod24.LogicalNode;
+    static import geod24.concurrency;
     import std.format;
 
     __gshared C.Tid[string] tbn;
@@ -862,17 +929,15 @@ unittest
 
     // 7 level of re-entrancy
     assert(210 == nodes[0].call(20, 0));
+
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
-
-    writeln("test4");
 }
-*/
+
 
 /// Nodes can start tasks
 unittest
 {
-    writeln("test5");
     static import core.thread;
     import core.time;
 
@@ -907,32 +972,24 @@ unittest
         private ulong counter;
     }
 
-    writeln("test5 A");
     import std.format;
     auto node = RemoteAPI!API.spawn!Node();
     assert(node.getCounter() == 0);
-    writeln("test5 B");
     node.start();
-    import std.stdio;
-    //writefln("%s", node.getCounter());
     assert(node.getCounter() == 1);
     assert(node.getCounter() == 0);
-    writeln("test5 B");
     core.thread.Thread.sleep(1.seconds);
     // It should be 19 but some machines are very slow
     // (e.g. Travis Mac testers) so be safe
-    writefln("%s", node.getCounter());
     assert(node.getCounter() >= 9);
     assert(node.getCounter() == 0);
     node.ctrl.shutdown();
-    import std.stdio;
-    writeln("test5");
 }
 
 // Sane name insurance policy
 unittest
 {
-    import geod24.LogicalNode : Tid;
+    import geod24.concurrency : Tid;
 
     static interface API
     {
@@ -954,10 +1011,8 @@ unittest
     }
     static assert(!is(typeof(RemoteAPI!DoesntWork)));
     node.ctrl.shutdown();
-    import std.stdio;
-    writeln("test6");
 }
-/*
+
 // Simulate temporary outage
 unittest
 {
@@ -1008,11 +1063,11 @@ unittest
     assert(current4 - current2 >= 1.seconds);
 
     // Now drop many messages
-    n1.sleep(1.seconds, true);
-    for (size_t i = 0; i < 500; i++)
+    n1.sleep(3.seconds, true);
+    for (size_t i = 0; i < 100; i++)
         n2.asyncCall();
     // Make sure we don't end up blocked forever
-    Thread.sleep(1.seconds);
+    Thread.sleep(3.seconds);
     assert(3 == n1.call());
 
     // Debug output, uncomment if needed
@@ -1026,11 +1081,8 @@ unittest
 
     n1.ctrl.shutdown();
     n2.ctrl.shutdown();
-    import std.stdio;
-    writeln("test7");
 }
-*/
-/*
+
 // Filter commands
 unittest
 {
@@ -1168,18 +1220,11 @@ unittest
 
     filtered.ctrl.shutdown();
     caller.ctrl.shutdown();
-    import std.stdio;
-    writeln("test8");
-
 }
-*/
 
-/*
 // request timeouts (from main thread)
 unittest
 {
-    import std.stdio;
-    writeln("test9");
     import core.thread;
     import std.exception;
 
@@ -1196,7 +1241,7 @@ unittest
             return 42;
         }
     }
-        import std.stdio;
+
     // node with no timeout
     auto node = RemoteAPI!API.spawn!Node();
     assert(node.sleepFor(80) == 42);  // no timeout
@@ -1209,16 +1254,13 @@ unittest
     assert(to_node.sleepFor(20) == 42);
     assert(to_node.sleepFor(30) == 42);
     assert(to_node.sleepFor(40) == 42);
+
     assertThrown!Exception(to_node.sleepFor(2000));
     Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
-
-    writeln("test9 4");
 }
-*/
 
-/*
 // test-case for responses to re-used requests (from main thread)
 unittest
 {
@@ -1244,18 +1286,15 @@ unittest
     // node with no timeout
     auto node = RemoteAPI!API.spawn!Node();
     assert(node.sleepFor(80) == 42);  // no timeout
-    writeln("test10 A");
 
     // node with a configured timeout
     auto to_node = RemoteAPI!API.spawn!Node(500.msecs);
-    writeln("test10 B");
 
     /// none of these should time out
     assert(to_node.sleepFor(10) == 42);
     assert(to_node.sleepFor(20) == 42);
     assert(to_node.sleepFor(30) == 42);
     assert(to_node.sleepFor(40) == 42);
-    writeln("test10 C");
 
     assertThrown!Exception(to_node.sleepFor(2000));
     Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
@@ -1264,17 +1303,12 @@ unittest
 
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
-    import std.stdio;
-    writeln("test10");
 }
-
 
 // request timeouts (foreign node to another node)
 unittest
 {
-    import std.stdio;
-    writeln("test11");
-    static import geod24.LogicalNode;
+    static import geod24.concurrency;
     import std.exception;
 
     __gshared C.Tid node_tid;
@@ -1309,16 +1343,12 @@ unittest
     node_1.check();
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
-    import std.stdio;
-    writeln("test11");
 }
 
 // test-case for zombie responses
 unittest
 {
-    import std.stdio;
-    writeln("test12");
-    static import geod24.LogicalNode;
+    static import geod24.concurrency;
     import std.exception;
 
     __gshared C.Tid node_tid;
@@ -1355,16 +1385,12 @@ unittest
     node_1.check();
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
-    import std.stdio;
-    writeln("test12");
 }
 
 // request timeouts with dropped messages
 unittest
 {
-    import std.stdio;
-    writeln("test13");
-    static import geod24.LogicalNode;
+    static import geod24.concurrency;
     import std.exception;
 
     __gshared C.Tid node_tid;
@@ -1385,7 +1411,7 @@ unittest
 
             // Requests are dropped, so it times out
             assert(node.ping() == 42);
-            node.ctrl.sleep(10.msecs, true);
+            node.ctrl.sleep(20.msecs, true);
             assertThrown!Exception(node.ping());
         }
     }
@@ -1396,17 +1422,12 @@ unittest
     node_1.check();
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
-    import std.stdio;
-    writeln("test13");
 }
-*/
-/*
+
 // Test a node that gets a replay while it's delayed
 unittest
 {
-    import std.stdio;
-    writeln("test14");
-    static import geod24.LogicalNode;
+    static import geod24.concurrency;
     import std.exception;
 
     __gshared C.Tid node_tid;
@@ -1442,15 +1463,11 @@ unittest
     assert(node_1.ping() == 42);
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
-    import std.stdio;
-    writeln("test14");
 }
-*/
+
 // Test explicit shutdown
 unittest
 {
-    import std.stdio;
-    writeln("test15");
     import std.exception;
 
     static interface API
@@ -1467,22 +1484,16 @@ unittest
     }
 
     auto node = RemoteAPI!API.spawn!Node(1.seconds);
-    writeln("test15-2");
     assert(node.myping(42) == 42);
-    writeln("test15-3");
     node.ctrl.shutdown();
-    writeln("test15-4");
+
     try
     {
-    writeln("test15-5");
         node.myping(69);
-    writeln("test15-6");
         assert(0);
     }
     catch (Exception ex)
     {
         assert(ex.msg == `"Request timed-out"`);
     }
-    import std.stdio;
-    writeln("test15");
 }
