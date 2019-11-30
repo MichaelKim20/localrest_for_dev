@@ -6,7 +6,7 @@ import core.sync.mutex;
 import core.thread;
 import std.datetime.systime;
 import std.variant;
-import C=std.concurrency;
+import C=geod24.concurrency;
 
 import vibe.core.core;
 import vibe.http.router;
@@ -15,15 +15,15 @@ import vibe.web.rest;
 
 void main()
 {
-    //case1();
-    case2();
+    case1();
+//    case2();
 }
 
 void case1()
 {
     Mutex m = new Mutex();
 
-    new Thread({
+    C.spawn({
     auto scheduler1 = new C.FiberScheduler();
         scheduler1.start({
             scheduler1.spawn({
@@ -42,9 +42,9 @@ void case1()
                 }
             });
         });
-    }).start();
+    });
 
-    new Thread({
+    C.spawn({
         auto scheduler2 = new C.FiberScheduler();
         scheduler2.start({
             scheduler2.spawn({
@@ -63,7 +63,7 @@ void case1()
                 }
             });
         });
-    }).start();
+    });
 }
 
 void case2()
@@ -71,7 +71,7 @@ void case2()
     Mutex m = new Mutex();
     auto scheduler1 = new C.FiberScheduler();
 
-    new Thread({
+    C.spawn({
             scheduler1.spawn({
                 while (true)
                 {
@@ -87,9 +87,9 @@ void case2()
                     scheduler1.yield();
                 }
             });
-    }).start();
+    });
 
-    new Thread({
+    C.spawn({
             scheduler1.spawn({
                 while (true)
                 {
@@ -105,5 +105,5 @@ void case2()
                     scheduler1.yield();
                 }
             });
-    }).start();
+    });
 }
