@@ -1,47 +1,109 @@
 module test;
 
 import vibe.data.json;
-import geod24.LocalRest;
 import std.stdio;
 import core.sync.mutex;
 import core.thread;
 import std.datetime.systime;
 import std.variant;
+import C=std.concurrency;
 
 import vibe.core.core;
 import vibe.http.router;
 import vibe.http.server;
 import vibe.web.rest;
+
 void main()
 {
-    static interface API
-    {
-        @safe:
-        public @property ulong pubkey ();
-        public Json getValue (ulong idx);
-        public Json getQuorumSet ();
-        public string recv (Json data);
-    }
+    //case1();
+    case2();
+}
 
-    static class MockAPI : API
-    {
-        @safe:
-        public override @property ulong pubkey ()
-        {
-            return 42;
-        }
-        public override Json getValue (ulong idx)
-        { assert(0); }
-        public override Json getQuorumSet ()
-        { assert(0); }
-        public override string recv (Json data)
-        { assert(0); }
-    }
+void case1()
+{
+    Mutex m = new Mutex();
 
-    import std.stdio;
+    new Thread({
+    auto scheduler1 = new C.FiberScheduler();
+        scheduler1.start({
+            scheduler1.spawn({
+                while (true)
+                {
+                    writeln("S1");
+                    scheduler1.yield();
+                }
+            });
 
-    scope test = RemoteAPI!API.spawn!MockAPI();
-    assert(42 == test.pubkey());
-    test.ctrl.shutdown();
+            scheduler1.spawn({
+                while (true)
+                {
+                    writeln("S2");
+                    scheduler1.yield();
+                }
+            });
+        });
+    }).start();
 
+    new Thread({
+        auto scheduler2 = new C.FiberScheduler();
+        scheduler2.start({
+            scheduler2.spawn({
+                while (true)
+                {
+                    writeln("T3");
+                    scheduler2.yield();
+                }
+            });
+
+            scheduler2.spawn({
+                while (true)
+                {
+                    writeln("T4");
+                    scheduler2.yield();
+                }
+            });
+        });
+    }).start();
+}
+
+void case2()
+{
+    Mutex m = new Mutex();
+    auto scheduler1 = new C.FiberScheduler();
+
+    new Thread({
+            scheduler1.spawn({
+                while (true)
+                {
+                    writeln("S1");
+                    scheduler1.yield();
+                }
+            });
+
+            scheduler1.spawn({
+                while (true)
+                {
+                    writeln("S2");
+                    scheduler1.yield();
+                }
+            });
+    }).start();
+
+    new Thread({
+            scheduler1.spawn({
+                while (true)
+                {
+                    writeln("T3");
+                    scheduler1.yield();
+                }
+            });
+
+            scheduler1.spawn({
+                while (true)
+                {
+                    writeln("T4");
+                    scheduler1.yield();
+                }
+            });
+    }).start();
 }
