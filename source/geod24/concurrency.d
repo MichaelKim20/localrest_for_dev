@@ -31,7 +31,7 @@
 
 *******************************************************************************/
 
-module std.concurrency;
+module geod24.concurrency;
 
 import std.range.primitives;
 import std.range.interfaces : InputRange;
@@ -1639,6 +1639,8 @@ private:
 *******************************************************************************/
 
 __gshared Scheduler scheduler;
+__gshared Scheduler scheduler1;
+__gshared Scheduler scheduler2;
 
 /*******************************************************************************
 

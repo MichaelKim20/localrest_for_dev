@@ -18,7 +18,8 @@ void main()
 //    case1();
     //case2();
     //case3();
-    case4();
+    //case4();
+    case5();
 }
 
 void case1()
@@ -151,3 +152,35 @@ void case4()
         }
     });
 }
+
+void case5()
+{
+    C.scheduler1 = new C.FiberScheduler();
+
+    C.spawn({
+        C.scheduler1.start({
+            while (true) {
+                C.scheduler1.yield();
+            }
+        });
+    });
+
+        C.scheduler1.spawn({
+            for (int i = 0; i < 1000; i++)
+            {
+                writeln("S3");
+                C.scheduler1.yield();
+            }
+        });
+
+        C.scheduler1.spawn({
+            for (int i = 0; i < 1000; i++)
+            {
+                writeln("S4");
+                C.scheduler1.yield();
+            }
+        });
+
+
+}
+
