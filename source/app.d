@@ -15,16 +15,17 @@ import vibe.web.rest;
 
 void main()
 {
-    case1();
-//    case2();
+//    case1();
+    //case2();
+    //case3();
+    case4();
 }
 
 void case1()
 {
     Mutex m = new Mutex();
-
     C.spawn({
-    auto scheduler1 = new C.FiberScheduler();
+        auto scheduler1 = new C.FiberScheduler();
         scheduler1.start({
             scheduler1.spawn({
                 while (true)
@@ -33,7 +34,6 @@ void case1()
                     scheduler1.yield();
                 }
             });
-
             scheduler1.spawn({
                 while (true)
                 {
@@ -54,7 +54,6 @@ void case1()
                     scheduler2.yield();
                 }
             });
-
             scheduler2.spawn({
                 while (true)
                 {
@@ -69,41 +68,86 @@ void case1()
 void case2()
 {
     Mutex m = new Mutex();
-    auto scheduler1 = new C.FiberScheduler();
 
     C.spawn({
-            scheduler1.spawn({
-                while (true)
+        C.scheduler1 = new C.FiberScheduler();
+        C.scheduler1.start({
+            C.scheduler1.spawn({
+                auto cond = C.scheduler1.newCondition(null);
+                for (int i = 0; i < 1000; i++)
                 {
-                    writeln("S1");
-                    scheduler1.yield();
+                    writeln("S111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111");
+                    C.scheduler1.yield();
+                    cond.wait(10.msecs);
                 }
             });
-
-            scheduler1.spawn({
-                while (true)
-                {
-                    writeln("S2");
-                    scheduler1.yield();
-                }
-            });
+        });
     });
 
     C.spawn({
-            scheduler1.spawn({
-                while (true)
+        C.scheduler2 = new C.FiberScheduler();
+        C.scheduler2.start({
+            C.scheduler2.spawn({
+                auto cond = C.scheduler2.newCondition(null);
+                for (int i = 0; i < 1000; i++)
                 {
-                    writeln("T3");
-                    scheduler1.yield();
+                    writeln("T33333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333");
+                    C.scheduler2.yield();
+                    cond.wait(10.msecs);
                 }
             });
+        });
+    });
+}
 
-            scheduler1.spawn({
-                while (true)
+void case3()
+{
+    C.scheduler1 = new C.FiberScheduler();
+    C.scheduler1.start({
+        {
+            C.scheduler1.spawn({
+                for (int i = 0; i < 1000; i++)
                 {
-                    writeln("T4");
-                    scheduler1.yield();
+                    writeln("S1");
+                    C.scheduler1.yield();
                 }
             });
+            C.scheduler1.spawn({
+                for (int i = 0; i < 1000; i++)
+                {
+                    writeln("S2");
+                    C.scheduler1.yield();
+                }
+            });
+        }
+    });
+}
+
+void case4()
+{
+    C.scheduler1 = new C.FiberScheduler();
+
+    C.scheduler1.spawn({
+        for (int i = 0; i < 1000; i++)
+        {
+            writeln("S1");
+            C.scheduler1.yield();
+        }
+    });
+
+    C.scheduler1.spawn({
+        for (int i = 0; i < 1000; i++)
+        {
+            writeln("S3");
+            C.scheduler1.yield();
+        }
+    });
+
+    C.scheduler1.start({
+        for (int i = 0; i < 1000; i++)
+        {
+            writeln("S2");
+            C.scheduler1.yield();
+        }
     });
 }

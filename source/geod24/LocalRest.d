@@ -80,7 +80,7 @@ module geod24.LocalRest;
 
 import vibe.data.json;
 
-static import C = geod24.concurrency;
+static import C = std.concurrency;
 import std.meta : AliasSeq;
 import std.traits : Parameters, ReturnType;
 
@@ -165,7 +165,7 @@ private struct ArgWrapper (T...)
 }
 
 /**
- * Copied from geod24.concurrency.FiberScheduler, increased the stack size to 16MB.
+ * Copied from std.concurrency.FiberScheduler, increased the stack size to 16MB.
  */
 class BaseFiberScheduler : C.Scheduler
 {
@@ -441,7 +441,7 @@ private final class LocalScheduler : BaseFiberScheduler
 
 
 /// We need a scheduler to simulate an event loop and to be re-entrant
-/// However, the one in `geod24.concurrency` is process-global (`__gshared`)
+/// However, the one in `std.concurrency` is process-global (`__gshared`)
 private LocalScheduler scheduler;
 
 /// Whether this is the main thread
@@ -615,7 +615,7 @@ public final class RemoteAPI (API) : API
        which is a struct with the sender's Tid, the method's mangleof,
        and the method's arguments as a tuple, serialized to a JSON string.
 
-       `geod24.concurrency.receive` is not `@safe`, so neither is this.
+       `std.concurrency.receive` is not `@safe`, so neither is this.
 
        Params:
            Implementation = Type of the implementation to instantiate
@@ -686,19 +686,6 @@ public final class RemoteAPI (API) : API
 
         try scheduler.start(() {
                 bool terminated = false;
-                scheduler.spawn({
-                    while (!terminated)
-                    {
-                        // now handle any leftover messages after any sleep() call
-                        if (!isSleeping())
-                        {
-                            await_msgs.each!(msg => msg.tag == 0 ? handle(msg.res) : handle(msg.cmd));
-                            await_msgs.length = 0;
-                            assumeSafeAppend(await_msgs);
-                        }
-                        scheduler.yield();
-                    }
-                });
                 while (!terminated)
                 {
                     C.receiveTimeout(10.msecs,
@@ -727,7 +714,13 @@ public final class RemoteAPI (API) : API
                                 await_msgs ~= Variant(cmd);
                         });
 
-                        scheduler.yield();
+                    // now handle any leftover messages after any sleep() call
+                    if (!isSleeping())
+                    {
+                        await_msgs.each!(msg => msg.tag == 0 ? handle(msg.res) : handle(msg.cmd));
+                        await_msgs.length = 0;
+                        assumeSafeAppend(await_msgs);
+                    }
                 }
                 // Make sure the scheduler is not waiting for polling tasks
                 throw exc;
@@ -757,8 +750,8 @@ public final class RemoteAPI (API) : API
         In order to instantiate a node, see the static `spawn` function.
 
         Params:
-          tid = `geod24.concurrency.Tid` of the node.
-                This can usually be obtained by `geod24.concurrency.locate`.
+          tid = `std.concurrency.Tid` of the node.
+                This can usually be obtained by `std.concurrency.locate`.
           timeout = any timeout to use
 
     ***************************************************************************/
@@ -774,7 +767,6 @@ public final class RemoteAPI (API) : API
         this.childTid = tid;
         this.owner = isOwner;
         this.timeout = timeout;
-        this.childTid.setTimeout(timeout);
     }
 
     /***************************************************************************
@@ -797,7 +789,7 @@ public final class RemoteAPI (API) : API
 
             Returns the `Tid` this `RemoteAPI` wraps
 
-            This can be useful for calling `geod24.concurrency.register` or similar.
+            This can be useful for calling `std.concurrency.register` or similar.
             Note that the `Tid` should not be used directly, as our event loop,
             would error out on an unknown message.
 
@@ -817,7 +809,6 @@ public final class RemoteAPI (API) : API
         public void shutdown () @trusted
         {
             C.send(this.childTid, ShutdownCommand());
-            this.childTid.shutdown = true;
         }
 
         /***********************************************************************
@@ -954,10 +945,7 @@ public final class RemoteAPI (API) : API
                         is_main_thread = true;
                     }
 
-                    if (this.childTid.shutdown)
-                        throw new Exception(serializeToJsonString("Request timed-out"));
-
-                    // `geod24.concurrency.send/receive[Only]` is not `@safe` but
+                    // `std.concurrency.send/receive[Only]` is not `@safe` but
                     // this overload needs to be
                     auto res = () @trusted {
                         auto serialized = ArgWrapper!(Parameters!ovrld)(params)
@@ -1044,7 +1032,7 @@ unittest
 unittest
 {
     import std.conv;
-    static import geod24.concurrency;
+    static import std.concurrency;
 
     static interface API
     {
@@ -1079,7 +1067,7 @@ unittest
     static RemoteAPI!API factory (string type, ulong hash)
     {
         const name = hash.to!string;
-        auto tid = geod24.concurrency.locate(name);
+        auto tid = std.concurrency.locate(name);
         if (tid != tid.init)
             return new RemoteAPI!API(tid);
 
@@ -1087,11 +1075,11 @@ unittest
         {
         case "normal":
             auto ret =  RemoteAPI!API.spawn!Node(false);
-            geod24.concurrency.register(name, ret.tid());
+            std.concurrency.register(name, ret.tid());
             return ret;
         case "byzantine":
             auto ret =  RemoteAPI!API.spawn!Node(true);
-            geod24.concurrency.register(name, ret.tid());
+            std.concurrency.register(name, ret.tid());
             return ret;
         default:
             assert(0, type);
@@ -1101,7 +1089,7 @@ unittest
     auto node1 = factory("normal", 1);
     auto node2 = factory("byzantine", 2);
 
-    static void testFunc(geod24.concurrency.Tid parent)
+    static void testFunc(std.concurrency.Tid parent)
     {
         auto node1 = factory("this does not matter", 1);
         auto node2 = factory("neither does this", 2);
@@ -1117,18 +1105,18 @@ unittest
         assert(node2.last() == "pubkey");
         node1.ctrl.shutdown();
         node2.ctrl.shutdown();
-        geod24.concurrency.send(parent, 42);
+        std.concurrency.send(parent, 42);
     }
 
-    auto testerFiber = geod24.concurrency.spawn(&testFunc, geod24.concurrency.thisTid);
+    auto testerFiber = std.concurrency.spawn(&testFunc, std.concurrency.thisTid);
     // Make sure our main thread terminates after everyone else
-    geod24.concurrency.receiveOnly!int();
+    std.concurrency.receiveOnly!int();
 }
 
 /// This network have different types of nodes in it
 unittest
 {
-    import geod24.concurrency;
+    import std.concurrency;
 
     static interface API
     {
@@ -1206,7 +1194,7 @@ unittest
 /// Support for circular nodes call
 unittest
 {
-    static import geod24.concurrency;
+    static import std.concurrency;
     import std.format;
 
     __gshared C.Tid[string] tbn;
@@ -1310,7 +1298,7 @@ unittest
 // Sane name insurance policy
 unittest
 {
-    import geod24.concurrency : Tid;
+    import std.concurrency : Tid;
 
     static interface API
     {
@@ -1384,11 +1372,11 @@ unittest
     assert(current4 - current2 >= 1.seconds);
 
     // Now drop many messages
-    n1.sleep(3.seconds, true);
-    for (size_t i = 0; i < 100; i++)
+    n1.sleep(1.seconds, true);
+    for (size_t i = 0; i < 500; i++)
         n2.asyncCall();
     // Make sure we don't end up blocked forever
-    Thread.sleep(3.seconds);
+    Thread.sleep(1.seconds);
     assert(3 == n1.call());
 
     // Debug output, uncomment if needed
@@ -1629,7 +1617,7 @@ unittest
 // request timeouts (foreign node to another node)
 unittest
 {
-    static import geod24.concurrency;
+    static import std.concurrency;
     import std.exception;
 
     __gshared C.Tid node_tid;
@@ -1669,7 +1657,7 @@ unittest
 // test-case for zombie responses
 unittest
 {
-    static import geod24.concurrency;
+    static import std.concurrency;
     import std.exception;
 
     __gshared C.Tid node_tid;
@@ -1711,7 +1699,7 @@ unittest
 // request timeouts with dropped messages
 unittest
 {
-    static import geod24.concurrency;
+    static import std.concurrency;
     import std.exception;
 
     __gshared C.Tid node_tid;
@@ -1748,7 +1736,7 @@ unittest
 // Test a node that gets a replay while it's delayed
 unittest
 {
-    static import geod24.concurrency;
+    static import std.concurrency;
     import std.exception;
 
     __gshared C.Tid node_tid;
