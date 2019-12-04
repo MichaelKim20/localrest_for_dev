@@ -190,7 +190,7 @@ class BaseFiberScheduler : C.Scheduler
         dispatch();
     }
 
-    void stop()
+    void stop ()
     {
 
     }
@@ -532,7 +532,7 @@ public final class RemoteAPI (API) : API
     public static RemoteAPI!(API) spawn (Impl) (CtorParams!Impl args,
         Duration timeout = Duration.init)
     {
-        auto childTid = C.spawnThread(&spawned!(Impl), args);
+        auto childTid = C.spawn(&spawned!(Impl), args);
         return new RemoteAPI(childTid, true, timeout);
     }
 
@@ -685,31 +685,16 @@ public final class RemoteAPI (API) : API
             else static assert(0, "Unhandled type: " ~ T.stringof);
         }
 
-        // we need to keep track of messages which were ignored when
-        // node.sleep() was used, and then handle each message in sequence.
-        Variant[] await_msgs;
 
         try scheduler.start(() {
                 bool terminated = false;
-                scheduler.spawn({
-                    while (!terminated)
-                    {
-                        // now handle any leftover messages after any sleep() call
-                        if (!isSleeping())
-                        {
-                            await_msgs.each!(msg => msg.tag == 0 ? handle(msg.res) : handle(msg.cmd));
-                            await_msgs.length = 0;
-                            assumeSafeAppend(await_msgs);
-                        }
-                        scheduler.yield();
-                    }
-                });
                 while (!terminated)
                 {
                     C.receiveTimeout(10.msecs,
                         (C.OwnerTerminated e) { terminated = true; },
                         (ShutdownCommand e) {
                             terminated = true;
+                            C.thisTid().shutdown = true;
                         },
                         (TimeCommand s)      {
                             control.sleep_until = Clock.currTime + s.dur;
@@ -722,17 +707,30 @@ public final class RemoteAPI (API) : API
                             if (!isSleeping())
                                 handle(res);
                             else if (!control.drop)
-                                await_msgs ~= Variant(res);
+                            {
+                                scheduler.spawn({
+                                    while (isSleeping())
+                                        scheduler.yield();
+                                    handle(res);
+                                });
+                            }
                         },
-                        (Command cmd)
-                        {
+                        (Command cmd) {
                             if (!isSleeping())
+                            {
                                 handle(cmd);
+                                import std.stdio;
+                            }
                             else if (!control.drop)
-                                await_msgs ~= Variant(cmd);
+                            {
+                                scheduler.spawn({
+                                    while (isSleeping())
+                                        scheduler.yield();
+                                    handle(cmd);
+                                });
+                            }
                         });
-
-                        scheduler.yield();
+                        Thread.sleep(1.msecs);
                 }
                 // Make sure the scheduler is not waiting for polling tasks
                 throw exc;
@@ -821,8 +819,21 @@ public final class RemoteAPI (API) : API
 
         public void shutdown () @trusted
         {
-            C.send(this.childTid, ShutdownCommand());
-            this.childTid.shutdown = true;
+            if (Fiber.getThis())
+            {
+                C.send(this.childTid, ShutdownCommand());
+                this.childTid.shutdown = true;
+            }
+            else if (scheduler !is null)
+            {
+                C.send(this.childTid, ShutdownCommand());
+                this.childTid.shutdown = true;
+            }
+            else
+            {
+                C.send(this.childTid, ShutdownCommand());
+                this.childTid.shutdown = true;
+            }
         }
 
         /***********************************************************************
@@ -843,7 +854,20 @@ public final class RemoteAPI (API) : API
 
         public void sleep (Duration d, bool dropMessages = false) @trusted
         {
-            C.send(this.childTid, TimeCommand(d, dropMessages));
+            if (Fiber.getThis())
+            {
+                C.send(this.childTid, TimeCommand(d, dropMessages));
+            }
+            else if (scheduler !is null)
+            {
+                scheduler.spawn({
+                    C.send(this.childTid, TimeCommand(d, dropMessages));
+                });
+            }
+            else
+            {
+                C.send(this.childTid, TimeCommand(d, dropMessages));
+            }
         }
 
         /***********************************************************************
@@ -924,7 +948,20 @@ public final class RemoteAPI (API) : API
                 enum mangled = getBestMatch!Overloads;
             }
 
-            C.send(this.childTid, FilterAPI(mangled, pretty));
+            if (Fiber.getThis())
+            {
+                C.send(this.childTid, FilterAPI(mangled, pretty));
+            }
+            else if (scheduler !is null)
+            {
+                scheduler.spawn({
+                    C.send(this.childTid, FilterAPI(mangled, pretty));
+                });
+            }
+            else
+            {
+                C.send(this.childTid, FilterAPI(mangled, pretty));
+            }
         }
 
 
@@ -936,7 +973,20 @@ public final class RemoteAPI (API) : API
 
         public void clearFilter () @trusted
         {
-            C.send(this.childTid, FilterAPI(""));
+            if (Fiber.getThis())
+            {
+                C.send(this.childTid, FilterAPI(""));
+            }
+            else if (scheduler !is null)
+            {
+                scheduler.spawn({
+                    C.send(this.childTid, FilterAPI(""));
+                });
+            }
+            else
+            {
+                C.send(this.childTid, FilterAPI(""));
+            }
         }
     }
 
@@ -1128,7 +1178,7 @@ unittest
 
     auto testerFiber = geod24.concurrency.spawn(&testFunc, geod24.concurrency.thisTid);
     // Make sure our main thread terminates after everyone else
-    geod24.concurrency.receiveOnly!int();
+    geod24.concurrency.receive((int x) {});
 }
 
 /// This network have different types of nodes in it
@@ -1339,7 +1389,7 @@ unittest
     static assert(!is(typeof(RemoteAPI!DoesntWork)));
     node.ctrl.shutdown();
 }
-/*
+
 // Simulate temporary outage
 unittest
 {
@@ -1548,7 +1598,6 @@ unittest
     filtered.ctrl.shutdown();
     caller.ctrl.shutdown();
 }
-*/
 
 // request timeouts (from main thread)
 unittest

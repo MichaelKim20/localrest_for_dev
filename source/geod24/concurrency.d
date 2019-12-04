@@ -45,8 +45,6 @@ import core.sync.mutex;
 import core.time : MonoTime;
 import core.thread;
 
-import std.stdio;
-
 ///
 @system unittest
 {
@@ -71,9 +69,10 @@ import std.stdio;
     send(childTid, 42);
 
     // Receive the result code.
-    auto wasSuccessful = receiveOnly!(bool);
-    assert(wasSuccessful);
-    assert(received == "Received the number 42");
+    receive((bool wasSuccessful) {
+        assert(wasSuccessful);
+        assert(received == "Received the number 42");
+    });
 }
 
 private
@@ -212,30 +211,13 @@ private
         return scheduler.thisInfo;
     }
 }
-/*
-static this ()
-{
-    writefln("this %s", Thread.getThis().id);
-}
-*/
+
 static ~this ()
 {
-//    writefln("~this %s", Thread.getThis().id);
     thisInfo.cleanup();
 }
 
 // Exceptions
-
-/// Thrown on calls to `receiveOnly` if a message other than the type
-/// the receiving thread expected is sent.
-class MessageMismatch : Exception
-{
-    /// Ctor
-    this (string msg = "Unexpected message type") @safe pure nothrow @nogc
-    {
-        super(msg);
-    }
-}
 
 /// Thrown on calls to `receive` if the thread that spawned the receiving
 /// thread has terminated and no more messages exist.
@@ -402,16 +384,19 @@ struct Tid
 
     static void fun ()
     {
-        string res = receiveOnly!string();
-        assert(res == "Main calling");
-        ownerTid.send("Child responding");
+        receive((string res) {
+            assert(res == "Main calling");
+            ownerTid.send("Child responding");
+        });
     }
 
     assertThrown!TidMissingException(ownerTid);
     auto child = spawn(&fun);
     child.send("Main calling");
-    string res = receiveOnly!string();
-    assert(res == "Child responding");
+
+    receive((string res) {
+        assert(res == "Child responding");
+    });
 }
 
 // Thread Creation
@@ -516,7 +501,10 @@ if (isSpawnable!(F, T))
     spawn({
         ownerTid.send("This is so great!");
     });
-    assert(receiveOnly!string == "This is so great!");
+
+    receive((string res) {
+        assert(res == "This is so great!");
+    });
 }
 
 @system unittest
@@ -800,8 +788,11 @@ do
     auto process = ()
     {
         receive(
+
             (int i)
             {
+                import std.stdio;
+                writeln(i);
                 ownerTid.send(1);
             },
             (double f)
@@ -818,19 +809,28 @@ do
     {
         auto tid = spawn(process);
         send(tid, 42);
-        assert(receiveOnly!int == 1);
+
+        receive((int res) {
+            assert(res == 1);
+        });
     }
 
     {
         auto tid = spawn(process);
         send(tid, 3.14);
-        assert(receiveOnly!int == 2);
+
+        receive((int res) {
+            assert(res == 2);
+        });
     }
 
     {
         auto tid = spawn(process);
         send(tid, "something else");
-        assert(receiveOnly!int == 3);
+
+        receive((int res) {
+            assert(res == 3);
+        });
     }
 }
 
@@ -865,135 +865,6 @@ version (unittest)
                           receive( &receiveFunction );
                           receive( &receiveFunction, (Variant x) {} );
                       } ) );
-}
-
-///
-private template receiveOnlyRet (T...)
-{
-    static if ( T.length == 1 )
-    {
-        alias receiveOnlyRet = T[0];
-    }
-    else
-    {
-        import std.typecons : Tuple;
-        alias receiveOnlyRet = Tuple!(T);
-    }
-}
-
-/*******************************************************************************
-
-    Receives only messages with arguments of types `T`.
-
-    Throws:
-        `MessageMismatch` if a message of types other than `T` is received.
-
-    Returns:
-        The received message.  If `T.length` is greater than one,
-        the message will be packed into a $(REF Tuple, std,typecons).
-
- ******************************************************************************/
-
-receiveOnlyRet!(T) receiveOnly (T...) ()
-in
-{
-    assert(thisInfo.ident.mbox !is null,
-        "Cannot receive a message until a thread was spawned or thisTid was passed to a running thread.");
-}
-do
-{
-    import std.format : format;
-    import std.typecons : Tuple;
-
-    Tuple!(T) ret;
-
-    thisInfo.ident.mbox.get(
-        (T val)
-        {
-            static if (T.length)
-                ret.field = val;
-        },
-        (LinkTerminated e)
-        {
-            throw e;
-        },
-        (OwnerTerminated e)
-        {
-            throw e;
-        },
-        (Variant val)
-        {
-            static if (T.length > 1)
-                string exp = T.stringof;
-            else
-                string exp = T[0].stringof;
-
-            throw new MessageMismatch(
-                format("Unexpected message type: expected '%s', got '%s'", exp, val.type.toString()));
-        }
-    );
-
-    static if (T.length == 1)
-        return ret[0];
-    else
-        return ret;
-}
-
-///
-@system unittest
-{
-    auto tid = spawn(
-    {
-        assert(receiveOnly!int == 42);
-    });
-    send(tid, 42);
-}
-
-///
-@system unittest
-{
-    auto tid = spawn(
-    {
-        assert(receiveOnly!string == "text");
-    });
-    send(tid, "text");
-}
-
-///
-@system unittest
-{
-    struct Record { string name; int age; }
-
-    auto tid = spawn(
-    {
-        auto msg = receiveOnly!(double, Record);
-        assert(msg[0] == 0.5);
-        assert(msg[1].name == "Alice");
-        assert(msg[1].age == 31);
-    });
-
-    send(tid, 0.5, Record("Alice", 31));
-}
-
-@system unittest
-{
-    static void t1 (Tid mainTid)
-    {
-        try
-        {
-            receiveOnly!string();
-            mainTid.send("");
-        }
-        catch (Throwable th)
-        {
-            mainTid.send(th.msg);
-        }
-    }
-
-    auto tid = spawn(&t1, thisTid);
-    tid.send(1);
-    string result = receiveOnly!string();
-    assert(result == "Unexpected message type: expected 'string', got 'int'");
 }
 
 /*******************************************************************************
@@ -1380,8 +1251,6 @@ interface Scheduler
     ***************************************************************************/
 
     Condition newCondition (Mutex m) nothrow;
-
-
 }
 
 /*******************************************************************************
@@ -1975,8 +1844,11 @@ private:
     auto tid = spawn ({
         int i;
         while (i < 9)
-            i = receiveOnly!int;
-
+        {
+            receive((int res) {
+                i = res;
+            });
+        }
         ownerTid.send(i * 2);
     });
 
@@ -1988,7 +1860,9 @@ private:
     foreach (e; r)
         tid.send(e);
 
-    assert(receiveOnly!int == 18);
+    receive((int res) {
+        assert(res == 18);
+    });
 }
 
 /*******************************************************************************
@@ -2034,7 +1908,9 @@ void yield (T) (T value)
                 {
                     for (i = 1; i < 10; i++)
                     {
-                        assertNotThrown!AssertError(assert(receiveOnly!int() == i));
+                        receive((int res) {
+                            assertNotThrown!AssertError(assert(res == i));
+                        });
                     }
                 }
                 catch (OwnerTerminated e)
@@ -2164,15 +2040,12 @@ private
             Params:
                 msg = The message to put in the queue.
 
-            Returns:
-                If successful return true otherwise return false.
-
             Throws:
                 An exception if the queue is full and onCrowdingDoThis throws.
 
         ***********************************************************************/
 
-        final bool put (ref Message msg)
+        final void put (ref Message msg)
         {
             import std.algorithm;
             import std.range : popBackN, walkLength;
@@ -2181,7 +2054,7 @@ private
             if (this.closed)
             {
                 this.mutex.unlock();
-                return false;
+                return;
             }
 
             if (this.recvq[].walkLength > 0)
@@ -2195,7 +2068,7 @@ private
 
                 this.mutex.unlock();
 
-                return true;
+                return;
             }
 
             {
@@ -2230,7 +2103,7 @@ private
                                 this.sendq.remove(range);
                             }
                             this.mutex.unlock();
-                            return false;
+                            return;
                         }
 
                         if (Fiber.getThis())
@@ -2247,7 +2120,7 @@ private
                 }
             }
 
-            return true;
+            return;
         }
 
         /***********************************************************************
@@ -2409,6 +2282,7 @@ private
                         throw e;
                     }
                 }
+
                 if (tid == thisInfo.owner)
                 {
                     thisInfo.owner = Tid.init;
@@ -2432,6 +2306,70 @@ private
                 }
             }
 
+            bool scan (ref ListT list)
+            {
+                for (auto range = list[]; !range.empty;)
+                {
+                    // Only the message handler will throw, so if this occurs
+                    // we can be certain that the message was handled.
+                    scope (failure)
+                        list.removeAt(range);
+
+                    if (isControlMsg(range.front))
+                    {
+                        if (onControlMsg(range.front))
+                        {
+                            // Although the linkDead message is a control message,
+                            // it can be handled by the user.  Since the linkDead
+                            // message throws if not handled, if we get here then
+                            // it has been handled and we can return from receive.
+                            // This is a weird special case that will have to be
+                            // handled in a more general way if more are added.
+                            if (!isLinkDeadMsg(range.front))
+                            {
+                                list.removeAt(range);
+                                continue;
+                            }
+                            list.removeAt(range);
+                            return true;
+                        }
+                        range.popFront();
+                        continue;
+                    }
+                    else
+                    {
+                        if (onStandardMsg(range.front))
+                        {
+                            list.removeAt(range);
+                            return true;
+                        }
+                        range.popFront();
+                        continue;
+                    }
+                }
+                return false;
+            }
+
+            Message msg;
+            while (true)
+            {
+                if (scan(this.m_localBox))
+                {
+                    return true;
+                }
+                if (Fiber.getThis())
+                    Fiber.yield();
+
+                if (this.getMessage(&msg))
+                {
+                    this.m_localBox.put(msg);
+                    scan(this.m_localBox);
+                    return true;
+                }
+                return false;
+            }
+
+/*
             bool scan (ref Message msg)
             {
                 if (isControlMsg(msg))
@@ -2462,8 +2400,8 @@ private
                 else
                     break;
             }
+*/
 
-            return false;
         }
 
         /***********************************************************************
@@ -2512,20 +2450,33 @@ private
                     thisInfo.owner = Tid.init;
             }
 
-            SudoFiber sf;
-            bool res;
+            static void sweep (ref ListT list)
+            {
+                for (auto range = list[]; !range.empty; range.popFront())
+                {
+                    if (range.front.type == MsgType.linkDead)
+                        onLinkDeadMsg(range.front);
+                }
+            }
+
 
             this.mutex.lock();
             scope (exit) this.mutex.unlock();
 
             this.closed = true;
 
+            sweep(m_localBox);
+            m_localBox.clear();
+
+            SudoFiber sf;
             while (true)
             {
                 if (this.recvq[].walkLength == 0)
                     break;
+
                 sf = this.recvq.front;
                 this.recvq.removeFront();
+
                 if (sf.swdg !is null)
                     sf.swdg();
             }
@@ -2534,10 +2485,13 @@ private
             {
                 if (this.sendq[].walkLength == 0)
                     break;
+
                 sf = this.sendq.front;
                 this.sendq.removeFront();
+
                 if (sf.msg.type == MsgType.linkDead)
                     onLinkDeadMsg(sf.msg);
+
                 if (sf.swdg !is null)
                     sf.swdg();
             }
@@ -2555,6 +2509,10 @@ private
         {
             return msg.type == MsgType.linkDead;
         }
+
+        alias ListT = List!(Message);
+
+        ListT m_localBox;
 
         /// closed
         bool closed;
@@ -2601,6 +2559,191 @@ private
 
         /// The creating time
         public MonoTime create_time;
+    }
+
+    ///
+    struct List (T)
+    {
+        struct Range
+        {
+            import std.exception : enforce;
+
+            @property bool empty () const
+            {
+                return !m_prev.next;
+            }
+
+            @property ref T front ()
+            {
+                enforce(m_prev.next, "invalid list node");
+                return m_prev.next.val;
+            }
+
+            @property void front (T val)
+            {
+                enforce(m_prev.next, "invalid list node");
+                m_prev.next.val = val;
+            }
+
+            void popFront ()
+            {
+                enforce(m_prev.next, "invalid list node");
+                m_prev = m_prev.next;
+            }
+
+            private this (Node* p)
+            {
+                m_prev = p;
+            }
+
+            private Node* m_prev;
+        }
+
+        void put (T val)
+        {
+            put(newNode(val));
+        }
+
+        void put (ref List!(T) rhs)
+        {
+            if (!rhs.empty)
+            {
+                put(rhs.m_first);
+                while (m_last.next !is null)
+                {
+                    m_last = m_last.next;
+                    m_count++;
+                }
+                rhs.m_first = null;
+                rhs.m_last = null;
+                rhs.m_count = 0;
+            }
+        }
+
+        Range opSlice ()
+        {
+            return Range(cast(Node*)&m_first);
+        }
+
+        void removeAt (Range r)
+        {
+            import std.exception : enforce;
+
+            assert(m_count);
+            Node* n = r.m_prev;
+            enforce(n && n.next, "attempting to remove invalid list node");
+
+            if (m_last is m_first)
+                m_last = null;
+            else if (m_last is n.next)
+                m_last = n; // nocoverage
+            Node* to_free = n.next;
+            n.next = n.next.next;
+            freeNode(to_free);
+            m_count--;
+        }
+
+        @property size_t length ()
+        {
+            return m_count;
+        }
+
+        void clear ()
+        {
+            m_first = m_last = null;
+            m_count = 0;
+        }
+
+        @property bool empty ()
+        {
+            return m_first is null;
+        }
+
+    private:
+        struct Node
+        {
+            Node* next;
+            T val;
+
+            this(T v)
+            {
+                val = v;
+            }
+        }
+
+        static shared struct SpinLock
+        {
+            void lock ()
+            {
+                while (!cas(&locked, false, true))
+                {
+                    Thread.yield();
+                }
+            }
+            void unlock ()
+            {
+                atomicStore!(MemoryOrder.rel)(locked, false);
+            }
+            bool locked;
+        }
+
+        static shared SpinLock sm_lock;
+        static shared Node* sm_head;
+
+        Node* newNode (T v)
+        {
+            Node* n;
+            {
+                sm_lock.lock();
+                scope (exit) sm_lock.unlock();
+
+                if (sm_head)
+                {
+                    n = cast(Node*) sm_head;
+                    sm_head = sm_head.next;
+                }
+            }
+            if (n)
+            {
+                import std.conv : emplace;
+                emplace!Node(n, v);
+            }
+            else
+            {
+                n = new Node(v);
+            }
+            return n;
+        }
+
+        void freeNode (Node* n)
+        {
+            // destroy val to free any owned GC memory
+            destroy(n.val);
+
+            sm_lock.lock();
+            scope (exit) sm_lock.unlock();
+
+            auto sn = cast(shared(Node)*) n;
+            sn.next = sm_head;
+            sm_head = sn;
+        }
+
+        void put (Node* n)
+        {
+            m_count++;
+            if (!empty)
+            {
+                m_last.next = n;
+                m_last = n;
+                return;
+            }
+            m_first = n;
+            m_last = n;
+        }
+
+        Node* m_first;
+        Node* m_last;
+        size_t m_count;
     }
 }
 
@@ -2676,7 +2819,12 @@ auto ref initOnce (alias var) (lazy typeof(var) init)
     foreach (_; 0 .. 10)
         spawn({ ownerTid.send(MySingleton.instance.val); });
     foreach (_; 0 .. 10)
-        assert(receiveOnly!size_t == MySingleton.instance.val);
+    {
+        receive((size_t res) {
+            assert(res == MySingleton.instance.val);
+        });
+    }
+
     assert(MySingleton.cnt == 1);
 }
 
@@ -2741,11 +2889,12 @@ auto ref initOnce (alias var) (lazy typeof(var) init, Mutex mutex)
         initOnce!varB(true, m);
         ownerTid.send(true);
     });
-
     // init depends on the result of the spawned thread
-    initOnce!varA(receiveOnly!bool);
-    assert(varA == true);
-    assert(varB == true);
+    receive((bool res) {
+        initOnce!varA(res);
+        assert(varA == true);
+        assert(varB == true);
+    });
 }
 
 @system unittest
@@ -2765,21 +2914,20 @@ auto ref initOnce (alias var) (lazy typeof(var) init, Mutex mutex)
 {
     static shared int[] x = new shared(int)[1];
     auto tid = spawn({
-        auto arr = receiveOnly!(shared(int)[]);
-        arr[0] = 5;
-        ownerTid.send(true);
+        receive((shared(int)[] arr) {
+            arr[0] = 5;
+            ownerTid.send(true);
+        });
     });
     tid.send(x);
-    receiveOnly!(bool);
-    assert(x[0] == 5);
+    receive((bool res) {
+        assert(x[0] == 5);
+    });
 }
 
 /*******************************************************************************
 
     An Main-Thread's Scheduler using Fibers.
-
-    This is an example scheduler that creates a new Fiber per call to spawn
-    and multiplexes the execution of all fibers within the main thread.
 
 *******************************************************************************/
 
