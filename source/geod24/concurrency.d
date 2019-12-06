@@ -592,10 +592,16 @@ if (isSpawnable!(F, T))
             fn(args);
         }
 
+        import std.stdio;
+
         if (scheduler !is null)
+        {
+            writeln("1111");
             scheduler.spawn(&exec);
+        }
         else
         {
+            writeln("2222");
             auto t = new Thread(&exec);
             t.start();
         }
@@ -788,11 +794,8 @@ do
     auto process = ()
     {
         receive(
-
             (int i)
             {
-                import std.stdio;
-                writeln(i);
                 ownerTid.send(1);
             },
             (double f)
@@ -2040,12 +2043,15 @@ private
             Params:
                 msg = The message to put in the queue.
 
+            Returns:
+                If successful return true otherwise return false.
+
             Throws:
                 An exception if the queue is full and onCrowdingDoThis throws.
 
         ***********************************************************************/
 
-        final void put (ref Message msg)
+        final bool put (ref Message msg)
         {
             import std.algorithm;
             import std.range : popBackN, walkLength;
@@ -2054,7 +2060,7 @@ private
             if (this.closed)
             {
                 this.mutex.unlock();
-                return;
+                return false;
             }
 
             if (this.recvq[].walkLength > 0)
@@ -2068,7 +2074,7 @@ private
 
                 this.mutex.unlock();
 
-                return;
+                return true;
             }
 
             {
@@ -2103,7 +2109,7 @@ private
                                 this.sendq.remove(range);
                             }
                             this.mutex.unlock();
-                            return;
+                            return false;
                         }
 
                         if (Fiber.getThis())
@@ -2120,7 +2126,7 @@ private
                 }
             }
 
-            return;
+            return true;
         }
 
         /***********************************************************************
@@ -2282,7 +2288,6 @@ private
                         throw e;
                     }
                 }
-
                 if (tid == thisInfo.owner)
                 {
                     thisInfo.owner = Tid.init;
@@ -2306,70 +2311,6 @@ private
                 }
             }
 
-            bool scan (ref ListT list)
-            {
-                for (auto range = list[]; !range.empty;)
-                {
-                    // Only the message handler will throw, so if this occurs
-                    // we can be certain that the message was handled.
-                    scope (failure)
-                        list.removeAt(range);
-
-                    if (isControlMsg(range.front))
-                    {
-                        if (onControlMsg(range.front))
-                        {
-                            // Although the linkDead message is a control message,
-                            // it can be handled by the user.  Since the linkDead
-                            // message throws if not handled, if we get here then
-                            // it has been handled and we can return from receive.
-                            // This is a weird special case that will have to be
-                            // handled in a more general way if more are added.
-                            if (!isLinkDeadMsg(range.front))
-                            {
-                                list.removeAt(range);
-                                continue;
-                            }
-                            list.removeAt(range);
-                            return true;
-                        }
-                        range.popFront();
-                        continue;
-                    }
-                    else
-                    {
-                        if (onStandardMsg(range.front))
-                        {
-                            list.removeAt(range);
-                            return true;
-                        }
-                        range.popFront();
-                        continue;
-                    }
-                }
-                return false;
-            }
-
-            Message msg;
-            while (true)
-            {
-                if (scan(this.m_localBox))
-                {
-                    return true;
-                }
-                if (Fiber.getThis())
-                    Fiber.yield();
-
-                if (this.getMessage(&msg))
-                {
-                    this.m_localBox.put(msg);
-                    scan(this.m_localBox);
-                    return true;
-                }
-                return false;
-            }
-
-/*
             bool scan (ref Message msg)
             {
                 if (isControlMsg(msg))
@@ -2400,8 +2341,8 @@ private
                 else
                     break;
             }
-*/
 
+            return false;
         }
 
         /***********************************************************************
@@ -2450,33 +2391,20 @@ private
                     thisInfo.owner = Tid.init;
             }
 
-            static void sweep (ref ListT list)
-            {
-                for (auto range = list[]; !range.empty; range.popFront())
-                {
-                    if (range.front.type == MsgType.linkDead)
-                        onLinkDeadMsg(range.front);
-                }
-            }
-
+            SudoFiber sf;
+            bool res;
 
             this.mutex.lock();
             scope (exit) this.mutex.unlock();
 
             this.closed = true;
 
-            sweep(m_localBox);
-            m_localBox.clear();
-
-            SudoFiber sf;
             while (true)
             {
                 if (this.recvq[].walkLength == 0)
                     break;
-
                 sf = this.recvq.front;
                 this.recvq.removeFront();
-
                 if (sf.swdg !is null)
                     sf.swdg();
             }
@@ -2485,13 +2413,10 @@ private
             {
                 if (this.sendq[].walkLength == 0)
                     break;
-
                 sf = this.sendq.front;
                 this.sendq.removeFront();
-
                 if (sf.msg.type == MsgType.linkDead)
                     onLinkDeadMsg(sf.msg);
-
                 if (sf.swdg !is null)
                     sf.swdg();
             }
@@ -2509,10 +2434,6 @@ private
         {
             return msg.type == MsgType.linkDead;
         }
-
-        alias ListT = List!(Message);
-
-        ListT m_localBox;
 
         /// closed
         bool closed;
@@ -2559,191 +2480,6 @@ private
 
         /// The creating time
         public MonoTime create_time;
-    }
-
-    ///
-    struct List (T)
-    {
-        struct Range
-        {
-            import std.exception : enforce;
-
-            @property bool empty () const
-            {
-                return !m_prev.next;
-            }
-
-            @property ref T front ()
-            {
-                enforce(m_prev.next, "invalid list node");
-                return m_prev.next.val;
-            }
-
-            @property void front (T val)
-            {
-                enforce(m_prev.next, "invalid list node");
-                m_prev.next.val = val;
-            }
-
-            void popFront ()
-            {
-                enforce(m_prev.next, "invalid list node");
-                m_prev = m_prev.next;
-            }
-
-            private this (Node* p)
-            {
-                m_prev = p;
-            }
-
-            private Node* m_prev;
-        }
-
-        void put (T val)
-        {
-            put(newNode(val));
-        }
-
-        void put (ref List!(T) rhs)
-        {
-            if (!rhs.empty)
-            {
-                put(rhs.m_first);
-                while (m_last.next !is null)
-                {
-                    m_last = m_last.next;
-                    m_count++;
-                }
-                rhs.m_first = null;
-                rhs.m_last = null;
-                rhs.m_count = 0;
-            }
-        }
-
-        Range opSlice ()
-        {
-            return Range(cast(Node*)&m_first);
-        }
-
-        void removeAt (Range r)
-        {
-            import std.exception : enforce;
-
-            assert(m_count);
-            Node* n = r.m_prev;
-            enforce(n && n.next, "attempting to remove invalid list node");
-
-            if (m_last is m_first)
-                m_last = null;
-            else if (m_last is n.next)
-                m_last = n; // nocoverage
-            Node* to_free = n.next;
-            n.next = n.next.next;
-            freeNode(to_free);
-            m_count--;
-        }
-
-        @property size_t length ()
-        {
-            return m_count;
-        }
-
-        void clear ()
-        {
-            m_first = m_last = null;
-            m_count = 0;
-        }
-
-        @property bool empty ()
-        {
-            return m_first is null;
-        }
-
-    private:
-        struct Node
-        {
-            Node* next;
-            T val;
-
-            this(T v)
-            {
-                val = v;
-            }
-        }
-
-        static shared struct SpinLock
-        {
-            void lock ()
-            {
-                while (!cas(&locked, false, true))
-                {
-                    Thread.yield();
-                }
-            }
-            void unlock ()
-            {
-                atomicStore!(MemoryOrder.rel)(locked, false);
-            }
-            bool locked;
-        }
-
-        static shared SpinLock sm_lock;
-        static shared Node* sm_head;
-
-        Node* newNode (T v)
-        {
-            Node* n;
-            {
-                sm_lock.lock();
-                scope (exit) sm_lock.unlock();
-
-                if (sm_head)
-                {
-                    n = cast(Node*) sm_head;
-                    sm_head = sm_head.next;
-                }
-            }
-            if (n)
-            {
-                import std.conv : emplace;
-                emplace!Node(n, v);
-            }
-            else
-            {
-                n = new Node(v);
-            }
-            return n;
-        }
-
-        void freeNode (Node* n)
-        {
-            // destroy val to free any owned GC memory
-            destroy(n.val);
-
-            sm_lock.lock();
-            scope (exit) sm_lock.unlock();
-
-            auto sn = cast(shared(Node)*) n;
-            sn.next = sm_head;
-            sm_head = sn;
-        }
-
-        void put (Node* n)
-        {
-            m_count++;
-            if (!empty)
-            {
-                m_last.next = n;
-                m_last = n;
-                return;
-            }
-            m_first = n;
-            m_last = n;
-        }
-
-        Node* m_first;
-        Node* m_last;
-        size_t m_count;
     }
 }
 
@@ -2889,6 +2625,7 @@ auto ref initOnce (alias var) (lazy typeof(var) init, Mutex mutex)
         initOnce!varB(true, m);
         ownerTid.send(true);
     });
+
     // init depends on the result of the spawned thread
     receive((bool res) {
         initOnce!varA(res);
@@ -3150,43 +2887,4 @@ private:
 private:
     Fiber[] m_fibers;
     size_t m_pos;
-}
-
-unittest
-{
-    spawnThread(
-    {
-        spawnFiber(
-        {
-            for (int i = 0; i < 5; i++)
-            {
-                thisScheduler.yield();
-            }
-        });
-        spawnFiber(
-        {
-            for (int i = 0; i < 5; i++)
-            {
-                thisScheduler.yield();
-            }
-        });
-    });
-}
-
-unittest
-{
-    spawnFiber(
-    {
-        for (int i = 0; i < 5; i++)
-        {
-            thisScheduler.yield();
-        }
-    });
-    spawnFiber(
-    {
-        for (int i = 0; i < 5; i++)
-        {
-            thisScheduler.yield();
-        }
-    });
 }

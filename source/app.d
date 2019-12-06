@@ -9,29 +9,86 @@ import std.variant;
 import C=geod24.concurrency;
 import geod24.LocalRest;
 
+class Michael
+{
+    private string name;
+
+    this (string name)
+    {
+        this.name = name;
+    }
+    mixin(q{
+        public string getName ()
+        {
+            return this.name;
+        }
+    });
+}
+
+void mtest()
+{
+    auto m = new Michael("Kim");
+    writeln(m.getName());
+}
 
 void main()
 {
-/*
-    writeln(Thread.getThis().id);
-    new Thread({
-        writeln(Thread.getThis().id);
-    }).start();
+    u0();
+}
 
-    C.spawn({
-        writeln(Thread.getThis().id);
-    });
-    */
-    //case1();
-    //test_scheduler();
-    //case2();
-    //case5();
-    //case6();
-    //utest4();
+void bug1()
+{
+    import std.concurrency;
+    import std.stdio;
 
-    //test1();
-    test1();
-    test2();
+    auto process = ()
+    {
+        size_t message_count = 2;
+        while (message_count--)
+        {
+            receive(
+                (int i)     { writefln("Child thread received int: %s", i);
+                              ownerTid.send(i); },
+                (string s)  { writefln("Child thread received string: %s", s);
+                              ownerTid.send(s); }
+            );
+        }
+    };
+
+    auto tid = spawn(process);
+    send(tid, 42);
+    send(tid, "string");
+
+    // REQUIRED in new API
+    Thread.sleep(10.msecs);
+
+    // in new API this will drop all messages from the queue which do not match `string`
+    receive(
+        (string s)  { writefln("Main thread received string: %s", s); }
+    );
+
+    receive(
+        (int s)  { writefln("Main thread received int: %s", s); }
+    );
+
+    writeln("Done");
+}
+
+void u0 ()
+{
+    import core.thread : thread_joinAll;
+
+    __gshared string receivedMessage;
+    static void f1(string msg)
+    {
+        receivedMessage = msg;
+        writeln("end");
+    }
+
+    auto tid1 = C.spawn(&f1, "Hello World");
+    //Thread.sleep(10000.msecs);
+    thread_joinAll;
+    assert(receivedMessage == "Hello World");
 }
 
 // Simulate temporary outage
@@ -419,7 +476,6 @@ void case6()
     writeln("case6");
 }
 
-
 void utest4()
 {
     //writeln("test4");
@@ -440,4 +496,3 @@ void utest4()
     assert(receivedMessage == "Hello World");
     //writeln("test4");
 }
-

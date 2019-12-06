@@ -819,21 +819,8 @@ public final class RemoteAPI (API) : API
 
         public void shutdown () @trusted
         {
-            if (Fiber.getThis())
-            {
-                C.send(this.childTid, ShutdownCommand());
-                this.childTid.shutdown = true;
-            }
-            else if (scheduler !is null)
-            {
-                C.send(this.childTid, ShutdownCommand());
-                this.childTid.shutdown = true;
-            }
-            else
-            {
-                C.send(this.childTid, ShutdownCommand());
-                this.childTid.shutdown = true;
-            }
+            C.send(this.childTid, ShutdownCommand());
+            this.childTid.shutdown = true;
         }
 
         /***********************************************************************
