@@ -996,11 +996,18 @@ public class MessageDispatcher
         checkops(ops);
 
         if (Fiber.getThis())
+        {
             this.mbox.get(ops);
+        }
         else
+        {
+            bool done = false;
             spawnChildFiber({
                 this.mbox.get(ops);
+                done = true;
             });
+            while (!done) thisScheduler.yield();
+        }
     }
 
     public void cleanup ()
@@ -1009,61 +1016,6 @@ public class MessageDispatcher
     }
 }
 
-
-///
-@system unittest
-{
-    import std.variant : Variant;
-
-    auto process = ()
-    {
-        thisMessageDispatcher.receive(
-            (int i)
-            {
-                //writefln("receive %s", ownerMessageDispatcher);
-                ownerMessageDispatcher.send(1);
-            },
-            (double f)
-            {
-                ownerMessageDispatcher.send(2);
-            },
-            (Variant v)
-            {
-                ownerMessageDispatcher.send(3);
-            }
-        );
-    };
-
-    {
-        thisMessageDispatcher.receive((int res) {
-            writefln("XXXXXX.receive %s", res);
-            assert(res == 1);
-        });
-        auto spawnedMessageDispatcher = spawnThread(process);
-        spawnedMessageDispatcher.send(42);
-    }
-/*
-    {
-        auto spawnedMessageDispatcher = spawnThread(process);
-        spawnedMessageDispatcher.send(3.14);
-
-        thisMessageDispatcher.receive((int res) {
-            assert(res == 2);
-        });
-    }
-
-    {
-        auto spawnedMessageDispatcher = spawnThread(process);
-        spawnedMessageDispatcher.send("something else");
-
-        thisMessageDispatcher.receive((int res) {
-            assert(res == 3);
-        });
-    }
-*/
-    //Thread.sleep(5.seconds);
-    writefln("end test");
-}
 
 /*******************************************************************************
 
@@ -1489,7 +1441,6 @@ public class NodeScheduler : FiberScheduler
                 if (elapsed > 3000.msecs)
                     done = true;
             }
-            writefln("NodeScheduler %s", m_fibers.length);
             m.unlock();
             wait(this.sleep_interval);
         }
@@ -1605,7 +1556,6 @@ public class MainScheduler : FiberScheduler
                 if (elapsed > 3000.msecs)
                     done = true;
             }
-            writefln("MainScheduler %s", m_fibers.length);
             m.unlock();
             wait(this.sleep_interval);
         }
@@ -1744,7 +1694,6 @@ static this ()
 
 static ~this ()
 {
-    writefln("~this %s", thisInfo.self);
     thisInfo.cleanup();
 }
 
@@ -1777,7 +1726,6 @@ if (isSpawnable!(F, T))
     auto spawn_dispatcher = new NodeDispatcher();
     auto owner_dispatcher = thisMessageDispatcher();
     auto spawn_scheduler = new NodeScheduler();
-    writefln("owner_dispatcher %s", owner_dispatcher);
 /*
     void exec ()
     {
@@ -1806,12 +1754,14 @@ if (isSpawnable!(F, T))
         thisInfo.owner = owner_dispatcher;
         thisInfo.scheduler = spawn_scheduler;
         thisInfo.have_scheduler = true;
+        thisInfo.is_child = false;
 
         thisInfo.scheduler.start({
             thisInfo.self = spawn_dispatcher;
             thisInfo.owner = owner_dispatcher;
             thisInfo.scheduler = spawn_scheduler;
             thisInfo.have_scheduler = false;
+            thisInfo.is_child = true;
             fn(args);
         });
     }
@@ -1870,7 +1820,7 @@ void wait(Duration val)
        Thread.sleep(val);
 }
 
-/*
+
 unittest
 {
     import std.concurrency;
@@ -1878,29 +1828,26 @@ unittest
 
     auto process = ()
     {
-        //writefln("start process");
         size_t message_count = 2;
-        //while (message_count--)
-        //{
+        while (message_count--)
+        {
             thisMessageDispatcher.receive(
                 (int i)
                 {
-                    //writefln("Child thread received int: %s", i);
+                    writefln("Child thread received int: %s", i);
                     ownerMessageDispatcher.send(i);
                 },
                 (string s)
                 {
-                    //writefln("Child thread received string: %s", s);
+                    writefln("Child thread received string: %s", s);
                     ownerMessageDispatcher.send(s);
-                    writefln("ownerMessageDispatcher");
                 }
             );
-            //writefln("start process");
-        //}
+        }
     };
 
     auto spawnedMessageDispatcher = spawnThread(process);
-    //spawnedMessageDispatcher.send(42);
+    spawnedMessageDispatcher.send(42);
     spawnedMessageDispatcher.send("string");
 
     // REQUIRED in new API
@@ -1913,6 +1860,7 @@ unittest
              writefln("Main thread received string: %s", s);
         }
     );
+
     thisMessageDispatcher.receive(
         (int s)
         {
@@ -1920,5 +1868,60 @@ unittest
         }
     );
     writeln("Done");
+}
+
+
+/*
+///
+@system unittest
+{
+    import std.variant : Variant;
+
+    auto process = ()
+    {
+        thisMessageDispatcher.receive(
+            (int i)
+            {
+                ownerMessageDispatcher.send(1);
+            },
+            (double f)
+            {
+                ownerMessageDispatcher.send(2);
+            },
+            (Variant v)
+            {
+                ownerMessageDispatcher.send(3);
+            }
+        );
+    };
+
+    {
+        auto spawnedMessageDispatcher = spawnThread(process);
+        spawnedMessageDispatcher.send(42);
+        thisMessageDispatcher.receive((int res) {
+            writefln("thisMessageDispatcher.receive %s", res);
+            assert(res == 1);
+        });
+    }
+
+    {
+        auto spawnedMessageDispatcher = spawnThread(process);
+        spawnedMessageDispatcher.send(3.14);
+
+        thisMessageDispatcher.receive((int res) {
+            writefln("thisMessageDispatcher.receive %s", res);
+            assert(res == 2);
+        });
+    }
+
+    {
+        auto spawnedMessageDispatcher = spawnThread(process);
+        spawnedMessageDispatcher.send("something else");
+
+        thisMessageDispatcher.receive((int res) {
+            writefln("thisMessageDispatcher.receive %s", res);
+            assert(res == 3);
+        });
+    }
 }
 */
