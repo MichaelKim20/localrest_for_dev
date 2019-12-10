@@ -1017,11 +1017,10 @@ public class MessageDispatcher
 
     auto process = ()
     {
-        writefln("start process");
         thisMessageDispatcher.receive(
             (int i)
             {
-                writefln("receive : %s", i);
+                //writefln("receive %s", ownerMessageDispatcher);
                 ownerMessageDispatcher.send(1);
             },
             (double f)
@@ -1033,17 +1032,15 @@ public class MessageDispatcher
                 ownerMessageDispatcher.send(3);
             }
         );
-        writefln("end process");
     };
 
     {
-        auto spawnedMessageDispatcher = spawnThread(process);
-        spawnedMessageDispatcher.send(42);
-
         thisMessageDispatcher.receive((int res) {
-            writefln("receive");
+            writefln("XXXXXX.receive %s", res);
             assert(res == 1);
         });
+        auto spawnedMessageDispatcher = spawnThread(process);
+        spawnedMessageDispatcher.send(42);
     }
 /*
     {
@@ -1063,7 +1060,9 @@ public class MessageDispatcher
             assert(res == 3);
         });
     }
-    */
+*/
+    //Thread.sleep(5.seconds);
+    writefln("end test");
 }
 
 /*******************************************************************************
@@ -1417,6 +1416,8 @@ public class FiberScheduler : Scheduler
 public class NodeScheduler : FiberScheduler
 {
     private shared(bool) terminated;
+    private shared(MonoTime) terminated_time;
+    private shared(bool) stoped;
     private Mutex m;
     private Duration sleep_interval;
 
@@ -1425,6 +1426,7 @@ public class NodeScheduler : FiberScheduler
         this.sleep_interval = 1.msecs;
         this.m = new Mutex();
         this.terminated = false;
+        this.stoped = false;
     }
 
     /***************************************************************************
@@ -1437,7 +1439,7 @@ public class NodeScheduler : FiberScheduler
     override public void start (void delegate () op)
     {
         create(op);
-        yield();
+        dispatch();
     }
 
     /***************************************************************************
@@ -1450,6 +1452,9 @@ public class NodeScheduler : FiberScheduler
     override public void stop ()
     {
         terminated = true;
+        terminated_time = MonoTime.currTime;
+        while (!this.stoped)
+            Thread.sleep(100.msecs);
     }
 
     override protected void dispatch ()
@@ -1477,10 +1482,18 @@ public class NodeScheduler : FiberScheduler
                     m_pos = 0;
                 }
             }
-            done = terminated && (m_fibers.length == 0);
+            done = terminated || (m_fibers.length == 0);
+            if (!done && terminated)
+            {
+                auto elapsed = MonoTime.currTime - terminated_time;
+                if (elapsed > 3000.msecs)
+                    done = true;
+            }
+            writefln("NodeScheduler %s", m_fibers.length);
             m.unlock();
             wait(this.sleep_interval);
         }
+        this.stoped = true;
     }
 
     override protected void create (void delegate () op) nothrow
@@ -1519,7 +1532,7 @@ public class MainScheduler : FiberScheduler
 
     public this ()
     {
-        this.sleep_interval = 100.msecs;
+        this.sleep_interval = 10.msecs;
         this.m = new Mutex();
         this.terminated = false;
         this.stoped = false;
@@ -1592,6 +1605,7 @@ public class MainScheduler : FiberScheduler
                 if (elapsed > 3000.msecs)
                     done = true;
             }
+            writefln("MainScheduler %s", m_fibers.length);
             m.unlock();
             wait(this.sleep_interval);
         }
@@ -1615,33 +1629,15 @@ public class MainScheduler : FiberScheduler
     }
 }
 
+public class MainDispatcher : MessageDispatcher
+{
 
-
-/*******************************************************************************
-
-
-*******************************************************************************/
+}
 
 public class NodeDispatcher : MessageDispatcher
 {
-    public this ()
-    {
-    }
+
 }
-
-
-/*******************************************************************************
-
-
-*******************************************************************************/
-
-public class MainDispatcher : MessageDispatcher
-{
-    public this ()
-    {
-    }
-}
-
 
 /*******************************************************************************
 
@@ -1748,6 +1744,7 @@ static this ()
 
 static ~this ()
 {
+    writefln("~this %s", thisInfo.self);
     thisInfo.cleanup();
 }
 
@@ -1777,9 +1774,10 @@ private template isSpawnable (F, T...)
 public MessageDispatcher spawnThread (F, T...) (F fn, T args)
 if (isSpawnable!(F, T))
 {
-    auto spawn_dispatcher = new MessageDispatcher();
+    auto spawn_dispatcher = new NodeDispatcher();
     auto owner_dispatcher = thisMessageDispatcher();
-    auto owner_scheduler = thisScheduler;
+    auto spawn_scheduler = new NodeScheduler();
+    writefln("owner_dispatcher %s", owner_dispatcher);
 /*
     void exec ()
     {
@@ -1802,18 +1800,17 @@ if (isSpawnable!(F, T))
 
     thread_scheduler.spawn(&exec);
 */
-
     void execInThread ()
     {
         thisInfo.self = spawn_dispatcher;
         thisInfo.owner = owner_dispatcher;
-        thisInfo.scheduler = owner_scheduler;
+        thisInfo.scheduler = spawn_scheduler;
         thisInfo.have_scheduler = true;
 
-        thisInfo.scheduler.spawn({
+        thisInfo.scheduler.start({
             thisInfo.self = spawn_dispatcher;
-            thisInfo.owner = spawn_dispatcher;
-            thisInfo.scheduler = owner_scheduler;
+            thisInfo.owner = owner_dispatcher;
+            thisInfo.scheduler = spawn_scheduler;
             thisInfo.have_scheduler = false;
             fn(args);
         });
@@ -1821,6 +1818,7 @@ if (isSpawnable!(F, T))
 
     auto t = new Thread(&execInThread);
     t.start();
+
     return spawn_dispatcher;
 }
 
@@ -1871,6 +1869,7 @@ void wait(Duration val)
     */
        Thread.sleep(val);
 }
+
 /*
 unittest
 {
@@ -1921,6 +1920,5 @@ unittest
         }
     );
     writeln("Done");
-
 }
 */
