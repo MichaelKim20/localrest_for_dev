@@ -19,6 +19,11 @@
  * schedulers are available that multiplex fibers across the main thread or
  * use some combination of the two approaches.
  *
+ * Note:
+ * Copied (almost verbatim) from Phobos at commit 3bfccf4f1 (2019-11-27)
+ * Changes are this notice, and the module rename, from `std.concurrency`
+ * to `geod24.concurrency`.
+ *
  * Copyright: Copyright Sean Kelly 2009 - 2014.
  * License:   <a href="http://www.boost.org/LICENSE_1_0.txt">Boost License 1.0</a>.
  * Authors:   Sean Kelly, Alex Rønne Petersen, Martin Nowak
@@ -31,10 +36,7 @@
  */
 module geod24.concurrency;
 
-import geod24.Channel;
-
 public import std.variant;
-public import std.stdio;
 
 import core.atomic;
 import core.sync.condition;
@@ -77,12 +79,16 @@ private
 {
     bool hasLocalAliasing(Types...)()
     {
+        import std.typecons : Rebindable;
+
         // Works around "statement is not reachable"
         bool doesIt = false;
         static foreach (T; Types)
         {
             static if (is(T == Tid))
             { /* Allowed */ }
+            else static if (is(T : Rebindable!R, R))
+                doesIt |= hasLocalAliasing!R;
             else static if (is(T == struct))
                 doesIt |= hasLocalAliasing!(typeof(T.tupleof));
             else
@@ -95,6 +101,14 @@ private
     {
         static struct Container { Tid t; }
         static assert(!hasLocalAliasing!(Tid, Container, int));
+    }
+
+    @safe unittest
+    {
+        /* Issue 20097 */
+        import std.datetime.systime : SysTime;
+        static struct Container { SysTime time; }
+        static assert(!hasLocalAliasing!(SysTime, Container));
     }
 
     enum MsgType
@@ -175,9 +189,12 @@ private
 
     void checkops(T...)(T ops)
     {
+        import std.format : format;
+
         foreach (i, t1; T)
         {
-            static assert(isFunctionPointer!t1 || isDelegate!t1);
+            static assert(isFunctionPointer!t1 || isDelegate!t1,
+                    format!"T %d is not a function pointer or delegates"(i));
             alias a1 = Parameters!(t1);
             alias r1 = ReturnType!(t1);
 
@@ -189,7 +206,6 @@ private
 
                 foreach (t2; T[i + 1 .. $])
                 {
-                    static assert(isFunctionPointer!t2 || isDelegate!t2);
                     alias a2 = Parameters!(t2);
 
                     static assert(!is(a1 == a2),
@@ -314,7 +330,7 @@ class TidMissingException : Exception
  */
 struct Tid
 {
-private:
+package:
     this(MessageBox m) @safe pure nothrow @nogc
     {
         mbox = m;
@@ -497,9 +513,9 @@ if (isSpawnable!(F, T))
         receivedMessage = msg;
     }
 
-    //auto tid1 = spawn(&f1, "Hello World");
-    //thread_joinAll;
-    //assert(receivedMessage == "Hello World");
+    auto tid1 = spawn(&f1, "Hello World");
+    thread_joinAll;
+    assert(receivedMessage == "Hello World");
 }
 
 /**
@@ -925,110 +941,49 @@ private
     }
 }
 
-private
+/**
+ * Sets a maximum mailbox size.
+ *
+ * Sets a limit on the maximum number of user messages allowed in the mailbox.
+ * If this limit is reached, the caller attempting to add a new message will
+ * execute the behavior specified by doThis.  If messages is zero, the mailbox
+ * is unbounded.
+ *
+ * Params:
+ *  tid      = The Tid of the thread for which this limit should be set.
+ *  messages = The maximum number of messages or zero if no limit.
+ *  doThis   = The behavior executed when a message is sent to a full
+ *             mailbox.
+ */
+void setMaxMailboxSize(Tid tid, size_t messages, OnCrowding doThis) @safe pure
 {
-    __gshared Tid[string] tidByName;
-    __gshared string[][Tid] namesByTid;
-}
-
-private @property Mutex registryLock()
-{
-    __gshared Mutex impl;
-    initOnce!impl(new Mutex);
-    return impl;
-}
-
-private void unregisterMe()
-{
-    auto me = thisInfo.ident;
-    if (thisInfo.ident != Tid.init)
+    final switch (doThis)
     {
-        synchronized (registryLock)
-        {
-            if (auto allNames = me in namesByTid)
-            {
-                foreach (name; *allNames)
-                    tidByName.remove(name);
-                namesByTid.remove(me);
-            }
-        }
+    case OnCrowding.block:
+        return tid.mbox.setMaxMsgs(messages, &onCrowdingBlock);
+    case OnCrowding.throwException:
+        return tid.mbox.setMaxMsgs(messages, &onCrowdingThrow);
+    case OnCrowding.ignore:
+        return tid.mbox.setMaxMsgs(messages, &onCrowdingIgnore);
     }
 }
 
 /**
- * Associates name with tid.
+ * Sets a maximum mailbox size.
  *
- * Associates name with tid in a process-local map.  When the thread
- * represented by tid terminates, any names associated with it will be
- * automatically unregistered.
- *
- * Params:
- *  name = The name to associate with tid.
- *  tid  = The tid register by name.
- *
- * Returns:
- *  true if the name is available and tid is not known to represent a
- *  defunct thread.
- */
-bool register(string name, Tid tid)
-{
-    synchronized (registryLock)
-    {
-        if (name in tidByName)
-            return false;
-        if (tid.mbox.isClosed)
-            return false;
-        namesByTid[tid] ~= name;
-        tidByName[name] = tid;
-        return true;
-    }
-}
-
-/**
- * Removes the registered name associated with a tid.
+ * Sets a limit on the maximum number of user messages allowed in the mailbox.
+ * If this limit is reached, the caller attempting to add a new message will
+ * execute onCrowdingDoThis.  If messages is zero, the mailbox is unbounded.
  *
  * Params:
- *  name = The name to unregister.
- *
- * Returns:
- *  true if the name is registered, false if not.
+ *  tid      = The Tid of the thread for which this limit should be set.
+ *  messages = The maximum number of messages or zero if no limit.
+ *  onCrowdingDoThis = The routine called when a message is sent to a full
+ *                     mailbox.
  */
-bool unregister(string name)
+void setMaxMailboxSize(Tid tid, size_t messages, bool function(Tid) onCrowdingDoThis)
 {
-    import std.algorithm.mutation : remove, SwapStrategy;
-    import std.algorithm.searching : countUntil;
-
-    synchronized (registryLock)
-    {
-        if (auto tid = name in tidByName)
-        {
-            auto allNames = *tid in namesByTid;
-            auto pos = countUntil(*allNames, name);
-            remove!(SwapStrategy.unstable)(*allNames, pos);
-            tidByName.remove(name);
-            return true;
-        }
-        return false;
-    }
-}
-
-/**
- * Gets the Tid associated with name.
- *
- * Params:
- *  name = The name to locate within the registry.
- *
- * Returns:
- *  The associated Tid or Tid.init if name is not registered.
- */
-Tid locate(string name)
-{
-    synchronized (registryLock)
-    {
-        if (auto tid = name in tidByName)
-            return *tid;
-        return Tid.init;
-    }
+    tid.mbox.setMaxMsgs(messages, onCrowdingDoThis);
 }
 
 /**
@@ -1072,7 +1027,6 @@ struct ThreadInfo
             _send(MsgType.linkDead, tid, ident);
         if (owner != Tid.init)
             _send(MsgType.linkDead, owner, ident);
-        unregisterMe(); // clean up registry entries
     }
 }
 
@@ -1258,6 +1212,7 @@ class FiberScheduler : Scheduler
     void spawn(void delegate() op) nothrow
     {
         create(op);
+        yield();
     }
 
     /**
@@ -1291,13 +1246,45 @@ class FiberScheduler : Scheduler
 
     /**
      * Returns a Condition analog that yields when wait or notify is called.
+     *
+     * Bug:
+     * For the default implementation, `notifyAll`will behave like `notify`.
+     *
+     * Params:
+     *   m = A `Mutex` to use for locking if the condition needs to be waited on
+     *       or notified from multiple `Thread`s.
+     *       If `null`, no `Mutex` will be used and it is assumed that the
+     *       `Condition` is only waited on/notified from one `Thread`.
      */
     Condition newCondition(Mutex m) nothrow
     {
         return new FiberCondition(m);
     }
 
-private:
+protected:
+    /**
+     * Creates a new Fiber which calls the given delegate.
+     *
+     * Params:
+     *   op = The delegate the fiber should call
+     */
+    void create(void delegate() op) nothrow
+    {
+        void wrap()
+        {
+            scope (exit)
+            {
+                thisInfo.cleanup();
+            }
+            op();
+        }
+
+        m_fibers ~= new InfoFiber(&wrap);
+    }
+
+    /**
+     * Fiber which embeds a ThreadInfo
+     */
     static class InfoFiber : Fiber
     {
         ThreadInfo info;
@@ -1306,8 +1293,14 @@ private:
         {
             super(op);
         }
+
+        this(void delegate() op, size_t sz) nothrow
+        {
+            super(op, sz);
+        }
     }
 
+private:
     class FiberCondition : Condition
     {
         this(Mutex m) nothrow
@@ -1334,7 +1327,7 @@ private:
                  !notified && !period.isNegative;
                  period = limit - MonoTime.currTime)
             {
-                yield();
+                this.outer.yield();
             }
             return notified;
         }
@@ -1354,9 +1347,11 @@ private:
     private:
         void switchContext() nothrow
         {
-            mutex_nothrow.unlock_nothrow();
-            scope (exit) mutex_nothrow.lock_nothrow();
-            yield();
+            if (mutex_nothrow) mutex_nothrow.unlock_nothrow();
+            scope (exit)
+                if (mutex_nothrow)
+                    mutex_nothrow.lock_nothrow();
+            this.outer.yield();
         }
 
         private bool notified;
@@ -1384,20 +1379,6 @@ private:
                 m_pos = 0;
             }
         }
-    }
-
-    void create(void delegate() op) nothrow
-    {
-        void wrap()
-        {
-            scope (exit)
-            {
-                thisInfo.cleanup();
-            }
-            op();
-        }
-
-        m_fibers ~= new InfoFiber(&wrap);
     }
 
 private:
@@ -1762,7 +1743,6 @@ void yield(T)(T value)
     testScheduler(new ThreadScheduler);
     testScheduler(new FiberScheduler);
 }
-
 ///
 @system unittest
 {
@@ -1797,7 +1777,7 @@ void yield(T)(T value)
     assert(counter == [7, 21]);
 }
 
-private
+package
 {
     /*
      * A MessageBox is a message queue for one thread.  Other threads may send
@@ -1810,13 +1790,48 @@ private
     {
         this() @trusted nothrow /* TODO: make @safe after relevant druntime PR gets merged */
         {
-            m_channel = new Channel!Message();
+            m_lock = new Mutex;
+            m_closed = false;
+
+            if (scheduler is null)
+            {
+                m_putMsg = new Condition(m_lock);
+                m_notFull = new Condition(m_lock);
+            }
+            else
+            {
+                m_putMsg = scheduler.newCondition(m_lock);
+                m_notFull = scheduler.newCondition(m_lock);
+            }
         }
 
         ///
         final @property bool isClosed() @safe @nogc pure
         {
-            return m_channel.isClosed;
+            synchronized (m_lock)
+            {
+                return m_closed;
+            }
+        }
+
+        /*
+         * Sets a limit on the maximum number of user messages allowed in the
+         * mailbox.  If this limit is reached, the caller attempting to add
+         * a new message will execute call.  If num is zero, there is no limit
+         * on the message queue.
+         *
+         * Params:
+         *  num  = The maximum size of the queue or zero if the queue is
+         *         unbounded.
+         *  call = The routine to call when the queue is full.
+         */
+        final void setMaxMsgs(size_t num, bool function(Tid) call) @safe @nogc pure
+        {
+            synchronized (m_lock)
+            {
+                m_maxMsgs = num;
+                m_onMaxMsgs = call;
+            }
         }
 
         /*
@@ -1835,7 +1850,36 @@ private
          */
         final void put(ref Message msg)
         {
-            m_channel.send(msg);
+            synchronized (m_lock)
+            {
+                // TODO: Generate an error here if m_closed is true, or maybe
+                //       put a message in the caller's queue?
+                if (!m_closed)
+                {
+                    while (true)
+                    {
+                        if (isPriorityMsg(msg))
+                        {
+                            m_sharedPty.put(msg);
+                            m_putMsg.notify();
+                            return;
+                        }
+                        if (!mboxFull() || isControlMsg(msg))
+                        {
+                            m_sharedBox.put(msg);
+                            m_putMsg.notify();
+                            return;
+                        }
+                        if (m_onMaxMsgs !is null && !m_onMaxMsgs(thisTid))
+                        {
+                            return;
+                        }
+                        m_putQueue++;
+                        m_notFull.wait();
+                        m_putQueue--;
+                    }
+                }
+            }
         }
 
         /*
@@ -1858,7 +1902,7 @@ private
         {
             import std.meta : AliasSeq;
 
-            static assert(T.length);
+            static assert(T.length, "T must not be empty");
 
             static if (isImplicitlyConvertible!(T[0], Duration))
             {
@@ -1899,7 +1943,8 @@ private
 
             bool onLinkDeadMsg(ref Message msg)
             {
-                assert(msg.convertsTo!(Tid));
+                assert(msg.convertsTo!(Tid),
+                        "Message could be converted to Tid");
                 auto tid = msg.get!(Tid);
 
                 if (bool* pDepends = tid in thisInfo.links)
@@ -1939,6 +1984,71 @@ private
                 }
             }
 
+            bool scan(ref ListT list)
+            {
+                for (auto range = list[]; !range.empty;)
+                {
+                    // Only the message handler will throw, so if this occurs
+                    // we can be certain that the message was handled.
+                    scope (failure)
+                        list.removeAt(range);
+
+                    if (isControlMsg(range.front))
+                    {
+                        if (onControlMsg(range.front))
+                        {
+                            // Although the linkDead message is a control message,
+                            // it can be handled by the user.  Since the linkDead
+                            // message throws if not handled, if we get here then
+                            // it has been handled and we can return from receive.
+                            // This is a weird special case that will have to be
+                            // handled in a more general way if more are added.
+                            if (!isLinkDeadMsg(range.front))
+                            {
+                                list.removeAt(range);
+                                continue;
+                            }
+                            list.removeAt(range);
+                            return true;
+                        }
+                        range.popFront();
+                        continue;
+                    }
+                    else
+                    {
+                        if (onStandardMsg(range.front))
+                        {
+                            list.removeAt(range);
+                            return true;
+                        }
+                        range.popFront();
+                        continue;
+                    }
+                }
+                return false;
+            }
+
+            bool pty(ref ListT list)
+            {
+                if (!list.empty)
+                {
+                    auto range = list[];
+
+                    if (onStandardMsg(range.front))
+                    {
+                        list.removeAt(range);
+                        return true;
+                    }
+                    if (range.front.convertsTo!(Throwable))
+                        throw range.front.get!(Throwable);
+                    else if (range.front.convertsTo!(shared(Throwable)))
+                        throw range.front.get!(shared(Throwable));
+                    else
+                        throw new PriorityMessageException(range.front.data);
+                }
+                return false;
+            }
+
             static if (timedWait)
             {
                 import core.time : MonoTime;
@@ -1947,31 +2057,59 @@ private
 
             while (true)
             {
-                Message msg;
-                if (m_channel.receive(&msg))
+                ListT arrived;
+
+                if (pty(m_localPty) || scan(m_localBox))
                 {
-                    if (isControlMsg(msg))
+                    return true;
+                }
+                yield();
+                synchronized (m_lock)
+                {
+                    updateMsgCount();
+                    while (m_sharedPty.empty && m_sharedBox.empty)
                     {
-                        if (onControlMsg(msg))
+                        // NOTE: We're notifying all waiters here instead of just
+                        //       a few because the onCrowding behavior may have
+                        //       changed and we don't want to block sender threads
+                        //       unnecessarily if the new behavior is not to block.
+                        //       This will admittedly result in spurious wakeups
+                        //       in other situations, but what can you do?
+                        if (m_putQueue && !mboxFull())
+                            m_notFull.notifyAll();
+                        static if (timedWait)
                         {
-                            if (!isLinkDeadMsg(msg))
-                                break;
-                            else
-                                continue;
+                            if (period <= Duration.zero || !m_putMsg.wait(period))
+                                return false;
                         }
+                        else
+                        {
+                            m_putMsg.wait();
+                        }
+                    }
+                    m_localPty.put(m_sharedPty);
+                    arrived.put(m_sharedBox);
+                }
+                if (m_localPty.empty)
+                {
+                    scope (exit) m_localBox.put(arrived);
+                    if (scan(arrived))
+                    {
+                        return true;
                     }
                     else
                     {
-                        if (onStandardMsg(msg))
-                            break;
-                        else
-                            continue;
+                        static if (timedWait)
+                        {
+                            period = limit - MonoTime.currTime;
+                        }
+                        continue;
                     }
                 }
-                else
-                    break;
+                m_localBox.put(arrived);
+                pty(m_localPty);
+                return true;
             }
-            return false;
         }
 
         /*
@@ -1983,14 +2121,15 @@ private
         {
             static void onLinkDeadMsg(ref Message msg)
             {
-                assert(msg.convertsTo!(Tid));
+                assert(msg.convertsTo!(Tid),
+                        "Message could be converted to Tid");
                 auto tid = msg.get!(Tid);
 
                 thisInfo.links.remove(tid);
                 if (tid == thisInfo.owner)
                     thisInfo.owner = Tid.init;
             }
-/*
+
             static void sweep(ref ListT list)
             {
                 for (auto range = list[]; !range.empty; range.popFront())
@@ -1999,14 +2138,31 @@ private
                         onLinkDeadMsg(range.front);
                 }
             }
-*/
-            //import std.stdio;
-            //writeln("close");
-            m_channel.close ();
+
+            ListT arrived;
+
+            sweep(m_localBox);
+            synchronized (m_lock)
+            {
+                arrived.put(m_sharedBox);
+                m_closed = true;
+            }
+            m_localBox.clear();
+            sweep(arrived);
         }
 
     private:
         // Routines involving local data only, no lock needed.
+
+        bool mboxFull() @safe @nogc pure nothrow
+        {
+            return m_maxMsgs && m_maxMsgs <= m_localMsgs + m_sharedBox.length;
+        }
+
+        void updateMsgCount() @safe @nogc pure nothrow
+        {
+            m_localMsgs = m_localBox.length;
+        }
 
         bool isControlMsg(ref Message msg) @safe @nogc pure nothrow
         {
@@ -2023,8 +2179,247 @@ private
             return msg.type == MsgType.linkDead;
         }
 
-        Channel!Message m_channel;
+        alias OnMaxFn = bool function(Tid);
+        alias ListT = List!(Message);
+
+        ListT m_localBox;
+        ListT m_localPty;
+
+        Mutex m_lock;
+        Condition m_putMsg;
+        Condition m_notFull;
+        size_t m_putQueue;
+        ListT m_sharedBox;
+        ListT m_sharedPty;
+        OnMaxFn m_onMaxMsgs;
+        size_t m_localMsgs;
+        size_t m_maxMsgs;
+        bool m_closed;
     }
+
+    /*
+     *
+     */
+    struct List(T)
+    {
+        struct Range
+        {
+            import std.exception : enforce;
+
+            @property bool empty() const
+            {
+                return !m_prev.next;
+            }
+
+            @property ref T front()
+            {
+                enforce(m_prev.next, "invalid list node");
+                return m_prev.next.val;
+            }
+
+            @property void front(T val)
+            {
+                enforce(m_prev.next, "invalid list node");
+                m_prev.next.val = val;
+            }
+
+            void popFront()
+            {
+                enforce(m_prev.next, "invalid list node");
+                m_prev = m_prev.next;
+            }
+
+            private this(Node* p)
+            {
+                m_prev = p;
+            }
+
+            private Node* m_prev;
+        }
+
+        void put(T val)
+        {
+            put(newNode(val));
+        }
+
+        void put(ref List!(T) rhs)
+        {
+            if (!rhs.empty)
+            {
+                put(rhs.m_first);
+                while (m_last.next !is null)
+                {
+                    m_last = m_last.next;
+                    m_count++;
+                }
+                rhs.m_first = null;
+                rhs.m_last = null;
+                rhs.m_count = 0;
+            }
+        }
+
+        Range opSlice()
+        {
+            return Range(cast(Node*)&m_first);
+        }
+
+        void removeAt(Range r)
+        {
+            import std.exception : enforce;
+
+            assert(m_count, "Can not remove from empty Range");
+            Node* n = r.m_prev;
+            enforce(n && n.next, "attempting to remove invalid list node");
+
+            if (m_last is m_first)
+                m_last = null;
+            else if (m_last is n.next)
+                m_last = n; // nocoverage
+            Node* to_free = n.next;
+            n.next = n.next.next;
+            freeNode(to_free);
+            m_count--;
+        }
+
+        @property size_t length()
+        {
+            return m_count;
+        }
+
+        void clear()
+        {
+            m_first = m_last = null;
+            m_count = 0;
+        }
+
+        @property bool empty()
+        {
+            return m_first is null;
+        }
+
+    private:
+        struct Node
+        {
+            Node* next;
+            T val;
+
+            this(T v)
+            {
+                val = v;
+            }
+        }
+
+        static shared struct SpinLock
+        {
+            void lock() { while (!cas(&locked, false, true)) { Thread.yield(); } }
+            void unlock() { atomicStore!(MemoryOrder.rel)(locked, false); }
+            bool locked;
+        }
+
+        static shared SpinLock sm_lock;
+        static shared Node* sm_head;
+
+        Node* newNode(T v)
+        {
+            Node* n;
+            {
+                sm_lock.lock();
+                scope (exit) sm_lock.unlock();
+
+                if (sm_head)
+                {
+                    n = cast(Node*) sm_head;
+                    sm_head = sm_head.next;
+                }
+            }
+            if (n)
+            {
+                import std.conv : emplace;
+                emplace!Node(n, v);
+            }
+            else
+            {
+                n = new Node(v);
+            }
+            return n;
+        }
+
+        void freeNode(Node* n)
+        {
+            // destroy val to free any owned GC memory
+            destroy(n.val);
+
+            sm_lock.lock();
+            scope (exit) sm_lock.unlock();
+
+            auto sn = cast(shared(Node)*) n;
+            sn.next = sm_head;
+            sm_head = sn;
+        }
+
+        void put(Node* n)
+        {
+            m_count++;
+            if (!empty)
+            {
+                m_last.next = n;
+                m_last = n;
+                return;
+            }
+            m_first = n;
+            m_last = n;
+        }
+
+        Node* m_first;
+        Node* m_last;
+        size_t m_count;
+    }
+}
+
+@system unittest
+{
+    import std.typecons : tuple, Tuple;
+
+    static void testfn(Tid tid)
+    {
+        receive((float val) { assert(0); }, (int val, int val2) {
+            assert(val == 42 && val2 == 86);
+        });
+        receive((Tuple!(int, int) val) { assert(val[0] == 42 && val[1] == 86); });
+        receive((Variant val) {  });
+        receive((string val) {
+            if ("the quick brown fox" != val)
+                return false;
+            return true;
+        }, (string val) { assert(false); });
+        prioritySend(tid, "done");
+    }
+
+    static void runTest(Tid tid)
+    {
+        send(tid, 42, 86);
+        send(tid, tuple(42, 86));
+        send(tid, "hello", "there");
+        send(tid, "the quick brown fox");
+        receive((string val) { assert(val == "done"); });
+    }
+
+    static void simpleTest()
+    {
+        auto tid = spawn(&testfn, thisTid);
+        runTest(tid);
+
+        // Run the test again with a limited mailbox size.
+        tid = spawn(&testfn, thisTid);
+        setMaxMailboxSize(tid, 2, OnCrowding.block);
+        runTest(tid);
+    }
+
+    simpleTest();
+
+    scheduler = new ThreadScheduler;
+    simpleTest();
+    scheduler = null;
 }
 
 private @property shared(Mutex) initOnceLock()

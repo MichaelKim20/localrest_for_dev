@@ -83,7 +83,6 @@ import vibe.data.json;
 static import C = geod24.concurrency;
 import std.meta : AliasSeq;
 import std.traits : Parameters, ReturnType;
-import std.stdio;
 
 import core.thread;
 import core.time;
@@ -166,7 +165,7 @@ private struct ArgWrapper (T...)
 }
 
 /**
- * Copied from std.concurrency.FiberScheduler, increased the stack size to 16MB.
+ * Copied from geod24.concurrency.FiberScheduler, increased the stack size to 16MB.
  */
 class BaseFiberScheduler : C.Scheduler
 {
@@ -198,7 +197,7 @@ class BaseFiberScheduler : C.Scheduler
     void spawn(void delegate() op) nothrow
     {
         create(op);
-        //yield();
+        yield();
     }
 
     /**
@@ -442,7 +441,7 @@ private final class LocalScheduler : BaseFiberScheduler
 
 
 /// We need a scheduler to simulate an event loop and to be re-entrant
-/// However, the one in `std.concurrency` is process-global (`__gshared`)
+/// However, the one in `geod24.concurrency` is process-global (`__gshared`)
 private LocalScheduler scheduler;
 
 /// Whether this is the main thread
@@ -616,7 +615,7 @@ public final class RemoteAPI (API) : API
        which is a struct with the sender's Tid, the method's mangleof,
        and the method's arguments as a tuple, serialized to a JSON string.
 
-       `std.concurrency.receive` is not `@safe`, so neither is this.
+       `geod24.concurrency.receive` is not `@safe`, so neither is this.
 
        Params:
            Implementation = Type of the implementation to instantiate
@@ -948,68 +947,49 @@ public final class RemoteAPI (API) : API
 
                     // `geod24.concurrency.send/receive[Only]` is not `@safe` but
                     // this overload needs to be
-
                     auto res = () @trusted {
                         auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                             .serializeToJsonString();
 
                         auto command = Command(C.thisTid(), scheduler.getNextResponseId(), ovrld.mangleof, serialized);
                         C.send(this.childTid, command);
-                        writeln("Command ", command);
-/*
+
                         // for the main thread, we run the "event loop" until
                         // the request we're interested in receives a response.
                         if (is_main_thread)
                         {
                             bool terminated = false;
-
-                            
-                            //runTask(() {
+                            runTask(() {
                                 while (!terminated)
                                 {
-                                    writeln("Response1 ");
                                     C.receiveTimeout(10.msecs,
                                         (Response res) {
-                                            writeln("Response ", res);
-                                            res = Response(Status.Success, command.id);
-                                            //scheduler.pending = res;
-                                            //scheduler.waiting[res.id].c.notify();
-
-                                            if (res.id == command.id) {
-                                                terminated = true;
-                                            }
+                                            scheduler.pending = res;
+                                            scheduler.waiting[res.id].c.notify();
                                         });
 
-                                    //scheduler.yield();
+                                    scheduler.yield();
                                 }
-                            //});
-                            
-                            writeln("Response2 ");
-                            Response res2;
-                            //scheduler.start(() {
-                                //res2 = scheduler.waitResponse(command.id, this.timeout);
-                                res2 = Response(Status.Success, command.id);
+                            });
+
+                            Response res;
+                            scheduler.start(() {
+                                res = scheduler.waitResponse(command.id, this.timeout);
                                 terminated = true;
-                                writeln("terminated ", terminated);
-                            //});
-                            return res2;
+                            });
+                            return res;
                         }
                         else
                         {
                             return scheduler.waitResponse(command.id, this.timeout);
                         }
-                        */
-                        return Response(Status.Success, 0, "42");
                     }();
 
-                    //Thread.sleep(dur!("msecs")(5000));
+                    if (res.status == Status.Failed)
+                        throw new Exception(res.data);
 
-                    //if (res.status == Status.Failed)
-                        //throw new Exception(res.data);
-
-                    //if (res.status == Status.Timeout)
-                        //throw new Exception(serializeToJsonString("Request timed-out"));
-                    writeln("res.data ", res.data);
+                    if (res.status == Status.Timeout)
+                        throw new Exception(serializeToJsonString("Request timed-out"));
 
                     static if (!is(ReturnType!(ovrld) == void))
                         return res.data.deserializeJson!(typeof(return));
@@ -1017,7 +997,7 @@ public final class RemoteAPI (API) : API
                 });
         }
 }
-/*
+
 /// Simple usage example
 unittest
 {
@@ -1053,6 +1033,10 @@ unittest
 {
     import std.conv;
     static import geod24.concurrency;
+    import geod24.Registry;
+
+    __gshared Registry registry;
+    registry.initialize();
 
     static interface API
     {
@@ -1087,7 +1071,7 @@ unittest
     static RemoteAPI!API factory (string type, ulong hash)
     {
         const name = hash.to!string;
-        auto tid = geod24.concurrency.locate(name);
+        auto tid = registry.locate(name);
         if (tid != tid.init)
             return new RemoteAPI!API(tid);
 
@@ -1095,11 +1079,11 @@ unittest
         {
         case "normal":
             auto ret =  RemoteAPI!API.spawn!Node(false);
-            geod24.concurrency.register(name, ret.tid());
+            registry.register(name, ret.tid());
             return ret;
         case "byzantine":
             auto ret =  RemoteAPI!API.spawn!Node(true);
-            geod24.concurrency.register(name, ret.tid());
+            registry.register(name, ret.tid());
             return ret;
         default:
             assert(0, type);
@@ -1826,4 +1810,3 @@ unittest
         assert(ex.msg == `"Request timed-out"`);
     }
 }
-*/
