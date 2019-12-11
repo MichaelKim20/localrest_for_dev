@@ -190,7 +190,7 @@ class BaseFiberScheduler : C.Scheduler
         dispatch();
     }
 
-    void stop ()
+    void stop (void delegate() op)
     {
 
     }
