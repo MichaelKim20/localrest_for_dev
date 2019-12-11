@@ -315,13 +315,13 @@ private class MessageBox
                         return false;
                     }
 
-                    yieldAndWait();
+                    yieldAndSleep();
                 }
             }
             else
             {
                 while (is_waiting)
-                    yieldAndWait();
+                    yieldAndSleep();
             }
         }
 
@@ -411,7 +411,7 @@ private class MessageBox
                     is_waiting1 = true;
                     break;
                 }
-                yieldAndWait();
+                yieldAndSleep();
             }
 
             if (this.timed_wait)
@@ -568,7 +568,7 @@ private class MessageBox
             if (scan(this.localBox))
                 return true;
 
-            yieldAndWait();
+            yieldAndSleep();
 
             auto res = this.getMessage(&msg);
             if (res == ResultGetMessage.close)
@@ -610,7 +610,7 @@ private class MessageBox
                 !period.isNegative;
                 period = limit - MonoTime.currTime)
             {
-                yieldAndWait();
+                yieldAndSleep();
             }
         }
     }
@@ -1764,7 +1764,7 @@ public class NodeScheduler : FiberScheduler
         terminated = true;
         terminated_time = MonoTime.currTime;
         while (!this.stoped)
-            wait(100.msecs);
+            sleep(100.msecs);
         op();
     }
 
@@ -1809,7 +1809,7 @@ public class NodeScheduler : FiberScheduler
                     done = true;
             }
             m.unlock();
-            wait(this.sleep_interval);
+            sleep(this.sleep_interval);
         }
         this.stoped = true;
     }
@@ -1895,7 +1895,7 @@ public class MainScheduler : FiberScheduler
         terminated = true;
         terminated_time = MonoTime.currTime;
         while (!this.stoped)
-            wait(100.msecs);
+            sleep(100.msecs);
         op();
     }
 
@@ -1940,7 +1940,7 @@ public class MainScheduler : FiberScheduler
                     done = true;
             }
             m.unlock();
-            wait(this.sleep_interval);
+            sleep(this.sleep_interval);
         }
         this.stoped = true;
     }
@@ -2286,13 +2286,13 @@ void yield ()
     thisScheduler.yield();
 }
 
-void yieldAndWait ()
+void yieldAndSleep ()
 {
     thisScheduler.yield();
     Thread.sleep(1.msecs);
 }
 
-void wait(Duration val)
+void sleep(Duration val)
 {
     Thread.sleep(val);
 }
