@@ -47,6 +47,7 @@ import core.thread;
 
 import std.stdio;
 
+
 ///
 @system unittest
 {
@@ -224,6 +225,17 @@ static ~this ()
 }
 
 // Exceptions
+
+/// Thrown on calls to `receiveOnly` if a message other than the type
+/// the receiving thread expected is sent.
+class MessageMismatch : Exception
+{
+    /// Ctor
+    this (string msg = "Unexpected message type") @safe pure nothrow @nogc
+    {
+        super(msg);
+    }
+}
 
 /// Thrown on calls to `receive` if the thread that spawned the receiving
 /// thread has terminated and no more messages exist.
@@ -523,7 +535,6 @@ if (isSpawnable!(F, T))
     assert(receivedMessage == "Hello World");
 }
 
-
 /*******************************************************************************
 
     Starts fn(args) in a logical thread and will receive a LinkTerminated
@@ -629,7 +640,7 @@ public Tid spawnFiber (void delegate () op)
 public Tid spawnInheritedFiber (void delegate () op)
 {
     auto spawn_tid = thisTid;
-    auto owner_tid = ownerTid;
+    auto owner_tid = thisInfo.owner;
     auto owner_scheduler = thisScheduler;
 
     thisScheduler.spawn(
@@ -858,6 +869,177 @@ version (unittest)
                       } ) );
 }
 
+///
+private template receiveOnlyRet (T...)
+{
+    static if ( T.length == 1 )
+    {
+        alias receiveOnlyRet = T[0];
+    }
+    else
+    {
+        import std.typecons : Tuple;
+        alias receiveOnlyRet = Tuple!(T);
+    }
+}
+
+/*******************************************************************************
+
+    Receives only messages with arguments of types `T`.
+
+    Throws:
+        `MessageMismatch` if a message of types other than `T` is received.
+
+    Returns:
+        The received message.  If `T.length` is greater than one,
+        the message will be packed into a $(REF Tuple, std,typecons).
+
+ ******************************************************************************/
+
+receiveOnlyRet!(T) receiveOnly (T...) ()
+in
+{
+    assert(thisInfo.ident.mbox !is null,
+        "Cannot receive a message until a thread was spawned or thisTid was passed to a running thread.");
+}
+do
+{
+    import std.format : format;
+    import std.typecons : Tuple;
+
+    Tuple!(T) ret;
+
+    if (Fiber.getThis())
+    {
+        thisInfo.ident.mbox.get(
+            (T val)
+            {
+                static if (T.length)
+                    ret.field = val;
+                    import std.stdio;
+                    writefln("writeln %s",ret);
+            },
+            (LinkTerminated e)
+            {
+                throw e;
+            },
+            (OwnerTerminated e)
+            {
+                throw e;
+            },
+            (Variant val)
+            {
+                static if (T.length > 1)
+                    string exp = T.stringof;
+                else
+                    string exp = T[0].stringof;
+
+                throw new MessageMismatch(
+                    format("Unexpected message type: expected '%s', got '%s'", exp, val.type.toString()));
+            }
+        );
+        writefln("DONE");
+    }
+    else
+    {
+        auto cond = thisScheduler.newCondition(null);
+        spawnInheritedFiber(
+        {
+            thisInfo.ident.mbox.get(
+                (T val)
+                {
+                    static if (T.length)
+                        ret.field = val;
+                },
+                (LinkTerminated e)
+                {
+                    throw e;
+                },
+                (OwnerTerminated e)
+                {
+                    throw e;
+                },
+                (Variant val)
+                {
+                    static if (T.length > 1)
+                        string exp = T.stringof;
+                    else
+                        string exp = T[0].stringof;
+
+                    throw new MessageMismatch(
+                        format("Unexpected message type: expected '%s', got '%s'", exp, val.type.toString()));
+                }
+            );
+            cond.notify();
+        });
+        cond.wait();
+        writefln("DONE");
+    }
+
+    static if (T.length == 1)
+        return ret[0];
+    else
+        return ret;
+}
+
+///
+@system unittest
+{
+    auto tid = spawn(
+    {
+        assert(receiveOnly!int == 42);
+    });
+    send(tid, 42);
+}
+
+
+///
+@system unittest
+{
+    auto tid = spawn(
+    {
+        assert(receiveOnly!string == "text");
+    });
+    send(tid, "text");
+}
+/*
+///
+@system unittest
+{
+    struct Record { string name; int age; }
+
+    auto tid = spawn(
+    {
+        auto msg = receiveOnly!(double, Record);
+        assert(msg[0] == 0.5);
+        //assert(msg[1].name == "Alice");
+        //assert(msg[1].age == 31);
+    });
+    //send(tid, 0.5, Record("Alice", 31));
+    send(tid, 0.5);
+}
+*/
+@system unittest
+{
+    static void t1 (Tid mainTid)
+    {
+        try
+        {
+            receiveOnly!string();
+            mainTid.send("");
+        }
+        catch (Throwable th)
+        {
+            mainTid.send(th.msg);
+        }
+    }
+
+    auto tid = spawn(&t1, thisTid);
+    tid.send(1);
+    string result = receiveOnly!string();
+    assert(result == "Unexpected message type: expected 'string', got 'int'");
+}
+
 /*******************************************************************************
 
     Tries to receive but will give up if no matches arrive within duration.
@@ -914,149 +1096,6 @@ do
     static assert(__traits(compiles, {
         receiveTimeout(msecs(10), (int x) {}, (Variant x) {});
     }));
-}
-
-
-/*******************************************************************************
-
-    MessageBox Limits
-    These behaviors may be specified when a mailbox is full.
-
-*******************************************************************************/
-
-enum OnCrowding
-{
-    block, /// Wait until room is available.
-    throwException, /// Throw a MailboxFull exception.
-    ignore /// Abort the send and return.
-}
-
-private
-{
-    bool onCrowdingBlock (Tid tid) @safe pure nothrow @nogc
-    {
-        return true;
-    }
-
-    bool onCrowdingIgnore (Tid tid) @safe pure nothrow @nogc
-    {
-        return false;
-    }
-}
-
-private
-{
-    __gshared Tid[string] tidByName;
-    __gshared string[][Tid] namesByTid;
-}
-
-private @property Mutex registryLock ()
-{
-    __gshared Mutex impl;
-    initOnce!impl(new Mutex);
-    return impl;
-}
-
-private void unregisterMe ()
-{
-    auto me = thisInfo.ident;
-    if (thisInfo.ident != Tid.init)
-    {
-        synchronized (registryLock)
-        {
-            if (auto allNames = me in namesByTid)
-            {
-                foreach (name; *allNames)
-                    tidByName.remove(name);
-                namesByTid.remove(me);
-            }
-        }
-    }
-}
-
-/*******************************************************************************
-
-    Associates name with tid.
-
-    Associates name with tid in a process-local map.  When the thread
-    represented by tid terminates, any names associated with it will be
-    automatically unregistered.
-
-    Params:
-        name = The name to associate with tid.
-        tid  = The tid register by name.
-
-    Returns:
-        true if the name is available and tid is not known to represent a
-        defunct thread.
-
-*******************************************************************************/
-
-bool register (string name, Tid tid)
-{
-    synchronized (registryLock)
-    {
-        if (name in tidByName)
-            return false;
-        if (tid.mbox.isClosed)
-            return false;
-        namesByTid[tid] ~= name;
-        tidByName[name] = tid;
-        return true;
-    }
-}
-
-/*******************************************************************************
-
-    Removes the registered name associated with a tid.
-
-    Params:
-        name = The name to unregister.
-
-    Returns:
-        true if the name is registered, false if not.
-
-*******************************************************************************/
-
-bool unregister (string name)
-{
-    import std.algorithm.mutation : remove, SwapStrategy;
-    import std.algorithm.searching : countUntil;
-
-    synchronized (registryLock)
-    {
-        if (auto tid = name in tidByName)
-        {
-            auto allNames = *tid in namesByTid;
-            auto pos = countUntil(*allNames, name);
-            remove!(SwapStrategy.unstable)(*allNames, pos);
-            tidByName.remove(name);
-            return true;
-        }
-        return false;
-    }
-}
-
-/*******************************************************************************
-
-    Gets the Tid associated with name.
-
-    Params:
-        name = The name to locate within the registry.
-
-    Returns:
-        The associated Tid or Tid.init if name is not registered.
-
-*******************************************************************************/
-
-Tid locate (string name)
-{
-    synchronized (registryLock)
-    {
-        if (auto tid = name in tidByName)
-            return *tid;
-        return Tid.init;
-    }
 }
 
 /*******************************************************************************
@@ -1597,7 +1636,7 @@ class FiberScheduler : Scheduler
 
 /*******************************************************************************
 
-    An Main-Thread's Scheduler using Fibers.
+    A Node-Thread's Scheduler using Fibers.
 
 *******************************************************************************/
 
@@ -1721,7 +1760,7 @@ public class NodeScheduler : FiberScheduler
 
 /*******************************************************************************
 
-    An Main-Thread's Scheduler using Fibers.
+    A Main-Thread's Scheduler using Fibers.
 
 *******************************************************************************/
 
@@ -1848,7 +1887,6 @@ public class MainScheduler : FiberScheduler
     }
 }
 
-
 @system unittest
 {
     static void receive (Condition cond, ref size_t received)
@@ -1892,24 +1930,8 @@ public class MainScheduler : FiberScheduler
     assert(received == 1);
 }
 
-/*******************************************************************************
-
-    Sets the Scheduler behavior within the program.
-
-    This variable sets the Scheduler behavior within this program.  Typically,
-    when setting a Scheduler, scheduler.start() should be called in main.  This
-    routine will not return until program execution is complete.
-
-*******************************************************************************/
-
+/// The thread scheduler behavior within the program.
 __gshared ThreadScheduler thread_scheduler;
-
-/*******************************************************************************
-
-    If the caller is a Fiber and is not a Generator, this function will call
-    scheduler.yield() or Fiber.yield(), as appropriate.
-
-*******************************************************************************/
 
 void yield ()
 {
@@ -1925,282 +1947,6 @@ void yieldAndWait ()
 void wait(Duration val)
 {
     Thread.sleep(val);
-}
-
-
-/// Used to determine whether a Generator is running.
-private interface IsGenerator {}
-
-/*******************************************************************************
-
-    A Generator is a Fiber that periodically returns values of type T to the
-    caller via yield.  This is represented as an InputRange.
-
-*******************************************************************************/
-
-class Generator (T) : Fiber, IsGenerator, InputRange!T
-{
-    /***************************************************************************
-
-        Initializes a generator object which is associated with a static
-        D function.  The function will be called once to prepare the range
-        for iteration.
-
-        Params:
-            fn = The fiber function.
-
-        In:
-            fn must not be null.
-
-    ***************************************************************************/
-
-    this (void function () fn)
-    {
-        super(fn);
-        call();
-    }
-
-    /***************************************************************************
-
-        Initializes a generator object which is associated with a static
-        D function.  The function will be called once to prepare the range
-        for iteration.
-
-        Params:
-            fn = The fiber function.
-            sz = The stack size for this fiber.
-
-        In:
-            fn must not be null.
-
-    ***************************************************************************/
-
-    this (void function () fn, size_t sz)
-    {
-        super(fn, sz);
-        call();
-    }
-
-    /***************************************************************************
-
-        Initializes a generator object which is associated with a static
-        D function.  The function will be called once to prepare the range
-        for iteration.
-
-        Params:
-            fn = The fiber function.
-            sz = The stack size for this fiber.
-            guardPageSize = size of the guard page to trap fiber's stack
-            overflows. Refer to $(REF Fiber, core,thread)'s
-            documentation for more details.
-
-        In:
-            fn must not be null.
-
-    ***************************************************************************/
-
-    this (void function () fn, size_t sz, size_t guardPageSize)
-    {
-        super(fn, sz, guardPageSize);
-        call();
-    }
-
-    /***************************************************************************
-
-        Initializes a generator object which is associated with a dynamic
-        D function.  The function will be called once to prepare the range
-        for iteration.
-
-        Params:
-            dg = The fiber function.
-
-        In:
-            dg must not be null.
-
-    ***************************************************************************/
-
-    this (void delegate () dg)
-    {
-        super(dg);
-        call();
-    }
-
-    /***************************************************************************
-
-        Initializes a generator object which is associated with a dynamic
-        D function.  The function will be called once to prepare the range
-        for iteration.
-
-        Params:
-            dg = The fiber function.
-            sz = The stack size for this fiber.
-
-        In:
-            dg must not be null.
-
-    ***************************************************************************/
-
-    this (void delegate () dg, size_t sz)
-    {
-        super(dg, sz);
-        call();
-    }
-
-    /***************************************************************************
-
-        Initializes a generator object which is associated with a dynamic
-        D function.  The function will be called once to prepare the range
-        for iteration.
-
-        Params:
-            dg = The fiber function.
-            sz = The stack size for this fiber.
-            guardPageSize = size of the guard page to trap fiber's stack
-                        overflows. Refer to $(REF Fiber, core,thread)'s
-                        documentation for more details.
-
-        In:
-            dg must not be null.
-
-    ***************************************************************************/
-
-    this (void delegate () dg, size_t sz, size_t guardPageSize)
-    {
-        super(dg, sz, guardPageSize);
-        call();
-    }
-
-    /***************************************************************************
-
-        Returns true if the generator is empty.
-
-    ***************************************************************************/
-
-    final bool empty () @property
-    {
-        return m_value is null || state == State.TERM;
-    }
-
-    /***************************************************************************
-
-        Obtains the next value from the underlying function.
-
-    ***************************************************************************/
-
-    final void popFront ()
-    {
-        call();
-    }
-
-    /***************************************************************************
-
-        Returns the most recently generated value by shallow copy.
-
-    ***************************************************************************/
-
-    final T front () @property
-    {
-        return *m_value;
-    }
-
-    /***************************************************************************
-
-        Returns the most recently generated value without executing a
-        copy contructor. Will not compile for element types defining a
-        postblit, because Generator does not return by reference.
-
-    ***************************************************************************/
-
-    final T moveFront ()
-    {
-        static if (!hasElaborateCopyConstructor!T)
-        {
-            return front;
-        }
-        else
-        {
-            static assert(0,
-                    "Fiber front is always rvalue and thus cannot be moved since it defines a postblit.");
-        }
-    }
-
-    final int opApply (scope int delegate (T) loopBody)
-    {
-        int broken;
-        for (; !empty; popFront())
-        {
-            broken = loopBody(front);
-            if (broken) break;
-        }
-        return broken;
-    }
-
-    final int opApply (scope int delegate (size_t, T) loopBody)
-    {
-        int broken;
-        for (size_t i; !empty; ++i, popFront())
-        {
-            broken = loopBody(i, front);
-            if (broken) break;
-        }
-        return broken;
-    }
-private:
-    T* m_value;
-}
-
-///
-@system unittest
-{
-    auto tid = spawn ({
-        int i;
-        while (i < 9)
-        {
-            receive((int res) {
-                i = res;
-            });
-        }
-        ownerTid.send(i * 2);
-    });
-
-    auto r = new Generator!int ({
-        foreach (i; 1 .. 10)
-            yield(i);
-    });
-
-    foreach (e; r)
-        tid.send(e);
-
-    receive((int res) {
-        assert(res == 18);
-    });
-}
-
-/*******************************************************************************
-
-    Yields a value of type T to the caller of the currently executing
-    generator.
-
-    Params:
-        value = The value to yield.
-
-*******************************************************************************/
-
-void yield (T) (ref T value)
-{
-    Generator!T cur = cast(Generator!T) Fiber.getThis();
-    if (cur !is null && cur.state == Fiber.State.EXEC)
-    {
-        cur.m_value = &value;
-        return Fiber.yield();
-    }
-    throw new Exception("yield(T) called with no active generator for the supplied type");
-}
-
-/// ditto
-void yield (T) (T value)
-{
-    yield(value);
 }
 
 /*******************************************************************************
@@ -2921,6 +2667,172 @@ private:
     Node* m_last;
     size_t m_count;
 }
+
+
+unittest
+{
+    import std.concurrency;
+
+    auto process = ()
+    {
+        size_t message_count = 2;
+        while (message_count--)
+        {
+            receive(
+                (int i)
+                {
+                    ownerTid.send(i);
+                },
+                (string s)
+                {
+                    ownerTid.send(s);
+                }
+            );
+        }
+    };
+
+    auto spawnedTid = spawnThread(process);
+    spawnedTid.send(42);
+    spawnedTid.send("string");
+
+    int got_i;
+    string got_s;
+
+    receive(
+        (string s)
+        {
+            got_s = s;
+        }
+    );
+
+    receive(
+        (int i)
+        {
+            got_i = i;
+        }
+    );
+
+    assert(got_i == 42);
+    assert(got_s == "string");
+}
+
+
+
+private
+{
+    __gshared Tid[string] tidByName;
+    __gshared string[][Tid] namesByTid;
+}
+
+private @property Mutex registryLock ()
+{
+    __gshared Mutex impl;
+    initOnce!impl(new Mutex);
+    return impl;
+}
+
+private void unregisterMe ()
+{
+    auto me = thisInfo.ident;
+    if (thisInfo.ident != Tid.init)
+    {
+        synchronized (registryLock)
+        {
+            if (auto allNames = me in namesByTid)
+            {
+                foreach (name; *allNames)
+                    tidByName.remove(name);
+                namesByTid.remove(me);
+            }
+        }
+    }
+}
+
+/*******************************************************************************
+
+    Associates name with tid.
+
+    Associates name with tid in a process-local map.  When the thread
+    represented by tid terminates, any names associated with it will be
+    automatically unregistered.
+
+    Params:
+        name = The name to associate with tid.
+        tid  = The tid register by name.
+
+    Returns:
+        true if the name is available and tid is not known to represent a
+        defunct thread.
+
+*******************************************************************************/
+
+bool register (string name, Tid tid)
+{
+    synchronized (registryLock)
+    {
+        if (name in tidByName)
+            return false;
+        if (tid.mbox.isClosed)
+            return false;
+        namesByTid[tid] ~= name;
+        tidByName[name] = tid;
+        return true;
+    }
+}
+
+/*******************************************************************************
+
+    Removes the registered name associated with a tid.
+
+    Params:
+        name = The name to unregister.
+
+    Returns:
+        true if the name is registered, false if not.
+
+*******************************************************************************/
+
+bool unregister (string name)
+{
+    import std.algorithm.mutation : remove, SwapStrategy;
+    import std.algorithm.searching : countUntil;
+
+    synchronized (registryLock)
+    {
+        if (auto tid = name in tidByName)
+        {
+            auto allNames = *tid in namesByTid;
+            auto pos = countUntil(*allNames, name);
+            remove!(SwapStrategy.unstable)(*allNames, pos);
+            tidByName.remove(name);
+            return true;
+        }
+        return false;
+    }
+}
+
+/*******************************************************************************
+
+    Gets the Tid associated with name.
+
+    Params:
+        name = The name to locate within the registry.
+
+    Returns:
+        The associated Tid or Tid.init if name is not registered.
+
+*******************************************************************************/
+
+Tid locate (string name)
+{
+    synchronized (registryLock)
+    {
+        if (auto tid = name in tidByName)
+            return *tid;
+        return Tid.init;
+    }
+}
+
 
 private @property shared(Mutex) initOnceLock ()
 {

@@ -2211,7 +2211,7 @@ private
         }
 
     private:
-    
+
         // Routines involving local data only, no lock needed.
         bool mboxFull() @safe @nogc pure nothrow
         {

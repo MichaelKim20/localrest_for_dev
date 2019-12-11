@@ -7,7 +7,6 @@ import core.thread;
 import std.datetime.systime;
 import std.variant;
 import C=geod24.concurrency;
-import geod24.LocalRest;
 
 class Michael
 {
@@ -33,7 +32,7 @@ void mtest()
 
 void main()
 {
-    u0();
+    mtest();
 }
 
 void bug1()
