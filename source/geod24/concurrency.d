@@ -759,12 +759,18 @@ private void _send (T...) (MsgType type, Tid tid, T vals)
 {
     auto msg = Message(type, vals);
     if (Fiber.getThis())
+    {
+        writefln("_send 1 %s in", vals);
         tid.mbox.put(msg);
+    }
     else
+    {
+        writefln("_send 2 %s in", vals);
         spawnInheritedFiber(
         {
             tid.mbox.put(msg);
         });
+    }
 }
 
 /*******************************************************************************

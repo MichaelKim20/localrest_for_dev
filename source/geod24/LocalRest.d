@@ -410,11 +410,18 @@ public final class RemoteAPI (API) : API
 
                         static if (!is(ReturnType!ovrld == void))
                         {
+                            writefln("handleCommand in 1");
+                            writefln("handleCommand in 1 %%s", cmd);
+                            node.pubkey();
+                            writefln("handleCommand in 2");
+                            //auto r2 = res.serializeToJsonString();
+                            writefln("handleCommand in 3");
                             C.send(cmd.sender,
                                 Response(
                                     Status.Success,
                                     cmd.id,
-                                    node.%1$s(args.args).serializeToJsonString()));
+                                    r2));
+                            writefln("handleCommand out");
                         }
                         else
                         {
@@ -493,13 +500,18 @@ public final class RemoteAPI (API) : API
                 && Clock.currTime < control.sleep_until;
         }
 
+        LocalNodeScheduler node_schedule = cast(LocalNodeScheduler)C.thisScheduler;
+
         void handle (T)(T arg)
         {
-            LocalNodeScheduler node_schedule = cast(LocalNodeScheduler)C.thisScheduler;
+            //LocalNodeScheduler node_schedule = cast(LocalNodeScheduler)C.thisScheduler;
 
             static if (is(T == Command))
             {
-                node_schedule.spawn(() => handleCommand(arg, node, control.filter));
+                writefln("handle in");
+                node_schedule.spawn({
+                    handleCommand(arg, node, control.filter);
+                });
             }
             else static if (is(T == Response))
             {
@@ -511,60 +523,65 @@ public final class RemoteAPI (API) : API
         }
 
         try
-        {
-            bool terminated = false;
-            while (!terminated)
-            {
-                C.receiveTimeout(10.msecs,
-                    (C.OwnerTerminated e)
-                    {
-                        terminated = true;
-                    },
-                    (ShutdownCommand e)
-                    {
-                        terminated = true;
-                    },
-                    (TimeCommand s)
-                    {
-                        control.sleep_until = Clock.currTime + s.dur;
-                        control.drop = s.drop;
-                    },
-                    (FilterAPI filter_api)
-                    {
-                        control.filter = filter_api;
-                    },
-                    (Response res)
-                    {
-                        if (!isSleeping())
-                            handle(res);
-                        else if (!control.drop)
-                            C.thisScheduler.spawn({
-                                while (isSleeping())
-                                    C.thisScheduler.yield();
+            node_schedule.spawn({
+                bool terminated = false;
+                while (!terminated)
+                {
+                    C.receiveTimeout(10.msecs,
+                        (C.OwnerTerminated e)
+                        {
+                            terminated = true;
+                        },
+                        (ShutdownCommand e)
+                        {
+                            terminated = true;
+                        },
+                        (TimeCommand s)
+                        {
+                            control.sleep_until = Clock.currTime + s.dur;
+                            control.drop = s.drop;
+                        },
+                        (FilterAPI filter_api)
+                        {
+                            control.filter = filter_api;
+                        },
+                        (Response res)
+                        {
+                            writefln("Response %s out", res);
+                            if (!isSleeping())
                                 handle(res);
-                            });
-                    },
-                    (Command cmd)
-                    {
-                        if (!isSleeping())
-                            handle(cmd);
-                        else if (!control.drop)
-                            C.thisScheduler.spawn({
-                                while (isSleeping())
-                                    C.thisScheduler.yield();
+                            else if (!control.drop)
+                                node_schedule.spawn({
+                                    while (isSleeping())
+                                        node_schedule.yield();
+                                    handle(res);
+                                });
+                        },
+                        (Command cmd)
+                        {
+                            writefln("Command %s in", cmd);
+                            if (!isSleeping())
                                 handle(cmd);
-                            });
+                            else if (!control.drop)
+                                node_schedule.spawn({
+                                    while (isSleeping())
+                                        node_schedule.yield();
+                                    handle(cmd);
+                                });
+                            writefln("Command %s out", cmd);
 
-                    });
-            }
-            // Make sure the scheduler is not waiting for polling tasks
-            throw exc;
-        }
+                        });
+                        C.sleepThread(1.msecs);
+                }
+                C.ThreadInfo.thisInfo.cleanup(true);
+                // Make sure the scheduler is not waiting for polling tasks
+                throw exc;
+            });
         catch (Exception e)
             if (e !is exc)
                 throw e;
 
-        C.ThreadInfo.thisInfo.cleanup(true);
+        //C.ThreadInfo.thisInfo.cleanup(true);
     }
 
     /// Where to send message to
@@ -794,6 +811,7 @@ public final class RemoteAPI (API) : API
 
                             bool terminated = false;
                             main_scheduler.spawn(() {
+                                writefln("%s in", member);
                                 while (!terminated)
                                 {
                                     C.receiveTimeout(10.msecs,
@@ -803,6 +821,7 @@ public final class RemoteAPI (API) : API
                                         });
                                     main_scheduler.yield();
                                 }
+                                writefln("%s out", member);
                             });
 
                             Response res;
@@ -860,7 +879,9 @@ unittest
     {
         @safe:
         public override @property ulong pubkey ()
-        { return 42; }
+        {
+            return 42;
+        }
         public override Json getValue (ulong idx)
         { assert(0); }
         public override Json getQuorumSet ()
@@ -873,7 +894,7 @@ unittest
     assert(test.pubkey() == 42);
     test.ctrl.shutdown();
 }
-
+/*
 /// In a real world usage, users will most likely need to use the registry
 unittest
 {
@@ -963,7 +984,7 @@ unittest
     // Make sure our main thread terminates after everyone else
     //geod24.concurrency.receive((int val) {});
 }
-
+*/
 /*
 /// This network have different types of nodes in it
 unittest
@@ -1097,7 +1118,7 @@ unittest
     nodes.each!(node => node.ctrl.shutdown());
     writefln("test4");
 }
-*/
+
 
 /// Nodes can start tasks
 unittest
@@ -1149,7 +1170,7 @@ unittest
     assert(node.getCounter() == 1);
     assert(node.getCounter() == 0);
     writefln("test5 - 3");
-    sleep(1.seconds);
+    Thread.sleep(1.seconds);
     writefln("test5 - 4");
     // It should be 19 but some machines are very slow
     // (e.g. Travis Mac testers) so be safe
@@ -1159,7 +1180,7 @@ unittest
     writefln("test5 - 6");
     node.ctrl.shutdown();
     writefln("test5");
-}
+}*/
 /*
 // Sane name insurance policy
 unittest
