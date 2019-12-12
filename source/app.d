@@ -11,6 +11,12 @@ import std.variant;
 
 void main()
 {
+    test1();
+}
+
+void test1()
+{
+    writeln("test1");
     static interface API
     {
         @safe:
@@ -33,13 +39,9 @@ void main()
         { assert(0); }
     }
 
-    import std.stdio;
-
-    writeln("start");
     scope test = RemoteAPI!API.spawn!MockAPI();
-    writeln("pubkey");
-    ulong v;
-    v = test.pubkey();
-    writeln("end");
+    assert(test.pubkey() == 42);
+
     test.ctrl.shutdown();
+    writeln("test1");
 }
