@@ -410,18 +410,11 @@ public final class RemoteAPI (API) : API
 
                         static if (!is(ReturnType!ovrld == void))
                         {
-                            writefln("handleCommand in 1");
-                            writefln("handleCommand in 1 %%s", cmd);
-                            node.pubkey();
-                            writefln("handleCommand in 2");
-                            //auto r2 = res.serializeToJsonString();
-                            writefln("handleCommand in 3");
                             C.send(cmd.sender,
                                 Response(
                                     Status.Success,
                                     cmd.id,
-                                    r2));
-                            writefln("handleCommand out");
+                                    node.%1$s(args.args).serializeToJsonString()));
                         }
                         else
                         {
@@ -504,11 +497,8 @@ public final class RemoteAPI (API) : API
 
         void handle (T)(T arg)
         {
-            //LocalNodeScheduler node_schedule = cast(LocalNodeScheduler)C.thisScheduler;
-
             static if (is(T == Command))
             {
-                writefln("handle in");
                 node_schedule.spawn({
                     handleCommand(arg, node, control.filter);
                 });
@@ -522,8 +512,11 @@ public final class RemoteAPI (API) : API
             else static assert(0, "Unhandled type: " ~ T.stringof);
         }
 
+        auto spawn_tid = C.thisTid;
+        auto owner_tid = C.ownerTid;
+        auto spawn_scheduler = C.thisScheduler;
         try
-            node_schedule.spawn({
+            {
                 bool terminated = false;
                 while (!terminated)
                 {
@@ -547,7 +540,6 @@ public final class RemoteAPI (API) : API
                         },
                         (Response res)
                         {
-                            writefln("Response %s out", res);
                             if (!isSleeping())
                                 handle(res);
                             else if (!control.drop)
@@ -559,7 +551,6 @@ public final class RemoteAPI (API) : API
                         },
                         (Command cmd)
                         {
-                            writefln("Command %s in", cmd);
                             if (!isSleeping())
                                 handle(cmd);
                             else if (!control.drop)
@@ -568,20 +559,15 @@ public final class RemoteAPI (API) : API
                                         node_schedule.yield();
                                     handle(cmd);
                                 });
-                            writefln("Command %s out", cmd);
-
                         });
                         C.sleepThread(1.msecs);
                 }
-                C.ThreadInfo.thisInfo.cleanup(true);
                 // Make sure the scheduler is not waiting for polling tasks
-                throw exc;
-            });
+            }
         catch (Exception e)
             if (e !is exc)
                 throw e;
-
-        //C.ThreadInfo.thisInfo.cleanup(true);
+        C.ThreadInfo.thisInfo.cleanup(true);
     }
 
     /// Where to send message to
@@ -811,7 +797,6 @@ public final class RemoteAPI (API) : API
 
                             bool terminated = false;
                             main_scheduler.spawn(() {
-                                writefln("%s in", member);
                                 while (!terminated)
                                 {
                                     C.receiveTimeout(10.msecs,
@@ -821,7 +806,6 @@ public final class RemoteAPI (API) : API
                                         });
                                     main_scheduler.yield();
                                 }
-                                writefln("%s out", member);
                             });
 
                             Response res;
@@ -849,6 +833,8 @@ public final class RemoteAPI (API) : API
                     else
                         assert(0, "Not expected Scheduler instance.");
 
+                    writefln("Response %s", res);
+
                     if (res.status == Status.Failed)
                         throw new Exception(res.data);
 
@@ -861,7 +847,7 @@ public final class RemoteAPI (API) : API
                 });
         }
 }
-
+/*
 /// Simple usage example
 unittest
 {
@@ -893,8 +879,9 @@ unittest
     scope test = RemoteAPI!API.spawn!MockAPI();
     assert(test.pubkey() == 42);
     test.ctrl.shutdown();
+    writefln("test2");
 }
-/*
+*/
 /// In a real world usage, users will most likely need to use the registry
 unittest
 {
@@ -980,11 +967,11 @@ unittest
         geod24.concurrency.send(parent, 42);
     }
 
-    //auto testerFiber = geod24.concurrency.spawn(&testFunc, geod24.concurrency.thisTid);
+    auto testerFiber = geod24.concurrency.spawn(&testFunc, geod24.concurrency.thisTid);
     // Make sure our main thread terminates after everyone else
-    //geod24.concurrency.receive((int val) {});
+    geod24.concurrency.receive((int val) {});
 }
-*/
+
 /*
 /// This network have different types of nodes in it
 unittest
@@ -1118,14 +1105,17 @@ unittest
     nodes.each!(node => node.ctrl.shutdown());
     writefln("test4");
 }
+*/
 
-
+/*
 /// Nodes can start tasks
 unittest
 {
     writefln("test5");
     static import core.thread;
     import core.time;
+    import core.sync.mutex;
+    import std.process;
 
     static interface API
     {
@@ -1135,16 +1125,24 @@ unittest
 
     static class Node : API
     {
+        public this ()
+        {
+            this.m = new Mutex();
+        }
         public override void start ()
         {
-            writefln("%s", C.thisScheduler);
+            writefln("%s %s", thisThreadID(),  C.thisScheduler);
             runTask(&this.task);
         }
 
         public override ulong getCounter ()
         {
-            writefln("getCounter -- %s %s", this.counter, C.thisScheduler);
-            scope (exit) this.counter = 0;
+            this.m.lock;
+            scope (exit) {
+                this.counter = 0;
+                this.m.unlock;
+            }
+            writefln("%s getCounter -- %s %s", thisThreadID(), this.counter, C.thisScheduler);
             return this.counter;
         }
 
@@ -1152,13 +1150,19 @@ unittest
         {
             while (true)
             {
+                //writefln("tasktasktask %s %s", thisThreadID(),  C.thisScheduler);
+                this.m.lock;
                 //writefln("%s %s", this.counter, C.thisScheduler);
                 this.counter++;
                 sleep(50.msecs);
+                //Thread.sleep(100.msecs);
+                this.m.unlock;
+                C.thisScheduler.yield();
             }
         }
 
         private ulong counter;
+        private Mutex m;
     }
 
     import std.format;
@@ -1169,25 +1173,27 @@ unittest
     writefln("test5 - 2");
     assert(node.getCounter() == 1);
     assert(node.getCounter() == 0);
-    writefln("test5 - 3");
+    writefln("test5 - 3 - %s", thisThreadID);
     Thread.sleep(1.seconds);
     writefln("test5 - 4");
     // It should be 19 but some machines are very slow
     // (e.g. Travis Mac testers) so be safe
-    assert(node.getCounter() >= 9);
+    assert(node.getCounter() == 1);
     writefln("test5 - 5");
     assert(node.getCounter() == 0);
     writefln("test5 - 6");
     node.ctrl.shutdown();
     writefln("test5");
-}*/
+}
+*/
+
 /*
 // Sane name insurance policy
 unittest
 {
     import geod24.concurrency : Tid;
 
-    static interface API
+    static interface APIxw
     {
         public ulong tid ();
     }

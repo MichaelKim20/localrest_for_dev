@@ -634,6 +634,7 @@ if (isSpawnable!(F, T))
             thisInfo.is_inherited = true;
             fn(args);
         });
+
     }
     thisInfo.links[spawn_tid] = linked;
 
@@ -760,12 +761,10 @@ private void _send (T...) (MsgType type, Tid tid, T vals)
     auto msg = Message(type, vals);
     if (Fiber.getThis())
     {
-        writefln("_send 1 %s in", vals);
         tid.mbox.put(msg);
     }
     else
     {
-        writefln("_send 2 %s in", vals);
         spawnInheritedFiber(
         {
             tid.mbox.put(msg);
@@ -1019,7 +1018,6 @@ public struct ThreadInfo
 
         if (!this.is_inherited)
         {
-
             foreach (tid; links.keys)
                 _send(MsgType.linkDead, tid, ident);
 
