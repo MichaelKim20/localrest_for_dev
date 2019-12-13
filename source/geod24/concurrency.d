@@ -1512,7 +1512,7 @@ public class NodeScheduler : FiberScheduler
     /// Ctor
     public this ()
     {
-        this.sleep_interval = 1.msecs;
+        this.sleep_interval = 10.msecs;
         this.m = new Mutex();
         this.terminated = false;
         this.stoped = false;
@@ -1528,7 +1528,9 @@ public class NodeScheduler : FiberScheduler
 
     override public void start (void delegate () op)
     {
+        writeln("NodeScheduler create");
         create(op);
+        writeln("NodeScheduler dispatch");
         dispatch();
     }
 
@@ -1584,6 +1586,7 @@ public class NodeScheduler : FiberScheduler
                 {
                     m_pos = 0;
                 }
+                //writefln("m_fibers.length :  %s  %s", m_fibers.length, m_pos);
             }
             done = terminated || (m_fibers.length == 0);
             if (!done && terminated)
@@ -1593,7 +1596,7 @@ public class NodeScheduler : FiberScheduler
                     done = true;
             }
             m.unlock();
-            sleepThread(this.sleep_interval);
+            //sleepThread(this.sleep_interval);
         }
         this.stoped = true;
     }
@@ -1615,7 +1618,6 @@ public class NodeScheduler : FiberScheduler
             }
             op();
         }
-
         m.lock_nothrow();
         m_fibers ~= new InfoFiber(&wrap);
         m.unlock_nothrow();
@@ -1642,7 +1644,7 @@ public class MainScheduler : FiberScheduler
     /// Ctor
     public this ()
     {
-        this.sleep_interval = 1.msecs;
+        this.sleep_interval = 10.msecs;
         this.m = new Mutex();
         this.terminated = false;
         this.stoped = false;
@@ -1730,7 +1732,7 @@ public class MainScheduler : FiberScheduler
                     done = true;
             }
             m.unlock();
-            sleepThread(this.sleep_interval);
+            //sleepThread(this.sleep_interval);
         }
         this.stoped = true;
     }
@@ -1820,6 +1822,12 @@ void yieldAndSleep ()
 void sleepThread (Duration val)
 {
     Thread.sleep(val);
+}
+
+void sleep (Duration timeout)
+{
+    scope condition = thisScheduler.newCondition(null);
+    condition.wait(timeout);
 }
 
 /*******************************************************************************
@@ -1914,6 +1922,7 @@ private class MessageBox
 
             this.mutex.unlock();
 
+            //writefln("msg put 1 %s", msg);
             return true;
         }
 
@@ -1927,6 +1936,7 @@ private class MessageBox
             new_sf.msg = msg;
             new_sf.swdg = &stopWait1;
             new_sf.create_time = MonoTime.currTime;
+            //writefln("msg put 2 %s", msg);
 
             this.sendq.insertBack(new_sf);
             this.mutex.unlock();
@@ -1952,13 +1962,13 @@ private class MessageBox
                         return false;
                     }
 
-                    yieldAndSleep();
+                    yield();
                 }
             }
             else
             {
                 while (is_waiting)
-                    yieldAndSleep();
+                    yield();
             }
         }
 
@@ -2036,8 +2046,6 @@ private class MessageBox
             Duration interval;
             if (this.timed_wait)
                 interval = this.timed_wait_period;
-            else
-                interval = 1.msecs;
 
             while (is_waiting1)
             {
@@ -2048,7 +2056,7 @@ private class MessageBox
                     is_waiting1 = true;
                     break;
                 }
-                yieldAndSleep();
+                yield();
             }
 
             if (this.timed_wait)
@@ -2198,6 +2206,13 @@ private class MessageBox
             return false;
         }
 
+        bool isExistDataInQueue ()
+        {
+            this.mutex.lock();
+            scope(exit) this.mutex.unlock();
+            return ((this.sendq[].walkLength > 0) || (this.recvq[].walkLength > 0));
+        }
+
         Message msg;
         while (true)
         {
@@ -2205,15 +2220,21 @@ private class MessageBox
             if (scan(this.localBox))
                 return true;
 
-            yieldAndSleep();
+            if (!isExistDataInQueue())
+            {
+                sleep(5.msecs);
+                continue;
+            }
 
             auto res = this.getMessage(&msg);
+
             if (res == ResultGetMessage.close)
                 return false;
 
             if (res == ResultGetMessage.yet)
                 continue;
 
+            //writefln("msg get %s", msg);
             arrived.put(msg);
             if (scan(arrived))
             {
@@ -2247,7 +2268,7 @@ private class MessageBox
                 !period.isNegative;
                 period = limit - MonoTime.currTime)
             {
-                yieldAndSleep();
+                yield();
             }
         }
     }
