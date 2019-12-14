@@ -1,19 +1,19 @@
 module test;
 
 import vibe.data.json;
-import geod24.LocalRest;
-static import C = geod24.concurrency;
 import std.stdio;
 import core.sync.mutex;
 import core.thread;
 import std.datetime.systime;
 import std.variant;
-
+import geod24.LocalRest;
+import geod24.MessageDispatcher;
 
 void main()
 {
     test1();
-   // test4();
+    test5();
+    test4();
     test5();
 }
 
@@ -49,105 +49,12 @@ void test1()
     writeln("test1");
 }
 
-/// In a real world usage, users will most likely need to use the registry
-void test2()
-{
-    writefln("test2");
-    import std.conv;
-    static import geod24.concurrency;
-    import geod24.Registry;
-
-    __gshared Registry registry;
-
-    registry.initialize();
-
-    static interface API
-    {
-        @safe:
-        public @property ulong pubkey ();
-        public Json getValue (ulong idx);
-        public string recv (Json data);
-        public string recv (ulong index, Json data);
-
-        public string last ();
-    }
-
-    static class Node : API
-    {
-        @safe:
-        public this (bool isByzantine) { this.isByzantine = isByzantine; }
-        public override @property ulong pubkey ()
-        { lastCall = `pubkey`; return this.isByzantine ? 0 : 42; }
-        public override Json getValue (ulong idx)
-        { lastCall = `getValue`; return Json.init; }
-        public override string recv (Json data)
-        { lastCall = `recv@1`; return null; }
-        public override string recv (ulong index, Json data)
-        { lastCall = `recv@2`; return null; }
-
-        public override string last () { return this.lastCall; }
-
-        private bool isByzantine;
-        private string lastCall;
-    }
-
-    static RemoteAPI!API factory (string type, ulong hash)
-    {
-        const name = hash.to!string;
-        auto tid = registry.locate(name);
-        if (tid != tid.init)
-            return new RemoteAPI!API(tid);
-
-        switch (type)
-        {
-        case "normal":
-            auto ret =  RemoteAPI!API.spawn!Node(false);
-            registry.register(name, ret.tid());
-            return ret;
-        case "byzantine":
-            auto ret =  RemoteAPI!API.spawn!Node(true);
-            registry.register(name, ret.tid());
-            return ret;
-        default:
-            assert(0, type);
-        }
-    }
-
-    auto node1 = factory("normal", 1);
-    auto node2 = factory("byzantine", 2);
-
-    auto parent = C.thisTid;
-    void testFunc()
-    {
-        auto node1 = factory("this does not matter", 1);
-        auto node2 = factory("neither does this", 2);
-        assert(node1.pubkey() == 42);
-        assert(node1.last() == "pubkey");
-        assert(node2.pubkey() == 0);
-        assert(node2.last() == "pubkey");
-
-        node1.recv(42, Json.init);
-        assert(node1.last() == "recv@2");
-        node1.recv(Json.init);
-        assert(node1.last() == "recv@1");
-        assert(node2.last() == "pubkey");
-        node1.ctrl.shutdown();
-        node2.ctrl.shutdown();
-        //geod24.concurrency.send(parent, 42);
-    }
-
-    auto testerFiber = C.spawnFiber(&testFunc);
-    // Make sure our main thread terminates after everyone else
-    //geod24.concurrency.receive((int val) {});
-}
-
 void test4()
 {
     writefln("test4");
-    static import geod24.concurrency;
     import std.format;
 
-    __gshared C.Tid[string] tbn;
+    __gshared MessageDispatcher[string] tbn;
 
     static interface API
     {
@@ -228,7 +135,7 @@ void test5()
             while (true)
             {
                 this.counter++;
-                sleep(50.msecs);
+                geod24.MessageDispatcher.sleep(50.msecs);
             }
         }
 
@@ -245,6 +152,8 @@ void test5()
     assert(node.getCounter() == 1);
     assert(node.getCounter() == 0);
     writefln("test5 - 3 - %s", thisThreadID);
+    //auto cond = C.thisScheduler.newCondition(null);
+    //cond.wait(1.seconds);
     Thread.sleep(1.seconds);
     writefln("test5 - 4 - %s", thisThreadID);
     // It should be 19 but some machines are very slow
@@ -252,7 +161,10 @@ void test5()
     assert(node.getCounter() >= 9);
     writefln("test5 - 5");
     assert(node.getCounter() == 0);
-    writefln("test5 - 6");
+    //writefln("test5 - 6");
     node.ctrl.shutdown();
     writefln("test5");
+    //thisInfo.cleanup();
+
+    //Thread.sleep(5000.msecs);
 }

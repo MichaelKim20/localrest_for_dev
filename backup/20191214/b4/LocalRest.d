@@ -80,7 +80,7 @@ module geod24.LocalRest;
 
 import vibe.data.json;
 
-static import C = geod24.concurrency;
+static import C = geod24.MessageDispatcher;
 import std.meta : AliasSeq;
 import std.traits : Parameters, ReturnType;
 import core.atomic;
@@ -88,12 +88,13 @@ import core.thread;
 import core.time;
 
 import std.stdio;
+import std.process;
 
 /// Data sent by the caller
 private struct Command
 {
     /// Tid of the sender thread (cannot be JSON serialized)
-    C.Tid sender;
+    C.MessageDispatcher sender;
     /// In order to support re-entrancy, every request contains an id
     /// which should be copied in the `Response`
     /// Initialized to `size_t.max` so not setting it crashes the program
@@ -353,7 +354,7 @@ public final class RemoteAPI (API) : API
             C.main_thread_scheduler = new LocalMainScheduler();
 
         auto scheduler = new LocalNodeScheduler();
-        auto childTid = C.spawnThread(scheduler, &spawned!(Impl), args);
+        auto childTid = C.spawnThreadScheduler(scheduler, &spawned!(Impl), args);
         return new RemoteAPI(childTid, true, timeout);
     }
 
@@ -398,7 +399,7 @@ public final class RemoteAPI (API) : API
                         {
                             // we have to send back a message
                             import std.format;
-                            C.send(cmd.sender, Response(Status.Failed, cmd.id,
+                            cmd.sender.send(Response(Status.Failed, cmd.id,
                                 format("Filtered method '%%s'", filter.pretty_func)));
                             return;
                         }
@@ -407,7 +408,7 @@ public final class RemoteAPI (API) : API
 
                         static if (!is(ReturnType!ovrld == void))
                         {
-                            C.send(cmd.sender,
+                            cmd.sender.send(
                                 Response(
                                     Status.Success,
                                     cmd.id,
@@ -416,13 +417,13 @@ public final class RemoteAPI (API) : API
                         else
                         {
                             node.%1$s(args.args);
-                            C.send(cmd.sender, Response(Status.Success, cmd.id));
+                            cmd.sender.send(Response(Status.Success, cmd.id));
                         }
                     }
                     catch (Throwable t)
                     {
                         // Our sender expects a response
-                        C.send(cmd.sender, Response(Status.Failed, cmd.id, t.toString()));
+                        cmd.sender.send(Response(Status.Failed, cmd.id, t.toString()));
                     }
 
                     return;
@@ -514,7 +515,7 @@ public final class RemoteAPI (API) : API
                 bool terminated = false;
                 while (!terminated)
                 {
-                    C.receiveTimeout(10.msecs,
+                    C.thisMessageDispatcher.receiveTimeout(10.msecs,
                         (C.OwnerTerminated e)
                         {
                             terminated = true;
@@ -562,15 +563,18 @@ public final class RemoteAPI (API) : API
                         });
                         node_scheduler.yield();
                 }
-                writefln("Exit  %s", node_scheduler);
+                writefln("%s Exit 1  %s", thisThreadID(), node_scheduler);
+                //C.thisInfo.cleanup(true);
+                // Make sure the scheduler is not waiting for polling tasks
             }
         catch (Exception e)
             if (e !is exc)
                 throw e;
+        writefln("%s Exit 2  %s", thisThreadID(), node_scheduler);
     }
 
     /// Where to send message to
-    private C.Tid childTid;
+    private C.MessageDispatcher childTid;
 
     /// Whether or not the destructor should destroy the thread
     private bool owner;
@@ -595,13 +599,13 @@ public final class RemoteAPI (API) : API
 
     ***************************************************************************/
 
-    public this (C.Tid tid, Duration timeout = Duration.init) @nogc pure nothrow
+    public this (C.MessageDispatcher tid, Duration timeout = Duration.init) @nogc pure nothrow
     {
         this(tid, false, timeout);
     }
 
     /// Private overload used by `spawn`
-    private this (C.Tid tid, bool isOwner, Duration timeout) @nogc pure nothrow
+    private this (C.MessageDispatcher tid, bool isOwner, Duration timeout) @nogc pure nothrow
     {
         this.childTid = tid;
         this.owner = isOwner;
@@ -635,7 +639,7 @@ public final class RemoteAPI (API) : API
 
         ***********************************************************************/
 
-        public C.Tid tid () @nogc pure nothrow
+        public C.MessageDispatcher tid () @nogc pure nothrow
         {
             return this.childTid;
         }
@@ -648,7 +652,7 @@ public final class RemoteAPI (API) : API
 
         public void shutdown () @trusted
         {
-            C.send(this.childTid, ShutdownCommand());
+            this.childTid.send(ShutdownCommand());
             this.childTid.shutdown = true;
         }
 
@@ -670,7 +674,7 @@ public final class RemoteAPI (API) : API
 
         public void sleep (Duration d, bool dropMessages = false) @trusted
         {
-            C.send(this.childTid, TimeCommand(d, dropMessages));
+            this.childTid.send(TimeCommand(d, dropMessages));
         }
 
         /***********************************************************************
@@ -751,7 +755,7 @@ public final class RemoteAPI (API) : API
                 enum mangled = getBestMatch!Overloads;
             }
 
-            C.send(this.childTid, FilterAPI(mangled, pretty));
+            this.childTid.send(FilterAPI(mangled, pretty));
         }
 
 
@@ -763,7 +767,7 @@ public final class RemoteAPI (API) : API
 
         public void clearFilter () @trusted
         {
-            C.send(this.childTid, FilterAPI(""));
+            this.childTid.send(FilterAPI(""));
         }
     }
 
@@ -790,15 +794,15 @@ public final class RemoteAPI (API) : API
                             auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                                 .serializeToJsonString();
 
-                            Command command = Command(C.thisTid(), main_scheduler.getNextResponseId(), ovrld.mangleof, serialized);
-                            C.send(this.childTid, command);
+                            Command command = Command(C.thisMessageDispatcher(), main_scheduler.getNextResponseId(), ovrld.mangleof, serialized);
+                            this.childTid.send(command);
                             writefln("send1 %s", command);
 
                             shared(int) terminated = 0;
                             main_scheduler.spawn(() {
                                 while (!atomicLoad(terminated))
                                 {
-                                    C.receiveTimeout(10.msecs,
+                                    C.thisMessageDispatcher.receiveTimeout(10.msecs,
                                         (Response res) {
                                             writefln("receive1 %s", res);
                                             main_scheduler.pending = res;
@@ -823,8 +827,8 @@ public final class RemoteAPI (API) : API
                         res = () @trusted {
                             auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                                 .serializeToJsonString();
-                            Command command = Command(C.thisTid(), node_scheduler.getNextResponseId(), ovrld.mangleof, serialized);
-                            C.send(this.childTid, command);
+                            Command command = Command(C.thisMessageDispatcher(), node_scheduler.getNextResponseId(), ovrld.mangleof, serialized);
+                            this.childTid.send(command);
                             return node_scheduler.waitResponse(command.id, this.timeout);
                         }();
                     }
@@ -1196,7 +1200,7 @@ unittest
 }
 /**/
 
-
+/*
 // Sane name insurance policy
 unittest
 {
@@ -1295,6 +1299,7 @@ unittest
     n1.ctrl.shutdown();
     n2.ctrl.shutdown();
 }
+*/
 /*
 // Filter commands
 unittest

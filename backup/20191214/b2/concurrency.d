@@ -619,6 +619,7 @@ if (isSpawnable!(F, T))
         thisInfo.scheduler = spawn_scheduler;
         thisInfo.have_scheduler = true;
         thisInfo.is_inherited = false;
+        auto ownerInfo = thisInfo;
 
         thisInfo.scheduler.start({
             thisInfo.ident = spawn_tid;
@@ -626,6 +627,7 @@ if (isSpawnable!(F, T))
             thisInfo.scheduler = spawn_scheduler;
             thisInfo.have_scheduler = false;
             thisInfo.is_inherited = true;
+            scope (exit) ownerInfo.cleanup();
             fn(args);
         });
 
@@ -1088,6 +1090,7 @@ public struct ThreadInfo
 
     /// Whether to clone ThreadInfo in a higher layer
     public bool is_inherited;
+    public bool already_cleanup;
 
     /***************************************************************************
 
@@ -1120,8 +1123,9 @@ public struct ThreadInfo
         if (this.ident == Tid.init)
             return;
 
-        if (!this.is_inherited)
+        if (!this.is_inherited && !this.already_cleanup)
         {
+            this.already_cleanup = true;
             writefln("cleanup %s", this);
             foreach (tid; links.keys)
             {
@@ -1657,7 +1661,7 @@ public class NodeScheduler : FiberScheduler
         terminated = true;
         terminated_time = MonoTime.currTime;
         while (!this.stoped)
-            sleepThread(100.msecs);
+            sleep(100.msecs);
         op();
     }
 
@@ -1693,7 +1697,7 @@ public class NodeScheduler : FiberScheduler
                     m_pos = 0;
                 }
             }
-            done = terminated || (m_fibers.length == 0);
+            done = terminated && (m_fibers.length == 0);
             if (!done && terminated)
             {
                 auto elapsed = MonoTime.currTime - terminated_time;
@@ -1797,7 +1801,7 @@ public class MainScheduler : FiberScheduler
         terminated = true;
         terminated_time = MonoTime.currTime;
         while (!this.stoped)
-            sleepThread(100.msecs);
+            sleep(100.msecs);
         op();
     }
 
