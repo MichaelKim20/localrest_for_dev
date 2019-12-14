@@ -83,7 +83,7 @@ import vibe.data.json;
 static import C = geod24.concurrency;
 import std.meta : AliasSeq;
 import std.traits : Parameters, ReturnType;
-import core.atomic;
+
 import core.thread;
 import core.time;
 
@@ -509,6 +509,9 @@ public final class RemoteAPI (API) : API
             else static assert(0, "Unhandled type: " ~ T.stringof);
         }
 
+        auto spawn_tid = C.thisTid;
+        auto owner_tid = C.ownerTid;
+        auto spawn_scheduler = C.thisScheduler;
         try
             {
                 bool terminated = false;
@@ -518,12 +521,10 @@ public final class RemoteAPI (API) : API
                         (C.OwnerTerminated e)
                         {
                             terminated = true;
-                            writefln("R OwnerTerminated %s", e);
                         },
                         (ShutdownCommand e)
                         {
                             terminated = true;
-                            writefln("R ShutdownCommand %s", e);
                         },
                         (TimeCommand s)
                         {
@@ -549,7 +550,7 @@ public final class RemoteAPI (API) : API
                         },
                         (Command cmd)
                         {
-                           writefln("IN Command %s", cmd);
+                            writefln("IN Command %s", cmd);
                             if (!isSleeping())
                                 handle(cmd);
                             else if (!control.drop)
@@ -562,7 +563,6 @@ public final class RemoteAPI (API) : API
                         });
                         node_scheduler.yield();
                 }
-                writefln("Exit  %s", node_scheduler);
                 C.ThreadInfo.thisInfo.cleanup(true);
                 // Make sure the scheduler is not waiting for polling tasks
             }
@@ -793,12 +793,12 @@ public final class RemoteAPI (API) : API
                                 .serializeToJsonString();
 
                             Command command = Command(C.thisTid(), main_scheduler.getNextResponseId(), ovrld.mangleof, serialized);
-                            C.send(this.childTid, command);
                             writefln("send1 %s", command);
+                            C.send(this.childTid, command);
 
-                            shared(int) terminated = 0;
+                            bool terminated = false;
                             main_scheduler.spawn(() {
-                                while (!atomicLoad(terminated))
+                                while (!terminated)
                                 {
                                     C.receiveTimeout(10.msecs,
                                         (Response res) {
@@ -813,9 +813,10 @@ public final class RemoteAPI (API) : API
                             Response res;
                             main_scheduler.spawn(() {
                                 res = main_scheduler.waitResponse(command.id, this.timeout);
-                                terminated.atomicOp!"+="(1);
+                                //writefln("receive1 %s", res);
+                                terminated = true;
                             });
-                            while (!atomicLoad(terminated)) Thread.sleep(1.msecs);
+                            while (!terminated) Thread.sleep(1.msecs);
                             return res;
                         }();
                     }
@@ -825,13 +826,18 @@ public final class RemoteAPI (API) : API
                         res = () @trusted {
                             auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                                 .serializeToJsonString();
+
                             Command command = Command(C.thisTid(), node_scheduler.getNextResponseId(), ovrld.mangleof, serialized);
+                            writefln("send2 %s", command);
                             C.send(this.childTid, command);
+
                             return node_scheduler.waitResponse(command.id, this.timeout);
                         }();
                     }
                     else
                         assert(0, "Not expected Scheduler instance.");
+
+                    //writefln("Response %s", res);
 
                     if (res.status == Status.Failed)
                         throw new Exception(res.data);
@@ -889,7 +895,6 @@ unittest
     import geod24.Registry;
 
     __gshared Registry registry;
-
     registry.initialize();
 
     static interface API
@@ -970,7 +975,8 @@ unittest
     // Make sure our main thread terminates after everyone else
     geod24.concurrency.receive((int val) {});
 }
-
+*/
+/*
 /// This network have different types of nodes in it
 unittest
 {
@@ -1104,7 +1110,8 @@ unittest
     writefln("test4");
 }
 */
-/*
+
+
 /// Nodes can start tasks
 unittest
 {
@@ -1198,14 +1205,13 @@ unittest
 }
 /**/
 
-
+/*
 // Sane name insurance policy
 unittest
 {
-    writefln("test6");
     import geod24.concurrency : Tid;
 
-    static interface API
+    static interface APIxw
     {
         public ulong tid ();
     }
@@ -1230,7 +1236,6 @@ unittest
 // Simulate temporary outage
 unittest
 {
-    writefln("test7");
     __gshared C.Tid n1tid;
 
     static interface API
@@ -1278,8 +1283,8 @@ unittest
     assert(current4 - current2 >= 1.seconds);
 
     // Now drop many messages
-    n1.sleep(3.seconds, true);
-    for (size_t i = 0; i < 100; i++)
+    n1.sleep(1.seconds, true);
+    for (size_t i = 0; i < 500; i++)
         n2.asyncCall();
     // Make sure we don't end up blocked forever
     Thread.sleep(1.seconds);
@@ -1297,7 +1302,7 @@ unittest
     n1.ctrl.shutdown();
     n2.ctrl.shutdown();
 }
-/*
+
 // Filter commands
 unittest
 {

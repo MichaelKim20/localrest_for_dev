@@ -83,7 +83,7 @@ import vibe.data.json;
 static import C = geod24.concurrency;
 import std.meta : AliasSeq;
 import std.traits : Parameters, ReturnType;
-import core.atomic;
+
 import core.thread;
 import core.time;
 
@@ -270,6 +270,70 @@ class LocalMainScheduler : C.MainScheduler
         this.waiting.remove(id);
     }
 }
+
+class WaitingManager
+{
+    import core.sync.condition;
+    import core.sync.mutex;
+
+    /// Just a FiberCondition with a state
+    private struct Waiting
+    {
+        Condition c;
+        bool busy;
+    }
+
+    /// The 'Response' we are currently processing, if any
+    private Response pending;
+
+    /// Request IDs waiting for a response
+    private Waiting[ulong] waiting;
+
+    private C.Scheduler scheduler;
+
+    public this (C.Scheduler owner) @safe
+    {
+        this.scheduler = owner;
+    }
+
+    /// Get the next available request ID
+    public size_t getNextResponseId ()
+    {
+        static size_t last_idx;
+        return last_idx++;
+    }
+
+    public Response waitResponse (size_t id, Duration duration)
+    {
+        if (id !in this.waiting)
+            this.waiting[id] = Waiting(this.scheduler.newCondition(null), false);
+
+        Waiting* ptr = &this.waiting[id];
+        if (ptr.busy)
+            assert(0, "Trying to override a pending request");
+
+        // We yield and wait for an answer
+        ptr.busy = true;
+
+        if (duration == Duration.init)
+            ptr.c.wait();
+        else if (!ptr.c.wait(duration))
+            this.pending = Response(Status.Timeout, this.pending.id);
+
+        ptr.busy = false;
+        // After control returns to us, `pending` has been filled
+        scope(exit) this.pending = Response.init;
+        return this.pending;
+    }
+
+    /// Called when a waiting condition was handled and can be safely removed
+    public void remove (size_t id)
+    {
+        this.waiting.remove(id);
+    }
+}
+
+WaitingManager main_waiting_manager;
 
 /*******************************************************************************
 
@@ -509,6 +573,9 @@ public final class RemoteAPI (API) : API
             else static assert(0, "Unhandled type: " ~ T.stringof);
         }
 
+        auto spawn_tid = C.thisTid;
+        auto owner_tid = C.ownerTid;
+        auto spawn_scheduler = C.thisScheduler;
         try
             {
                 bool terminated = false;
@@ -518,12 +585,10 @@ public final class RemoteAPI (API) : API
                         (C.OwnerTerminated e)
                         {
                             terminated = true;
-                            writefln("R OwnerTerminated %s", e);
                         },
                         (ShutdownCommand e)
                         {
                             terminated = true;
-                            writefln("R ShutdownCommand %s", e);
                         },
                         (TimeCommand s)
                         {
@@ -549,7 +614,7 @@ public final class RemoteAPI (API) : API
                         },
                         (Command cmd)
                         {
-                           writefln("IN Command %s", cmd);
+                            writefln("IN Command %s", cmd);
                             if (!isSleeping())
                                 handle(cmd);
                             else if (!control.drop)
@@ -562,7 +627,6 @@ public final class RemoteAPI (API) : API
                         });
                         node_scheduler.yield();
                 }
-                writefln("Exit  %s", node_scheduler);
                 C.ThreadInfo.thisInfo.cleanup(true);
                 // Make sure the scheduler is not waiting for polling tasks
             }
@@ -788,23 +852,26 @@ public final class RemoteAPI (API) : API
                     if (cast(LocalMainScheduler)C.thisScheduler)
                     {
                         LocalMainScheduler main_scheduler = cast(LocalMainScheduler)C.thisScheduler;
+                        if (main_waiting_manager is null)
+                            main_waiting_manager = new WaitingManager(main_scheduler);
+
                         res = () @trusted {
                             auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                                 .serializeToJsonString();
 
-                            Command command = Command(C.thisTid(), main_scheduler.getNextResponseId(), ovrld.mangleof, serialized);
-                            C.send(this.childTid, command);
+                            Command command = Command(C.thisTid(), main_waiting_manager.getNextResponseId(), ovrld.mangleof, serialized);
                             writefln("send1 %s", command);
+                            C.send(this.childTid, command);
 
-                            shared(int) terminated = 0;
+                            bool terminated = false;
                             main_scheduler.spawn(() {
-                                while (!atomicLoad(terminated))
+                                while (!terminated)
                                 {
                                     C.receiveTimeout(10.msecs,
                                         (Response res) {
                                             writefln("receive1 %s", res);
-                                            main_scheduler.pending = res;
-                                            main_scheduler.waiting[res.id].c.notify();
+                                            main_waiting_manager.pending = res;
+                                            main_waiting_manager.waiting[res.id].c.notify();
                                         });
                                     C.yield();
                                 }
@@ -812,10 +879,11 @@ public final class RemoteAPI (API) : API
 
                             Response res;
                             main_scheduler.spawn(() {
-                                res = main_scheduler.waitResponse(command.id, this.timeout);
-                                terminated.atomicOp!"+="(1);
+                                res = main_waiting_manager.waitResponse(command.id, this.timeout);
+                                //writefln("receive1 %s", res);
+                                terminated = true;
                             });
-                            while (!atomicLoad(terminated)) Thread.sleep(1.msecs);
+                            while (!terminated) Thread.sleep(1.msecs);
                             return res;
                         }();
                     }
@@ -825,13 +893,18 @@ public final class RemoteAPI (API) : API
                         res = () @trusted {
                             auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                                 .serializeToJsonString();
+
                             Command command = Command(C.thisTid(), node_scheduler.getNextResponseId(), ovrld.mangleof, serialized);
+                            writefln("send2 %s", command);
                             C.send(this.childTid, command);
+
                             return node_scheduler.waitResponse(command.id, this.timeout);
                         }();
                     }
                     else
                         assert(0, "Not expected Scheduler instance.");
+
+                    //writefln("Response %s", res);
 
                     if (res.status == Status.Failed)
                         throw new Exception(res.data);
@@ -889,7 +962,6 @@ unittest
     import geod24.Registry;
 
     __gshared Registry registry;
-
     registry.initialize();
 
     static interface API
@@ -970,7 +1042,8 @@ unittest
     // Make sure our main thread terminates after everyone else
     geod24.concurrency.receive((int val) {});
 }
-
+*/
+/*
 /// This network have different types of nodes in it
 unittest
 {
@@ -1104,7 +1177,8 @@ unittest
     writefln("test4");
 }
 */
-/*
+
+
 /// Nodes can start tasks
 unittest
 {
@@ -1198,14 +1272,13 @@ unittest
 }
 /**/
 
-
+/*
 // Sane name insurance policy
 unittest
 {
-    writefln("test6");
     import geod24.concurrency : Tid;
 
-    static interface API
+    static interface APIxw
     {
         public ulong tid ();
     }
@@ -1230,7 +1303,6 @@ unittest
 // Simulate temporary outage
 unittest
 {
-    writefln("test7");
     __gshared C.Tid n1tid;
 
     static interface API
@@ -1278,8 +1350,8 @@ unittest
     assert(current4 - current2 >= 1.seconds);
 
     // Now drop many messages
-    n1.sleep(3.seconds, true);
-    for (size_t i = 0; i < 100; i++)
+    n1.sleep(1.seconds, true);
+    for (size_t i = 0; i < 500; i++)
         n2.asyncCall();
     // Make sure we don't end up blocked forever
     Thread.sleep(1.seconds);
@@ -1297,7 +1369,7 @@ unittest
     n1.ctrl.shutdown();
     n2.ctrl.shutdown();
 }
-/*
+
 // Filter commands
 unittest
 {
