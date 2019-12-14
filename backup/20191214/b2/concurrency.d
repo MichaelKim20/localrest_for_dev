@@ -1130,7 +1130,7 @@ public struct ThreadInfo
             }
 
             if (this.owner != Tid.init)
-                _send(this.owner, MsgType.linkDead, this.ident);
+                _send(MsgType.linkDead, this.owner, this.ident);
 
             if ((this.scheduler !is null) && this.have_scheduler)
             {
