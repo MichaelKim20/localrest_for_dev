@@ -10,7 +10,7 @@ import geod24.LocalRest;
 import geod24.MessageDispatcher;
 
 void main()
-{
+{/*
     test1();
     //test2_1();
     //test2();
@@ -27,12 +27,17 @@ void main()
     test13();
     //test14();
     test15();
+    */
+    test5();
+    test5();
+    test5();
+    test5();
 }
 
 void test1()
 {
     writeln("test1");
-    static import geod24.MessageDispatcher;
+    import geod24.MessageDispatcher;
     static interface API
     {
         @safe:
@@ -65,7 +70,7 @@ void test1()
 void test2_1()
 {
     writeln("test1");
-    static import geod24.MessageDispatcher;
+    import geod24.MessageDispatcher;
     static interface API
     {
         @safe:
@@ -103,7 +108,7 @@ void test2()
 {
     writefln("test2");
     import std.conv;
-    static import geod24.MessageDispatcher;
+    import geod24.MessageDispatcher;
     import geod24.Registry;
 
     __gshared Registry registry;
@@ -738,7 +743,7 @@ void test10()
 void test11()
 {
     writefln("test11");
-    static import geod24.MessageDispatcher;
+    import geod24.MessageDispatcher;
     import std.exception;
 
     __gshared MessageDispatcher node_tid;
@@ -780,7 +785,7 @@ void test11()
 void test12()
 {
     writefln("test12");
-    static import geod24.MessageDispatcher;
+    import geod24.MessageDispatcher;
     import std.exception;
 
     __gshared MessageDispatcher node_tid;
@@ -824,7 +829,7 @@ void test12()
 void test13()
 {
     writefln("test13");
-    static import geod24.MessageDispatcher;
+    import geod24.MessageDispatcher;
     import std.exception;
 
     __gshared MessageDispatcher node_tid;
@@ -863,7 +868,7 @@ void test13()
 void test14()
 {
     writefln("test14");
-    static import geod24.MessageDispatcher;
+    import geod24.MessageDispatcher;
     import std.exception;
 
     __gshared MessageDispatcher node_tid;

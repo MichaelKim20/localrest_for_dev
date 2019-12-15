@@ -802,7 +802,7 @@ public final class RemoteAPI (API) : API
 
                             Command command = Command(C.thisMessageDispatcher(), main_scheduler.getNextResponseId(), ovrld.mangleof, serialized);
                             this.childTid.send(command);
-                            writefln("send1 %s", command);
+                            //writefln("send1 %s", command);
 
                             shared(int) terminated = 0;
                             main_scheduler.spawn(() {
