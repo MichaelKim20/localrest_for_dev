@@ -1,4 +1,3 @@
-
 /*******************************************************************************
 
     This is a low-level messaging API upon which more structured or restrictive
@@ -1404,13 +1403,13 @@ public struct ThreadInfo
 
     public void cleanup (bool forced = false)
     {
-        writefln("%s cleanup 1 %s %s", thisThreadID(), thisScheduler, this);
+        //writefln("%s cleanup 1 %s %s", thisThreadID(), thisScheduler, this);
         if (this.self is null)
             return;
 
         if (!this.is_inherited && !this.killed)
         {
-            writefln("%s cleanup 2 %s %s", thisThreadID(), thisScheduler, this);
+            //writefln("%s cleanup 2 %s %s", thisThreadID(), thisScheduler, this);
             this.killed = true;
 
             //writefln("cleanup %s", this.self, links);
@@ -1422,7 +1421,7 @@ public struct ThreadInfo
 
             if ((this.scheduler !is null) && this.have_scheduler)
             {
-                writefln("%s cleanup 3 %s %s", thisThreadID(), thisScheduler, this);
+                //writefln("%s cleanup 3 %s %s", thisThreadID(), thisScheduler, this);
                 this.scheduler.stop({
                     if (this.self !is null)
                         this.self.cleanup();
@@ -1940,7 +1939,6 @@ public class NodeScheduler : FiberScheduler
 
     override public void stop (void delegate () op, bool forced = false)
     {
-        writefln("stop, NodeScheduler 1");
         if (forced)
             this.stop_delay_time = 10.msecs;
         else
@@ -1948,14 +1946,11 @@ public class NodeScheduler : FiberScheduler
 
         terminated = true;
         terminated_time = MonoTime.currTime;
-        writefln("stop, NodeScheduler 2");
 
         while (!this.stoped)
             sleep(100.msecs);
 
-        writefln("stop, NodeScheduler 3");
         op();
-        writefln("stop, NodeScheduler 4");
     }
 
 
@@ -2001,7 +1996,7 @@ public class NodeScheduler : FiberScheduler
             m.unlock();
             //sleepThread(this.sleep_interval);
         }
-        writefln("End dispatch, NodeScheduler");
+        //writefln("End dispatch, NodeScheduler");
         this.stoped = true;
     }
 
@@ -2149,7 +2144,6 @@ public class MainScheduler : FiberScheduler
             //sleepThread(this.sleep_interval);
         }
         this.stoped = true;
-        writefln("End dispatch, MainScheduler");
     }
 
 
@@ -2302,7 +2296,7 @@ static this ()
 
 static ~this ()
 {
-    writefln("~this %s %s %s", thisThreadID(), thisMessageDispatcher, thisScheduler);
+    //writefln("~this %s %s %s", thisThreadID(), thisMessageDispatcher, thisScheduler);
     thisInfo.cleanup();
 }
 
