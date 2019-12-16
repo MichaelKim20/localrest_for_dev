@@ -10,11 +10,10 @@ import geod24.LocalRest;
 import geod24.MessageDispatcher;
 
 void main()
-{
-    /*
+{/*
     test1();
     //test2_1();
-    test2();
+    //test2();
     test3();
     test4();
     test5();
@@ -28,10 +27,10 @@ void main()
     test13();
     //test14();
     test15();
-*/
+    */
 
     //sample();
-    test15();
+    test2();
 }
 
 void test1()
@@ -155,7 +154,7 @@ void test2()
         const name = hash.to!string;
         auto tid = registry.locate(name);
         if (tid !is null)
-            return new RemoteAPI!API(tid);
+            return new RemoteAPI!API(tid, Duration.init, false);
 
         switch (type)
         {
@@ -174,35 +173,49 @@ void test2()
 
     auto node1 = factory("normal", 1);
     auto node2 = factory("byzantine", 2);
+    writefln("node1 %s", node1.tid);
+    writefln("node2 %s", node2.tid);
+
+    //auto node1_ = new RemoteAPI!API(node1.tid);
+    //auto node2_ = new RemoteAPI!API(node2.tid);
+    //assert(node1_.pubkey() == 42);
 
     static void testFunc(MessageDispatcher parent)
     {
-        auto node1 = factory("this does not matter", 1);
-        auto node2 = factory("neither does this", 2);
+        //writefln("parent %s", parent);
+        writefln("test2-1");
+        auto node1_ = factory("this does not matter", 1);
+        auto node2_ = factory("neither does this", 2);
+        writefln("test2-2");
 
-        assert(node1.pubkey() == 42);
-        assert(node1.last() == "pubkey");
-        assert(node2.pubkey() == 0);
-        assert(node2.last() == "pubkey");
+        assert(node1_.pubkey() == 42);
+        assert(node1_.last() == "pubkey");
+        assert(node2_.pubkey() == 0);
+        assert(node2_.last() == "pubkey");
+        writefln("test2-3");
 
-        node1.recv(42, Json.init);
-        assert(node1.last() == "recv@2");
-        node1.recv(Json.init);
-        assert(node1.last() == "recv@1");
-        assert(node2.last() == "pubkey");
-        node1.ctrl.shutdown();
-        node2.ctrl.shutdown();
+        node1_.recv(42, Json.init);
+        assert(node1_.last() == "recv@2");
+        node1_.recv(Json.init);
+        assert(node1_.last() == "recv@1");
+        assert(node2_.last() == "pubkey");
+        node1_.ctrl.shutdown();
+        node2_.ctrl.shutdown();
+        writefln("test2-4");
 
-        thisScheduler.start({
-            parent.send(42);
-        });
+        writefln("parent %s", parent);
+        parent.send(42);
     }
-
-    spawnThreadScheduler(new LocalRemoteScheduler(), &testFunc, thisMessageDispatcher);
-    // Make sure our main thread terminates after everyone else
-    thisMessageDispatcher.receiveOnly!int;
     writefln("test2");
+
+    auto scheduler = new LocalNodeScheduler();
+    spawnThreadScheduler(scheduler, &testFunc, thisMessageDispatcher);
+    // Make sure our main thread terminates after everyone else
+    thisMessageDispatcher.receive((int val) {writefln("received");});
+    // writefln("test2");
+
 }
+
 
 /// This network have different types of nodes in it
 void test3()
@@ -281,7 +294,6 @@ void test3()
     assert(nodes[0].requests() == 7);
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
-    writefln("test3");
 }
 
 void test4()
@@ -878,12 +890,13 @@ void test14()
         override void check ()
         {
             auto node = new RemoteAPI!API(node_tid, 5000.msecs);
-
             assert(node.ping() == 42);
             // We need to return immediately so that the main thread
             // puts us to sleep
-            node.ctrl.sleep(200.msecs);
-            assert(node.ping() == 42);
+            runTask(() {
+                    node.ctrl.sleep(200.msecs);
+                    assert(node.ping() == 42);
+                });
         }
     }
 
@@ -917,18 +930,13 @@ void test15()
         }
     }
 
-        writefln("test15-1");
     auto node = RemoteAPI!API.spawn!Node(1.seconds);
-        writefln("test15-2");
     assert(node.myping(42) == 42);
-        writefln("test15-3");
     node.ctrl.shutdown();
 
     try
     {
-        writefln("test15-4");
         node.myping(69);
-        writefln("test15-5");
         assert(0);
     }
     catch (Exception ex)
@@ -937,6 +945,7 @@ void test15()
     }
     writefln("test15");
 }
+
 
 void sample()
 {

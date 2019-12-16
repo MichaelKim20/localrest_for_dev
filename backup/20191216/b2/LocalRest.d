@@ -270,60 +270,6 @@ class LocalMainScheduler : C.MainScheduler
     }
 }
 
-class LocalRemoteScheduler : C.FiberScheduler
-{
-    import core.sync.condition;
-
-    /// Just a FiberCondition with a state
-    private struct Waiting
-    {
-        C.FiberCondition c;
-        bool busy;
-    }
-
-    /// The 'Response' we are currently processing, if any
-    private Response pending;
-
-    /// Request IDs waiting for a response
-    private Waiting[ulong] waiting;
-
-    /// Get the next available request ID
-    public size_t getNextResponseId ()
-    {
-        static size_t last_idx;
-        return last_idx++;
-    }
-
-    public Response waitResponse (size_t id, Duration duration) nothrow
-    {
-        if (id !in this.waiting)
-            this.waiting[id] = Waiting(new C.FiberCondition(null, this), false);
-
-        Waiting* ptr = &this.waiting[id];
-        if (ptr.busy)
-            assert(0, "Trying to override a pending request");
-
-        // We yield and wait for an answer
-        ptr.busy = true;
-
-        if (duration == Duration.init)
-            ptr.c.wait();
-        else if (!ptr.c.wait(duration))
-            this.pending = Response(Status.Timeout, this.pending.id);
-
-        ptr.busy = false;
-        // After control returns to us, `pending` has been filled
-        scope(exit) this.pending = Response.init;
-        return this.pending;
-    }
-
-    /// Called when a waiting condition was handled and can be safely removed
-    public void remove (size_t id)
-    {
-        this.waiting.remove(id);
-    }
-}
-
 /*******************************************************************************
 
     Provide eventloop-like functionalities
@@ -406,7 +352,7 @@ public final class RemoteAPI (API) : API
             C.main_thread_scheduler = new LocalMainScheduler();
 
         auto scheduler = new LocalNodeScheduler();
-        auto childTid = C.spawnThreadScheduler(new LocalNodeScheduler(), &spawned!(Impl), args);
+        auto childTid = C.spawnThreadScheduler(scheduler, &spawned!(Impl), args);
         return new RemoteAPI(childTid, true, timeout);
     }
 
@@ -563,7 +509,7 @@ public final class RemoteAPI (API) : API
         }
 
         try
-            C.thisScheduler.start({
+            {
                 bool terminated = false;
                 while (!terminated)
                 {
@@ -571,10 +517,12 @@ public final class RemoteAPI (API) : API
                         (C.OwnerTerminated e)
                         {
                             terminated = true;
+                            //writefln("R OwnerTerminated %s", e);
                         },
                         (ShutdownCommand e)
                         {
                             terminated = true;
+                            //writefln("R ShutdownCommand %s", e);
                         },
                         (TimeCommand s)
                         {
@@ -587,6 +535,7 @@ public final class RemoteAPI (API) : API
                         },
                         (Response res)
                         {
+                            //writefln("IN Response %s", res);
                             if (!isSleeping())
                                 handle(res);
                             else if (!control.drop)
@@ -595,9 +544,11 @@ public final class RemoteAPI (API) : API
                                         node_scheduler.yield();
                                     handle(res);
                                 });
+                            //writefln("OU Response %s", res);
                         },
                         (Command cmd)
                         {
+                           //writefln("IN Command %s", cmd);
                             if (!isSleeping())
                                 handle(cmd);
                             else if (!control.drop)
@@ -606,12 +557,13 @@ public final class RemoteAPI (API) : API
                                         node_scheduler.yield();
                                     handle(cmd);
                                 });
+                            //writefln("OU Command %s", cmd);
                         });
                         node_scheduler.yield();
                 }
-                C.thisInfo.cleanup(true);
+                //C.thisInfo.cleanup(true);
                 // Make sure the scheduler is not waiting for polling tasks
-            });
+            }
         catch (Exception e)
             if (e !is exc)
                 throw e;
@@ -625,6 +577,8 @@ public final class RemoteAPI (API) : API
 
     /// Timeout to use when issuing requests
     private const Duration timeout;
+
+    private bool have_node;
 
     // Vibe.d mandates that method must be @safe
     @safe:
@@ -643,17 +597,18 @@ public final class RemoteAPI (API) : API
 
     ***************************************************************************/
 
-    public this (C.MessageDispatcher tid, Duration timeout = Duration.init) @nogc pure nothrow
+    public this (C.MessageDispatcher tid, Duration timeout = Duration.init, bool have_node = true) @nogc pure nothrow
     {
-        this(tid, false, timeout);
+        this(tid, false, timeout, have_node);
     }
 
     /// Private overload used by `spawn`
-    private this (C.MessageDispatcher tid, bool isOwner, Duration timeout) @nogc pure nothrow
+    private this (C.MessageDispatcher tid, bool isOwner, Duration timeout = Duration.init, bool have_node = true) @nogc pure nothrow
     {
         this.childTid = tid;
         this.owner = isOwner;
         this.timeout = timeout;
+        this.have_node = have_node;
         this.childTid.setTimeout(timeout);
     }
 
@@ -831,82 +786,137 @@ public final class RemoteAPI (API) : API
                         throw new Exception(serializeToJsonString("Request timed-out"));
 
                     Response res;
-                    if (cast(LocalMainScheduler)C.thisScheduler)
+                    if (this.have_node)
                     {
-                        LocalMainScheduler main_scheduler = cast(LocalMainScheduler)C.thisScheduler;
-                        res = () @trusted {
-                            auto serialized = ArgWrapper!(Parameters!ovrld)(params)
-                                .serializeToJsonString();
+                        writefln("API 1");
+                        if (cast(LocalMainScheduler)C.thisScheduler)
+                        {
+                            LocalMainScheduler main_scheduler = cast(LocalMainScheduler)C.thisScheduler;
+                            res = () @trusted {
+                                auto serialized = ArgWrapper!(Parameters!ovrld)(params)
+                                    .serializeToJsonString();
 
-                            Command command = Command(C.thisMessageDispatcher(), main_scheduler.getNextResponseId(), ovrld.mangleof, serialized);
-                            this.childTid.send(command);
-
-                            shared(int) terminated = 0;
-                            main_scheduler.spawn(() {
-                                while (!atomicLoad(terminated))
-                                {
-                                    C.thisMessageDispatcher.receiveTimeout(10.msecs,
-                                        (Response res) {
-                                            main_scheduler.pending = res;
-                                            main_scheduler.waiting[res.id].c.notify();
-                                        });
-                                    C.yield();
-                                }
-                            });
-
-                            Response res;
-                            main_scheduler.spawn(() {
-                                res = main_scheduler.waitResponse(command.id, this.timeout);
-                                terminated.atomicOp!"+="(1);
-                            });
-                            while (!atomicLoad(terminated)) Thread.sleep(1.msecs);
-                            return res;
-                        }();
-                    }
-                    else if (cast(LocalNodeScheduler)C.thisScheduler)
-                    {
-                        LocalNodeScheduler node_scheduler = cast(LocalNodeScheduler)C.thisScheduler;
-                        res = () @trusted {
-                            auto serialized = ArgWrapper!(Parameters!ovrld)(params)
-                                .serializeToJsonString();
-                            Command command = Command(C.thisMessageDispatcher(), node_scheduler.getNextResponseId(), ovrld.mangleof, serialized);
-                            this.childTid.send(command);
-                            return node_scheduler.waitResponse(command.id, this.timeout);
-                        }();
-                    }
-                    else if (cast(LocalRemoteScheduler)C.thisScheduler)
-                    {
-                        LocalRemoteScheduler remote_scheduler = cast(LocalRemoteScheduler)C.thisScheduler;
-                        res = () @trusted {
-                            auto serialized = ArgWrapper!(Parameters!ovrld)(params)
-                                .serializeToJsonString();
-
-                            Command command = Command(C.thisMessageDispatcher(), remote_scheduler.getNextResponseId(), ovrld.mangleof, serialized);
-
-                            shared(int) terminated = 0;
-                            remote_scheduler.spawn(() {
+                                Command command = Command(C.thisMessageDispatcher(), main_scheduler.getNextResponseId(), ovrld.mangleof, serialized);
                                 this.childTid.send(command);
-                                while (!atomicLoad(terminated))
-                                {
-                                    C.thisMessageDispatcher.receiveTimeout(10.msecs,
-                                        (Response res) {
-                                            remote_scheduler.pending = res;
-                                            remote_scheduler.waiting[res.id].c.notify();
-                                        });
-                                    C.yield();
-                                }
-                            });
+                                writefln("send1 %s", command);
 
-                            Response res;
-                            remote_scheduler.start(() {
-                                res = remote_scheduler.waitResponse(command.id, this.timeout);
-                                terminated.atomicOp!"+="(1);
-                            });
-                            return res;
-                        }();
+                                shared(int) terminated = 0;
+                                main_scheduler.spawn(() {
+                                    while (!atomicLoad(terminated))
+                                    {
+                                        C.thisMessageDispatcher.receiveTimeout(10.msecs,
+                                            (Response res) {
+                                                writefln("receive1 %s", res);
+                                                main_scheduler.pending = res;
+                                                main_scheduler.waiting[res.id].c.notify();
+                                            });
+                                        C.yield();
+                                    }
+                                });
+
+                                Response res;
+                                main_scheduler.spawn(() {
+                                    res = main_scheduler.waitResponse(command.id, this.timeout);
+                                    terminated.atomicOp!"+="(1);
+                                });
+                                while (!atomicLoad(terminated)) Thread.sleep(1.msecs);
+                                return res;
+                            }();
+                        }
+                        else if (cast(LocalNodeScheduler)C.thisScheduler)
+                        {
+                            LocalNodeScheduler node_scheduler = cast(LocalNodeScheduler)C.thisScheduler;
+                            res = () @trusted {
+                                auto serialized = ArgWrapper!(Parameters!ovrld)(params)
+                                    .serializeToJsonString();
+                                Command command = Command(C.thisMessageDispatcher(), node_scheduler.getNextResponseId(), ovrld.mangleof, serialized);
+                                this.childTid.send(command);
+                                return node_scheduler.waitResponse(command.id, this.timeout);
+                            }();
+                        }
+                        else
+                            assert(0, "Not expected Scheduler instance.");
                     }
                     else
-                        assert(0, "Not expected Scheduler instance.");
+                    {
+
+                        writefln("API 2");
+                        if (cast(LocalMainScheduler)C.thisScheduler)
+                        {
+                        writefln("API 2 - 1");
+                            LocalMainScheduler main_scheduler = cast(LocalMainScheduler)C.thisScheduler;
+                            res = () @trusted {
+                                auto serialized = ArgWrapper!(Parameters!ovrld)(params)
+                                    .serializeToJsonString();
+
+                                Command command = Command(C.thisMessageDispatcher(), main_scheduler.getNextResponseId(), ovrld.mangleof, serialized);
+                                this.childTid.send(command);
+                                writefln("API 2 send1 %s", command);
+
+                                shared(int) terminated = 0;
+                                main_scheduler.spawn(() {
+                                    while (!atomicLoad(terminated))
+                                    {
+                                        C.thisMessageDispatcher.receiveTimeout(10.msecs,
+                                            (Response res) {
+                                                writefln("API 2 receive1 %s", res);
+                                                main_scheduler.pending = res;
+                                                main_scheduler.waiting[res.id].c.notify();
+                                            });
+                                        C.yield();
+                                    }
+                                });
+
+                                Response res;
+                                main_scheduler.spawn(() {
+                                    res = main_scheduler.waitResponse(command.id, this.timeout);
+                                    terminated.atomicOp!"+="(1);
+                                });
+                                while (!atomicLoad(terminated)) Thread.sleep(1.msecs);
+                                return res;
+                            }();
+                        }
+                        else if (cast(LocalNodeScheduler)C.thisScheduler)
+                        {
+                        writefln("API 2 - 2");
+                            LocalNodeScheduler node_scheduler = cast(LocalNodeScheduler)C.thisScheduler;
+                            res = () @trusted {
+                                auto serialized = ArgWrapper!(Parameters!ovrld)(params)
+                                    .serializeToJsonString();
+
+                                Command command = Command(C.thisMessageDispatcher(), node_scheduler.getNextResponseId(), ovrld.mangleof, serialized);
+                                this.childTid.send(command);
+                                writefln("API 2 send2 %s", command);
+
+                                shared(int) terminated = 0;
+                                node_scheduler.spawn(() {
+                                    while (!atomicLoad(terminated))
+                                    {
+                                        C.thisMessageDispatcher.receiveTimeout(10.msecs,
+                                            (Response res) {
+                                                writefln("API 2 receive2 %s", res);
+                                                node_scheduler.pending = res;
+                                                node_scheduler.waiting[res.id].c.notify();
+                                            });
+                                        C.yield();
+                                    }
+                                });
+
+                                Response res;
+                                node_scheduler.spawn(() {
+                                    res = node_scheduler.waitResponse(command.id, this.timeout);
+                                    terminated.atomicOp!"+="(1);
+                                });
+                                //while (!atomicLoad(terminated)) Thread.sleep(1.msecs);
+                                return res;
+                            }();
+                        }
+                        else
+                        {
+                            writefln("API 2 - 3");
+                            assert(0, "Not expected Scheduler instance.");
+                        }
+                    }
 
                     if (res.status == Status.Failed)
                         throw new Exception(res.data);
@@ -924,6 +934,7 @@ public final class RemoteAPI (API) : API
 /// Simple usage example
 unittest
 {
+    writefln("test1");
     static interface API
     {
         @safe:
@@ -950,13 +961,16 @@ unittest
     assert(test.pubkey() == 42);
 
     test.ctrl.shutdown();
+    writefln("test1");
 }
 
+/*
 /// In a real world usage, users will most likely need to use the registry
 unittest
 {
+    writefln("test2");
     import std.conv;
-    import geod24.MessageDispatcher;
+    static import geod24.MessageDispatcher;
     import geod24.Registry;
 
     __gshared Registry registry;
@@ -997,7 +1011,7 @@ unittest
     {
         const name = hash.to!string;
         auto tid = registry.locate(name);
-        if (tid !is null)
+        if (tid != tid.init)
             return new RemoteAPI!API(tid);
 
         switch (type)
@@ -1034,20 +1048,19 @@ unittest
         assert(node2.last() == "pubkey");
         node1.ctrl.shutdown();
         node2.ctrl.shutdown();
-
-        thisScheduler.start({
-            parent.send(42);
-        });
+        parent.send(42);
     }
 
-    spawnThreadScheduler(new LocalRemoteScheduler(), &testFunc, thisMessageDispatcher);
+    auto testerFiber = geod24.concurrency.spawn(&testFunc, thisMessageDispatcher);
     // Make sure our main thread terminates after everyone else
-    thisMessageDispatcher.receiveOnly!int;
+    geod24.concurrency.receive((int val) {});
 }
+*/
 
 /// This network have different types of nodes in it
 unittest
 {
+    writefln("test3");
     import geod24.MessageDispatcher;
 
     static interface API
@@ -1126,6 +1139,7 @@ unittest
 /// Support for circular nodes call
 unittest
 {
+    writefln("test4");
     import std.format;
 
     __gshared C.MessageDispatcher[string] tbn;
@@ -1172,12 +1186,14 @@ unittest
 
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
+    writefln("test4");
 }
 
 
 /// Nodes can start tasks
 unittest
 {
+    writefln("test5");
     static import core.thread;
     import core.time;
     import core.sync.mutex;
@@ -1228,11 +1244,13 @@ unittest
     assert(node.getCounter() >= 9);
     assert(node.getCounter() == 0);
     node.ctrl.shutdown();
+    writefln("test5");
 }
 
 // Sane name insurance policy
 unittest
 {
+    writefln("test6");
     static import geod24.MessageDispatcher;
 
     static interface API
@@ -1255,11 +1273,13 @@ unittest
     }
     static assert(!is(typeof(RemoteAPI!DoesntWork)));
     node.ctrl.shutdown();
+    writefln("test6");
 }
 
 // Simulate temporary outage
 unittest
 {
+    writefln("test7");
     static import geod24.MessageDispatcher;
     __gshared C.MessageDispatcher n1tid;
 
@@ -1326,11 +1346,13 @@ unittest
 
     n1.ctrl.shutdown();
     n2.ctrl.shutdown();
+    writefln("test7");
 }
 
 // Filter commands
 unittest
 {
+    writefln("test8");
     __gshared C.MessageDispatcher node_tid;
 
     static interface API
@@ -1465,11 +1487,14 @@ unittest
 
     filtered.ctrl.shutdown();
     caller.ctrl.shutdown();
+
+    writefln("test8");
 }
 
 // request timeouts (from main thread)
 unittest
 {
+    writefln("test9");
     import core.thread;
     import std.exception;
 
@@ -1504,11 +1529,15 @@ unittest
     Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
+
+
+    writefln("test9");
 }
 
 // test-case for responses to re-used requests (from main thread)
 unittest
 {
+    writefln("test10");
     import core.thread;
     import std.exception;
 
@@ -1548,11 +1577,13 @@ unittest
 
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
+    writefln("test10");
 }
 
 // request timeouts (foreign node to another node)
 unittest
 {
+    writefln("test11");
     static import geod24.MessageDispatcher;
     import std.exception;
 
@@ -1588,11 +1619,13 @@ unittest
     node_1.check();
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
+    writefln("test11");
 }
 
 // test-case for zombie responses
 unittest
 {
+    writefln("test12");
     static import geod24.MessageDispatcher;
     import std.exception;
 
@@ -1630,11 +1663,13 @@ unittest
     node_1.check();
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
+    writefln("test12");
 }
 
 // request timeouts with dropped messages
 unittest
 {
+    writefln("test13");
     static import geod24.MessageDispatcher;
     import std.exception;
 
@@ -1667,11 +1702,13 @@ unittest
     node_1.check();
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
+    writefln("test13");
 }
-
+/*
 // Test a node that gets a replay while it's delayed
 unittest
 {
+    writefln("test14");
     static import geod24.MessageDispatcher;
     import std.exception;
 
@@ -1690,13 +1727,13 @@ unittest
         override void check ()
         {
             auto node = new RemoteAPI!API(node_tid, 5000.msecs);
-
             assert(node.ping() == 42);
-
             // We need to return immediately so that the main thread
             // puts us to sleep
-            node.ctrl.sleep(200.msecs);
-            assert(node.ping() == 42);
+            runTask(() {
+                    node.ctrl.sleep(200.msecs);
+                    assert(node.ping() == 42);
+                });
         }
     }
 
@@ -1708,11 +1745,13 @@ unittest
     assert(node_1.ping() == 42);
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
+    writefln("test14");
 }
-
+*/
 // Test explicit shutdown
 unittest
 {
+    writefln("test15");
     import std.exception;
 
     static interface API
@@ -1741,4 +1780,5 @@ unittest
     {
         assert(ex.msg == `"Request timed-out"`);
     }
+    writefln("test15");
 }

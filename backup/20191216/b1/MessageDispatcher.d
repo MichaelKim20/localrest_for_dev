@@ -2325,9 +2325,17 @@ if (isSpawnable!(F, T))
         thisInfo.scheduler = spawn_scheduler;
         thisInfo.have_scheduler = true;
         thisInfo.is_inherited = false;
+        auto ownerInfo = thisInfo;
 
-        scope (exit) thisInfo.cleanup();
-        fn(args);
+        thisInfo.scheduler.start({
+            thisInfo.ident = spawn_dispatcher;
+            thisInfo.owner = owner_dispatcher;
+            thisInfo.scheduler = spawn_scheduler;
+            thisInfo.have_scheduler = false;
+            thisInfo.is_inherited = true;
+            scope (exit) ownerInfo.cleanup();
+            fn(args);
+        });
     }
     thisInfo.links[spawn_dispatcher] = true;
 
