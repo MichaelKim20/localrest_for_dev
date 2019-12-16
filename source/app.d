@@ -917,11 +917,11 @@ void test15()
         }
     }
 
-        writefln("test15-1");
+    writefln("test15-1");
     auto node = RemoteAPI!API.spawn!Node(1.seconds);
-        writefln("test15-2");
+    writefln("test15-2");
     assert(node.myping(42) == 42);
-        writefln("test15-3");
+    writefln("test15-3");
     node.ctrl.shutdown();
 
     try
