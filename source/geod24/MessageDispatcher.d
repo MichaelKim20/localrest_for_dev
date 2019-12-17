@@ -46,18 +46,22 @@ import std.typecons : Tuple;
     __gshared string received;
     static void spawnedFunc (MessageDispatcher owner)
     {
-        import std.conv : text;
-        // Receive a message from the owner thread.
-        thisMessageDispatcher.receive(
-            (int i)
-            {
-                received = text("Received the number ", i);
+        thisScheduler.start({
+            import std.conv : text;
+            // Receive a message from the owner thread.
+            thisMessageDispatcher.receive(
+                (int i)
+                {
+                    received = text("Received the number ", i);
 
-                // Send a message back to the owner thread
-                // indicating success.
-                owner.send(true);
-            }
-        );
+                    // Send a message back to the owner thread
+                    // indicating success.
+                    owner.send(true);
+                }
+            );
+
+            thisInfo.cleanup(true);
+        });
     }
 
     // Start spawnedFunc in a new thread.
@@ -315,7 +319,6 @@ private class MessageBox
         }
 
         {
-
             SudoFiber new_sf;
             new_sf.msg = msg;
             new_sf.create_time = MonoTime.currTime;
@@ -1164,20 +1167,23 @@ public class MessageDispatcher
 
     auto process = ()
     {
-        thisMessageDispatcher.receive(
-            (int i)
-            {
-                ownerMessageDispatcher.send(1);
-            },
-            (double f)
-            {
-                ownerMessageDispatcher.send(2);
-            },
-            (Variant v)
-            {
-                ownerMessageDispatcher.send(3);
-            }
-        );
+        thisScheduler.start({
+            thisMessageDispatcher.receive(
+                (int i)
+                {
+                    ownerMessageDispatcher.send(1);
+                },
+                (double f)
+                {
+                    ownerMessageDispatcher.send(2);
+                },
+                (Variant v)
+                {
+                    ownerMessageDispatcher.send(3);
+                }
+            );
+            thisInfo.cleanup(true);
+        });
     };
 
     {
@@ -1220,7 +1226,7 @@ public class MessageDispatcher
 
     static assert( !__traits( compiles,
                        {
-                           thisMessageDispatcher.eceive( (int x) {}, (int x) {} );
+                           thisMessageDispatcher.receive( (int x) {}, (int x) {} );
                        } ) );
 }
 
@@ -1243,7 +1249,10 @@ version (unittest)
 {
     auto spawnedMessageDispatcher = spawnThread(
     {
-        assert(thisMessageDispatcher.receiveOnly!int == 42);
+        thisScheduler.start({
+            assert(thisMessageDispatcher.receiveOnly!int == 42);
+            thisInfo.cleanup(true);
+        });
     });
     spawnedMessageDispatcher.send(42);
 }
@@ -1253,7 +1262,10 @@ version (unittest)
 {
     auto spawnedMessageDispatcher = spawnThread(
     {
-        assert(thisMessageDispatcher.receiveOnly!string == "text");
+        thisScheduler.start({
+            assert(thisMessageDispatcher.receiveOnly!string == "text");
+            thisInfo.cleanup(true);
+        });
     });
     spawnedMessageDispatcher.send("text");
 }
@@ -1265,10 +1277,13 @@ version (unittest)
 
     auto spawnedMessageDispatcher = spawnThread(
     {
-        auto msg = thisMessageDispatcher.receiveOnly!(double, Record);
-        assert(msg[0] == 0.5);
-        assert(msg[1].name == "Alice");
-        assert(msg[1].age == 31);
+        thisScheduler.start({
+            auto msg = thisMessageDispatcher.receiveOnly!(double, Record);
+            assert(msg[0] == 0.5);
+            assert(msg[1].name == "Alice");
+            assert(msg[1].age == 31);
+            thisInfo.cleanup(true);
+        });
     });
 
     spawnedMessageDispatcher.send(0.5, Record("Alice", 31));
@@ -1278,15 +1293,18 @@ version (unittest)
 {
     static void t1 (MessageDispatcher mainMsgDispatcher)
     {
-        try
-        {
-            thisMessageDispatcher.receiveOnly!string();
-            mainMsgDispatcher.send("");
-        }
-        catch (Throwable th)
-        {
-            mainMsgDispatcher.send(th.msg);
-        }
+        thisScheduler.start({
+            try
+            {
+                thisMessageDispatcher.receiveOnly!string();
+                mainMsgDispatcher.send("");
+            }
+            catch (Throwable th)
+            {
+                mainMsgDispatcher.send(th.msg);
+            }
+            thisInfo.cleanup(true);
+        });
     }
 
     auto spawnedMessageDispatcher = spawnThread(&t1, thisMessageDispatcher);
@@ -1314,7 +1332,6 @@ version (unittest)
         thisMessageDispatcher.receiveTimeout(msecs(10), (int x) {}, (Variant x) {});
     }));
 }
-
 
 /*******************************************************************************
 
@@ -1870,7 +1887,6 @@ public class NodeScheduler : FiberScheduler
     /// Ctor
     public this ()
     {
-        this.sleep_interval = 1.msecs;
         this.m = new Mutex();
         this.terminated = false;
         this.stoped = false;
@@ -1924,7 +1940,7 @@ public class NodeScheduler : FiberScheduler
     {
         import std.algorithm.mutation : remove;
         bool done = terminated && (m_fibers.length == 0);
-
+        size_t loop = 0;
         while (!done)
         {
             m.lock();
@@ -1953,6 +1969,8 @@ public class NodeScheduler : FiberScheduler
                     done = true;
             }
             m.unlock();
+            if ((++loop % 50) == 0)
+                Thread.sleep(10.msecs);
         }
         this.stoped = true;
     }
@@ -2001,7 +2019,6 @@ public class MainScheduler : FiberScheduler
     /// Ctor
     public this ()
     {
-        this.sleep_interval = 1.msecs;
         this.m = new Mutex();
         this.terminated = false;
         this.stoped = false;
@@ -2069,6 +2086,7 @@ public class MainScheduler : FiberScheduler
     {
         import std.algorithm.mutation : remove;
         bool done = terminated && (m_fibers.length == 0);
+        size_t loop = 0;
 
         while (!done)
         {
@@ -2098,6 +2116,9 @@ public class MainScheduler : FiberScheduler
                     done = true;
             }
             m.unlock();
+            if ((++loop % 50) == 0)
+                Thread.sleep(10.msecs);
+            //Thread.sleep(1.msecs);
         }
         this.stoped = true;
     }
@@ -2341,7 +2362,10 @@ if (isSpawnable!(F, T))
 {
     static void f (string msg)
     {
-        assert(msg == "Hello World");
+        thisScheduler.start({
+            assert(msg == "Hello World");
+            thisInfo.cleanup();
+        });
     }
 
     auto dispatcher = spawnThread(&f, "Hello World");
@@ -2365,7 +2389,10 @@ if (isSpawnable!(F, T))
 @system unittest
 {
     spawnThread({
-        ownerMessageDispatcher.send("This is so great!");
+        thisScheduler.start({
+            ownerMessageDispatcher.send("This is so great!");
+            thisInfo.cleanup();
+        });
     });
 
     thisMessageDispatcher.receive((string res) {
@@ -2483,45 +2510,48 @@ unittest
     import std.concurrency;
     import std.stdio;
 
-    auto process = ()
+    auto process = (MessageDispatcher owner)
     {
-        size_t message_count = 2;
-        while (message_count--)
-        {
-            thisMessageDispatcher.receive(
-                (int i)
-                {
-                    ownerMessageDispatcher.send(i);
-                },
-                (string s)
-                {
-                    ownerMessageDispatcher.send(s);
-                }
-            );
-        }
+        thisScheduler.start({
+            size_t message_count = 2;
+            while (message_count--)
+            {
+                thisMessageDispatcher.receive(
+                    (int i)
+                    {
+                        owner.send(i);
+                    },
+                    (string s)
+                    {
+                        owner.send(s);
+                    }
+                );
+            }
+            thisInfo.cleanup(true);
+        });
     };
 
-    auto spawnedMessageDispatcher = spawnThread(process);
+    auto spawnedMessageDispatcher = spawnThread(process, thisMessageDispatcher);
     spawnedMessageDispatcher.send(42);
     spawnedMessageDispatcher.send("string");
 
     int got_i;
     string got_s;
 
-    thisMessageDispatcher.receive(
-        (string s)
-        {
-            got_s = s;
-        }
-    );
-
-    thisMessageDispatcher.receive(
-        (int i)
-        {
-            got_i = i;
-        }
-    );
-
-    assert(got_i == 42);
-    assert(got_s == "string");
+    thisScheduler.spawn({
+        thisMessageDispatcher.receive(
+            (string s)
+            {
+                got_s = s;
+            }
+        );
+        thisMessageDispatcher.receive(
+            (int i)
+            {
+                got_i = i;
+            }
+        );
+        assert(got_i == 42);
+        assert(got_s == "string");
+    });
 }

@@ -13,11 +13,10 @@ void main()
 {
     /*
     test1();
-    //test2_1();
     test2();
     test3();
     test4();
-    test5();
+    //test5();
     test6();
     test7();
     test8();
@@ -26,12 +25,65 @@ void main()
     test11();
     test12();
     test13();
-    //test14();
+    test14();
     test15();
-*/
 
-    //sample();
-    test15();
+    test0();
+    */
+    //test5();
+    //test7();
+    test5();
+}
+
+void test0()
+{
+    import std.concurrency;
+    import std.stdio;
+
+    auto process = (MessageDispatcher owner)
+    {
+        thisScheduler.start({
+            size_t message_count = 2;
+            while (message_count--)
+            {
+                thisMessageDispatcher.receive(
+                    (int i)
+                    {
+                        owner.send(i);
+                    },
+                    (string s)
+                    {
+                        owner.send(s);
+                    }
+                );
+            }
+            thisInfo.cleanup(true);
+        });
+    };
+
+    auto spawnedMessageDispatcher = spawnThread(process, thisMessageDispatcher);
+    spawnedMessageDispatcher.send(42);
+    spawnedMessageDispatcher.send("string");
+
+    int got_i;
+    string got_s;
+
+    thisScheduler.spawn({
+        thisMessageDispatcher.receive(
+            (string s)
+            {
+                got_s = s;
+            }
+        );
+        thisMessageDispatcher.receive(
+            (int i)
+            {
+                got_i = i;
+            }
+        );
+        assert(got_i == 42);
+        assert(got_s == "string");
+    });
 }
 
 void test1()
@@ -64,47 +116,6 @@ void test1()
     assert(test.pubkey() == 42);
 
     test.ctrl.shutdown();
-    writeln("test1");
-}
-
-void test2_1()
-{
-    writeln("test1");
-    import geod24.MessageDispatcher;
-    static interface API
-    {
-        @safe:
-        public @property ulong pubkey ();
-        public Json getValue (ulong idx);
-        public Json getQuorumSet ();
-        public string recv (Json data);
-    }
-
-    static class MockAPI : API
-    {
-        @safe:
-        public override @property ulong pubkey ()
-        { return 42; }
-        public override Json getValue (ulong idx)
-        { assert(0); }
-        public override Json getQuorumSet ()
-        { assert(0); }
-        public override string recv (Json data)
-        { assert(0); }
-    }
-
-    auto node1 = RemoteAPI!API.spawn!MockAPI();
-    assert(node1.pubkey() == 42);
-
-    static void exec (MessageDispatcher parent) {
-        auto node2 = new RemoteAPI!API(parent);
-        assert(node2.pubkey() == 42);
-        node2.ctrl.shutdown();
-    }
-
-    spawnThread(&exec, node1.tid);
-
-    node1.ctrl.shutdown();
     writeln("test1");
 }
 
@@ -379,17 +390,32 @@ void test5()
     }
 
     import std.format;
+    ulong count;
     auto node = RemoteAPI!API.spawn!Node();
     assert(node.getCounter() == 0);
     node.start();
-    assert(node.getCounter() == 1);
-    assert(node.getCounter() == 0);
+
+    Thread.sleep(10.msecs);
+    count = node.getCounter();
+    assert(count == 1, format("count : %s", count));
+
+    Thread.sleep(1.msecs);
+    count = node.getCounter();
+    assert(count == 0, format("count : %s", count));
+
     Thread.sleep(1.seconds);
+
     // It should be 19 but some machines are very slow
     // (e.g. Travis Mac testers) so be safe
-    assert(node.getCounter() >= 9);
-    assert(node.getCounter() == 0);
+    count = node.getCounter();
+    assert(count >= 9, format("count : %s", count));
+
+    Thread.sleep(30.msecs);
+    count = node.getCounter();
+    assert(count == 0, format("count : %s", count));
+
     node.ctrl.shutdown();
+
     writefln("test5");
 }
 
@@ -476,12 +502,12 @@ void test7()
     assert(current4 - current2 >= 1.seconds);
 
     // Now drop many messages
-    n1.sleep(3.seconds, true);
+    n1.sleep(2.seconds, true);
     for (size_t i = 0; i < 100; i++)
         n2.asyncCall();
     // Make sure we don't end up blocked forever
-    Thread.sleep(1.seconds);
-    assert(3 == n1.call());
+    Thread.sleep(2.seconds);
+    assert(3 <= n1.call());
 
     // Debug output, uncomment if needed
     version (none)
@@ -842,7 +868,7 @@ void test13()
 
             // Requests are dropped, so it times out
             assert(node.ping() == 42);
-            node.ctrl.sleep(10.msecs, true);
+            node.ctrl.sleep(20.msecs, true);
             assertThrown!Exception(node.ping());
         }
     }

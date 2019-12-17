@@ -83,12 +83,8 @@ import vibe.data.json;
 static import C = geod24.MessageDispatcher;
 import std.meta : AliasSeq;
 import std.traits : Parameters, ReturnType;
-import core.atomic;
 import core.thread;
 import core.time;
-
-import std.stdio;
-import std.process;
 
 /// Data sent by the caller
 private struct Command
@@ -607,7 +603,6 @@ public final class RemoteAPI (API) : API
                                     handle(cmd);
                                 });
                         });
-                        node_scheduler.yield();
                 }
                 C.thisInfo.cleanup(true);
                 // Make sure the scheduler is not waiting for polling tasks
@@ -841,25 +836,24 @@ public final class RemoteAPI (API) : API
                             Command command = Command(C.thisMessageDispatcher(), main_scheduler.getNextResponseId(), ovrld.mangleof, serialized);
                             this.childTid.send(command);
 
-                            shared(int) terminated = 0;
+                            bool terminated = false;
                             main_scheduler.spawn(() {
-                                while (!atomicLoad(terminated))
+                                while (!terminated)
                                 {
                                     C.thisMessageDispatcher.receiveTimeout(10.msecs,
                                         (Response res) {
                                             main_scheduler.pending = res;
                                             main_scheduler.waiting[res.id].c.notify();
                                         });
-                                    C.yield();
                                 }
                             });
 
                             Response res;
                             main_scheduler.spawn(() {
                                 res = main_scheduler.waitResponse(command.id, this.timeout);
-                                terminated.atomicOp!"+="(1);
+                                terminated = true;
                             });
-                            while (!atomicLoad(terminated)) Thread.sleep(1.msecs);
+                            while (!terminated) Thread.sleep(1.msecs);
                             return res;
                         }();
                     }
@@ -883,24 +877,23 @@ public final class RemoteAPI (API) : API
 
                             Command command = Command(C.thisMessageDispatcher(), remote_scheduler.getNextResponseId(), ovrld.mangleof, serialized);
 
-                            shared(int) terminated = 0;
+                            bool terminated = false;
                             remote_scheduler.spawn(() {
                                 this.childTid.send(command);
-                                while (!atomicLoad(terminated))
+                                while (!terminated)
                                 {
                                     C.thisMessageDispatcher.receiveTimeout(10.msecs,
                                         (Response res) {
                                             remote_scheduler.pending = res;
                                             remote_scheduler.waiting[res.id].c.notify();
                                         });
-                                    C.yield();
                                 }
                             });
 
                             Response res;
                             remote_scheduler.start(() {
                                 res = remote_scheduler.waitResponse(command.id, this.timeout);
-                                terminated.atomicOp!"+="(1);
+                                terminated = true;
                             });
                             return res;
                         }();
@@ -1220,13 +1213,12 @@ unittest
     auto node = RemoteAPI!API.spawn!Node();
     assert(node.getCounter() == 0);
     node.start();
-    assert(node.getCounter() == 1);
-    assert(node.getCounter() == 0);
+    Thread.sleep(100.msecs);
+    assert(node.getCounter() >= 1);
     Thread.sleep(1.seconds);
     // It should be 19 but some machines are very slow
     // (e.g. Travis Mac testers) so be safe
     assert(node.getCounter() >= 9);
-    assert(node.getCounter() == 0);
     node.ctrl.shutdown();
 }
 
@@ -1308,12 +1300,12 @@ unittest
     assert(current4 - current2 >= 1.seconds);
 
     // Now drop many messages
-    n1.sleep(3.seconds, true);
+    n1.sleep(2.seconds, true);
     for (size_t i = 0; i < 100; i++)
         n2.asyncCall();
     // Make sure we don't end up blocked forever
-    Thread.sleep(1.seconds);
-    assert(3 == n1.call());
+    Thread.sleep(2.seconds);
+    assert(3 <= n1.call());
 
     // Debug output, uncomment if needed
     version (none)
@@ -1656,7 +1648,7 @@ unittest
 
             // Requests are dropped, so it times out
             assert(node.ping() == 42);
-            node.ctrl.sleep(10.msecs, true);
+            node.ctrl.sleep(20.msecs, true);
             assertThrown!Exception(node.ping());
         }
     }
