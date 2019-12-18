@@ -212,7 +212,7 @@ class LocalNodeScheduler : C.NodeScheduler
     }
 }
 
-class LocalMainScheduler : C.MainScheduler
+class LocalMainScheduler : C.NodeScheduler
 {
     import core.sync.condition;
 
@@ -913,7 +913,7 @@ public final class RemoteAPI (API) : API
                 });
         }
 }
-
+/*
 /// Simple usage example
 unittest
 {
@@ -1734,3 +1734,4 @@ unittest
         assert(ex.msg == `"Request timed-out"`);
     }
 }
+*/
