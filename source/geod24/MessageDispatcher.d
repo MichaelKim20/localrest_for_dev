@@ -40,6 +40,8 @@ import core.time : MonoTime;
 import core.thread;
 import std.typecons : Tuple;
 
+import std.stdio;
+
 private bool hasLocalAliasing (Types...)()
 {
     import std.typecons : Rebindable;
@@ -874,6 +876,7 @@ private:
     size_t m_count;
 }
 
+
 ///
 private template receiveOnlyRet (T...)
 {
@@ -1109,6 +1112,7 @@ public class MessageDispatcher
     }
 }
 
+
 /*******************************************************************************
 
     Encapsulates all implementation-level data needed for scheduling.
@@ -1166,22 +1170,23 @@ public struct ThreadInfo
 
     public void cleanup (bool forced = false)
     {
-        writefln("cleanup 1");
+        import std.stdio;
+
+        //writefln("cleanup %s %s 1", ident, scheduler);
         if (this.ident is null)
             return;
 
-        writefln("cleanup 2");
+        writefln("cleanup %s %s 2", ident, scheduler);
         if (!this.is_inherited)
         {
-            writefln("cleanup 3");
+            writefln("cleanup %s %s 3", ident, scheduler);
             foreach (dispatcher; links.keys)
                 dispatcher._send(MsgType.linkDead, this.ident);
 
-            writefln("cleanup 4");
             //if (this.owner !is null)
-            //    this.owner._send(MsgType.linkDead, this.ident);
+            //   this.owner._send(MsgType.linkDead, this.ident);
 
-            writefln("cleanup 5");
+            writefln("cleanup %s %s 4", ident, scheduler);
             if ((this.scheduler !is null) && this.have_scheduler)
                 this.scheduler.stop({
                     if (this.ident !is null)
@@ -1190,6 +1195,7 @@ public struct ThreadInfo
             else
                 if (this.ident !is null)
                     this.ident.cleanup();
+            writefln("cleanup %s %s 5", ident, scheduler);
         }
     }
 }
@@ -1411,7 +1417,6 @@ public class ThreadScheduler : Scheduler
     {
         return new Condition(m);
     }
-
 }
 
 
@@ -1765,27 +1770,159 @@ public class NodeScheduler : FiberScheduler
 
     override protected void create (void delegate () op) nothrow
     {
-        MessageDispatcher spawn_dispatcher;
-        MessageDispatcher owner_dispatcher;
-        Scheduler owner_scheduler;
-
-        try {
-            spawn_dispatcher = thisMessageDispatcher;
-            owner_dispatcher = ownerMessageDispatcher;
-            owner_scheduler = thisScheduler;
-        }
-        catch (Exception)
-        {
-        }
-
         void wrap ()
         {
-            this.thisInfo.ident = spawn_dispatcher;
-            this.thisInfo.owner = owner_dispatcher;
-            this.thisInfo.scheduler = owner_scheduler;
-            this.thisInfo.have_scheduler = false;
-            this.thisInfo.is_inherited = true;
+            scope (exit)
+            {
+                thisInfo.cleanup();
+            }
+            op();
+        }
 
+        m.lock_nothrow();
+        m_fibers ~= new InfoFiber(&wrap);
+        m.unlock_nothrow();
+    }
+}
+
+
+
+/*******************************************************************************
+
+    An Main-Thread's Scheduler using Fibers.
+
+*******************************************************************************/
+
+public class MainScheduler : FiberScheduler
+{
+    private shared(bool) terminated;
+    private shared(MonoTime) terminated_time;
+    private shared(bool) stoped;
+    private Mutex m;
+    private Duration sleep_interval;
+    private Duration stop_delay_time;
+
+    /// Ctor
+    public this ()
+    {
+        this.m = new Mutex();
+        this.terminated = false;
+        this.stoped = false;
+        this.stop_delay_time = 1000.msecs;
+
+        auto spawn_dispatcher = thisInfo.ident;
+        auto owner_dispatcher = thisInfo.owner;
+        auto spawn_scheduler = thisInfo.scheduler;
+
+        void exec ()
+        {
+            thisInfo.ident = spawn_dispatcher;
+            thisInfo.owner = owner_dispatcher;
+            thisInfo.scheduler = spawn_scheduler;
+            thisInfo.have_scheduler = false;
+            thisInfo.is_inherited = true;
+            this.dispatch();
+        }
+
+        thread_scheduler.spawn(&exec);
+    }
+
+    /***************************************************************************
+
+        This creates a new Fiber for the supplied op and then starts the
+        dispatcher.
+
+    ***************************************************************************/
+
+    override public void start (void delegate () op)
+    {
+        create(op);
+        yield();
+    }
+
+    /***************************************************************************
+
+        This calls at the end of the program and commands the scheduler to end.
+        This stops the dispatcher.
+
+    ***************************************************************************/
+
+    override public void stop (void delegate () op, bool forced = false)
+    {
+        if (forced)
+            this.stop_delay_time = 10.msecs;
+        else
+            this.stop_delay_time = 1000.msecs;
+
+        terminated = true;
+        terminated_time = MonoTime.currTime;
+        while (!this.stoped)
+            sleep(100.msecs);
+        op();
+    }
+
+
+    /***************************************************************************
+
+        Manages fiber's work schedule.
+
+    ***************************************************************************/
+
+    override protected void dispatch ()
+    {
+        import std.algorithm.mutation : remove;
+        bool done = terminated && (m_fibers.length == 0);
+        size_t loop = 0;
+
+        while (!done)
+        {
+            m.lock();
+            if (m_fibers.length > 0)
+            {
+                auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
+                if (t !is null && !(cast(OwnerTerminated) t))
+                {
+                    throw t;
+                }
+                if (m_fibers[m_pos].state == Fiber.State.TERM)
+                {
+                    if (m_pos >= (m_fibers = remove(m_fibers, m_pos)).length)
+                        m_pos = 0;
+                }
+                else if (m_pos++ >= m_fibers.length - 1)
+                {
+                    m_pos = 0;
+                }
+            }
+            done = terminated && (m_fibers.length == 0);
+            if (!done && terminated)
+            {
+                auto elapsed = MonoTime.currTime - terminated_time;
+                if (elapsed > this.stop_delay_time)
+                    done = true;
+            }
+            m.unlock();
+            if ((++loop % 50) == 0)
+                Thread.sleep(10.msecs);
+        }
+        this.stoped = true;
+    }
+
+
+    /***************************************************************************
+
+        Create a new fiber and add it to the array.
+
+    ***************************************************************************/
+
+    override protected void create (void delegate () op) nothrow
+    {
+        void wrap ()
+        {
+            scope (exit)
+            {
+                thisInfo.cleanup();
+            }
             op();
         }
 
@@ -1821,8 +1958,11 @@ public @property MessageDispatcher thisMessageDispatcher () @safe
         if (thisInfo.ident !is null)
             return thisInfo.ident;
         thisInfo.ident = new MessageDispatcher();
-        main_thread_scheduler = (main_thread_scheduler !is null) ? main_thread_scheduler : new NodeScheduler();
+
+        main_thread_scheduler = (main_thread_scheduler !is null) ? main_thread_scheduler : new MainScheduler();
+
         thisInfo.scheduler = main_thread_scheduler;
+
         thisInfo.have_scheduler = true;
         return thisInfo.ident;
     }
@@ -1843,6 +1983,7 @@ public @property MessageDispatcher ownerMessageDispatcher ()
 }
 
 
+
 /*******************************************************************************
 
     Returns a Scheduler assigned to a called thread.
@@ -1854,12 +1995,15 @@ public @property Scheduler thisScheduler () @safe
     static auto trus () @trusted
     {
         if (thisInfo.scheduler !is null)
+        {
+            if (cast(MainScheduler)thisInfo.scheduler)
+                thisInfo.scheduler = main_thread_scheduler;
             return thisInfo.scheduler;
-
+        }
         if (thisInfo.ident is null)
             thisInfo.ident = new MessageDispatcher();
 
-        main_thread_scheduler = (main_thread_scheduler !is null) ? main_thread_scheduler : new NodeScheduler();
+        main_thread_scheduler = (main_thread_scheduler !is null) ? main_thread_scheduler : new MainScheduler();
         thisInfo.scheduler = main_thread_scheduler;
 
         thisInfo.have_scheduler = true;
@@ -2041,6 +2185,7 @@ public void spawnInheritedFiber (void delegate () op)
     });
 }
 
+
 void yield ()
 {
     thisScheduler.yield();
@@ -2063,26 +2208,7 @@ void sleep (Duration timeout)
     condition.wait(timeout);
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-import std.stdio;
-
+/*
 ///
 @system unittest
 {
@@ -2096,106 +2222,91 @@ import std.stdio;
                 (int i)
                 {
                     received = text("Received the number ", i);
-                    writefln(received);
 
                     // Send a message back to the owner thread
                     // indicating success.
                     owner.send(true);
                 }
             );
-            writefln("1");
+
             thisInfo.cleanup(true);
-            writefln("2");
         });
     }
 
     // Start spawnedFunc in a new thread.
     auto childMessageDispatcher = spawnThread(&spawnedFunc, thisMessageDispatcher);
 
-    thisScheduler.start({
-        // Send the number 42 to this new thread.
-        childMessageDispatcher.send(42);
+    // Send the number 42 to this new thread.
+    childMessageDispatcher.send(42);
 
-        // Receive the result code.
-        auto wasSuccessful = thisMessageDispatcher.receiveOnly!(bool);
-        assert(wasSuccessful);
-        assert(received == "Received the number 42");
-        writefln("%s", wasSuccessful);
-            writefln("3");
-        thisInfo.cleanup(true);
-            writefln("4");
-    });
+    // Receive the result code.
+    auto wasSuccessful = thisMessageDispatcher.receiveOnly!(bool);
+    assert(wasSuccessful);
+    assert(received == "Received the number 42");
 }
-/*
-unittest
-{
-    thisScheduler.start({
-        scope (exit) thisInfo.cleanup(true);
 
-        static struct Container { MessageDispatcher t; }
-        static assert(!hasLocalAliasing!(MessageDispatcher, Container, int));
-    });
-}
-*/
 @safe unittest
 {
-    /* Issue 20097 */
+    static struct Container { MessageDispatcher t; }
+    static assert(!hasLocalAliasing!(MessageDispatcher, Container, int));
+}
+
+@safe unittest
+{
     import std.datetime.systime : SysTime;
     static struct Container { SysTime time; }
     static assert(!hasLocalAliasing!(SysTime, Container));
 }
-/*
+
 ///
 @system unittest
 {
     import std.variant : Variant;
 
-    thisScheduler.start({
-        auto process = ()
-        {
-            thisScheduler.start({
-                thisMessageDispatcher.receive(
-                    (int i)
-                    {
-                        ownerMessageDispatcher.send(1);
-                    },
-                    (double f)
-                    {
-                        ownerMessageDispatcher.send(2);
-                    },
-                    (Variant v)
-                    {
-                        ownerMessageDispatcher.send(3);
-                    }
-                );
-                thisInfo.cleanup(true);
-            });
-        };
+    auto process = ()
+    {
+        thisScheduler.start({
+            thisMessageDispatcher.receive(
+                (int i)
+                {
+                    ownerMessageDispatcher.send(1);
+                },
+                (double f)
+                {
+                    ownerMessageDispatcher.send(2);
+                },
+                (Variant v)
+                {
+                    ownerMessageDispatcher.send(3);
+                }
+            );
+            thisInfo.cleanup(true);
+        });
+    };
 
-        {
-            auto spawnedMessageDispatcher = spawnThread(process);
-            spawnedMessageDispatcher.send(42);
-            thisMessageDispatcher.receive((int res) {
-                assert(res == 1);
-            });
-        }
+    {
+        auto spawnedMessageDispatcher = spawnThread(process);
+        spawnedMessageDispatcher.send(42);
+        thisMessageDispatcher.receive((int res) {
+            assert(res == 1);
+        });
+    }
 
-        {
-            auto spawnedMessageDispatcher = spawnThread(process);
-            spawnedMessageDispatcher.send(3.14);
-            thisMessageDispatcher.receive((int res) {
-                assert(res == 2);
-            });
-        }
+    {
+        auto spawnedMessageDispatcher = spawnThread(process);
+        spawnedMessageDispatcher.send(3.14);
+        thisMessageDispatcher.receive((int res) {
+            assert(res == 2);
+        });
+    }
 
-        {
-            auto spawnedMessageDispatcher = spawnThread(process);
-            spawnedMessageDispatcher.send("something else");
-            thisMessageDispatcher.receive((int res) {
-                assert(res == 3);
-            });
-        }
-    });
+    {
+        auto spawnedMessageDispatcher = spawnThread(process);
+        spawnedMessageDispatcher.send("something else");
+        thisMessageDispatcher.receive((int res) {
+            assert(res == 3);
+        });
+    }
 }
 
 @safe unittest
@@ -2408,11 +2519,13 @@ version (unittest)
     static assert( __traits(compiles, spawnThread(callable10, 10)));
     static assert( __traits(compiles, spawnThread(callable11, 11)));
 }
+*/
 
 unittest
 {
     import std.concurrency;
-    import std.stdio;
+
+    writefln("test 0000 %s", thisScheduler);
 
     auto process = (MessageDispatcher owner)
     {
@@ -2457,6 +2570,6 @@ unittest
         );
         assert(got_i == 42);
         assert(got_s == "string");
+        thisInfo.cleanup(true);
     });
 }
-*/

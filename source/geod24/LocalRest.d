@@ -162,7 +162,7 @@ private struct ArgWrapper (T...)
     T args;
 }
 
-class LocalNodeScheduler : C.NodeScheduler
+class WaitManager
 {
     import core.sync.condition;
 
@@ -175,6 +175,13 @@ class LocalNodeScheduler : C.NodeScheduler
     /// Request IDs waiting for a response
     private Waiting[ulong] waiting;
 
+    private C.FiberScheduler scheduler;
+
+    public this (C.FiberScheduler scheduler)
+    {
+        this.scheduler = scheduler;
+    }
+
     /// Get the next available request ID
     public size_t getNextResponseId ()
     {
@@ -185,7 +192,7 @@ class LocalNodeScheduler : C.NodeScheduler
     public Response waitResponse (size_t id, Duration duration) nothrow
     {
         if (id !in this.waiting)
-            this.waiting[id] = Waiting(new C.FiberCondition(null, this), false);
+            this.waiting[id] = Waiting(new C.FiberCondition(null, this.scheduler), false);
 
         Waiting* ptr = &this.waiting[id];
         if (ptr.busy)
@@ -212,111 +219,35 @@ class LocalNodeScheduler : C.NodeScheduler
     }
 }
 
-class LocalMainScheduler : C.NodeScheduler
+class LocalNodeScheduler : C.NodeScheduler
 {
-    import core.sync.condition;
+    public WaitManager wait_manager;
 
-    /// Just a FiberCondition with a state
-    private struct Waiting
+    public this ()
     {
-        C.FiberCondition c;
-        bool busy;
+        super();
+        this.wait_manager = new WaitManager(this);
     }
+}
 
-    /// The 'Response' we are currently processing, if any
-    private Response pending;
+class LocalMainScheduler : C.MainScheduler
+{
+    public WaitManager wait_manager;
 
-    /// Request IDs waiting for a response
-    private Waiting[ulong] waiting;
-
-    /// Get the next available request ID
-    public size_t getNextResponseId ()
+    public this ()
     {
-        static size_t last_idx;
-        return last_idx++;
-    }
-
-    public Response waitResponse (size_t id, Duration duration) nothrow
-    {
-        if (id !in this.waiting)
-            this.waiting[id] = Waiting(new C.FiberCondition(null, this), false);
-
-        Waiting* ptr = &this.waiting[id];
-        if (ptr.busy)
-            assert(0, "Trying to override a pending request");
-
-        // We yield and wait for an answer
-        ptr.busy = true;
-
-        if (duration == Duration.init)
-            ptr.c.wait();
-        else if (!ptr.c.wait(duration))
-            this.pending = Response(Status.Timeout, this.pending.id);
-
-        ptr.busy = false;
-        // After control returns to us, `pending` has been filled
-        scope(exit) this.pending = Response.init;
-        return this.pending;
-    }
-
-    /// Called when a waiting condition was handled and can be safely removed
-    public void remove (size_t id)
-    {
-        this.waiting.remove(id);
+        super();
+        this.wait_manager = new WaitManager(this);
     }
 }
 
 class LocalRemoteScheduler : C.FiberScheduler
 {
-    import core.sync.condition;
+    public WaitManager wait_manager;
 
-    /// Just a FiberCondition with a state
-    private struct Waiting
+    public this ()
     {
-        C.FiberCondition c;
-        bool busy;
-    }
-
-    /// The 'Response' we are currently processing, if any
-    private Response pending;
-
-    /// Request IDs waiting for a response
-    private Waiting[ulong] waiting;
-
-    /// Get the next available request ID
-    public size_t getNextResponseId ()
-    {
-        static size_t last_idx;
-        return last_idx++;
-    }
-
-    public Response waitResponse (size_t id, Duration duration) nothrow
-    {
-        if (id !in this.waiting)
-            this.waiting[id] = Waiting(new C.FiberCondition(null, this), false);
-
-        Waiting* ptr = &this.waiting[id];
-        if (ptr.busy)
-            assert(0, "Trying to override a pending request");
-
-        // We yield and wait for an answer
-        ptr.busy = true;
-
-        if (duration == Duration.init)
-            ptr.c.wait();
-        else if (!ptr.c.wait(duration))
-            this.pending = Response(Status.Timeout, this.pending.id);
-
-        ptr.busy = false;
-        // After control returns to us, `pending` has been filled
-        scope(exit) this.pending = Response.init;
-        return this.pending;
-    }
-
-    /// Called when a waiting condition was handled and can be safely removed
-    public void remove (size_t id)
-    {
-        this.waiting.remove(id);
+        this.wait_manager = new WaitManager(this);
     }
 }
 
@@ -400,6 +331,12 @@ public final class RemoteAPI (API) : API
     {
         if (C.main_thread_scheduler is null)
             C.main_thread_scheduler = new LocalMainScheduler();
+
+        if (!cast(LocalMainScheduler)C.main_thread_scheduler)
+        {
+            C.main_thread_scheduler.stop({}, true);
+            C.main_thread_scheduler = new LocalMainScheduler();
+        }
 
         auto scheduler = new LocalNodeScheduler();
         auto childTid = C.spawnThreadScheduler(new LocalNodeScheduler(), &spawned!(Impl), args);
@@ -551,65 +488,54 @@ public final class RemoteAPI (API) : API
             }
             else static if (is(T == Response))
             {
-                node_scheduler.pending = arg;
-                node_scheduler.waiting[arg.id].c.notify();
-                node_scheduler.remove(arg.id);
+                node_scheduler.wait_manager.pending = arg;
+                node_scheduler.wait_manager.waiting[arg.id].c.notify();
+                node_scheduler.wait_manager.remove(arg.id);
             }
             else static assert(0, "Unhandled type: " ~ T.stringof);
         }
 
-        try
-            C.thisScheduler.start({
-                bool terminated = false;
-                while (!terminated)
-                {
-                    C.thisMessageDispatcher.receiveTimeout(10.msecs,
-                        (C.OwnerTerminated e)
-                        {
-                            terminated = true;
-                        },
-                        (ShutdownCommand e)
-                        {
-                            terminated = true;
-                        },
-                        (TimeCommand s)
-                        {
-                            control.sleep_until = Clock.currTime + s.dur;
-                            control.drop = s.drop;
-                        },
-                        (FilterAPI filter_api)
-                        {
-                            control.filter = filter_api;
-                        },
-                        (Response res)
-                        {
-                            if (!isSleeping())
+        C.thisScheduler.start({
+            bool terminated = false;
+            while (!terminated)
+            {
+                C.thisMessageDispatcher.receiveTimeout(10.msecs,
+                    (C.OwnerTerminated e) { terminated = true; },
+                    (ShutdownCommand e) {
+                        terminated = true;
+                    },
+                    (TimeCommand s)      {
+                        control.sleep_until = Clock.currTime + s.dur;
+                        control.drop = s.drop;
+                    },
+                    (FilterAPI filter_api) {
+                        control.filter = filter_api;
+                    },
+                    (Response res)
+                    {
+                        if (!isSleeping())
+                            handle(res);
+                        else if (!control.drop)
+                            node_scheduler.spawn({
+                                while (isSleeping())
+                                    node_scheduler.yield();
                                 handle(res);
-                            else if (!control.drop)
-                                node_scheduler.spawn({
-                                    while (isSleeping())
-                                        node_scheduler.yield();
-                                    handle(res);
-                                });
-                        },
-                        (Command cmd)
-                        {
-                            if (!isSleeping())
+                            });
+                    },
+                    (Command cmd)
+                    {
+                        if (!isSleeping())
+                            handle(cmd);
+                        else if (!control.drop)
+                            node_scheduler.spawn({
+                                while (isSleeping())
+                                    node_scheduler.yield();
                                 handle(cmd);
-                            else if (!control.drop)
-                                node_scheduler.spawn({
-                                    while (isSleeping())
-                                        node_scheduler.yield();
-                                    handle(cmd);
-                                });
-                        });
-                }
-                C.thisInfo.cleanup(true);
-                // Make sure the scheduler is not waiting for polling tasks
-            });
-        catch (Exception e)
-            if (e !is exc)
-                throw e;
+                            });
+                    });
+            }
+            C.thisInfo.cleanup(true);
+        });
     }
 
     /// Where to send message to
@@ -833,7 +759,7 @@ public final class RemoteAPI (API) : API
                             auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                                 .serializeToJsonString();
 
-                            Command command = Command(C.thisMessageDispatcher(), main_scheduler.getNextResponseId(), ovrld.mangleof, serialized);
+                            Command command = Command(C.thisMessageDispatcher(), main_scheduler.wait_manager.getNextResponseId(), ovrld.mangleof, serialized);
                             this.childTid.send(command);
 
                             bool terminated = false;
@@ -842,15 +768,15 @@ public final class RemoteAPI (API) : API
                                 {
                                     C.thisMessageDispatcher.receiveTimeout(10.msecs,
                                         (Response res) {
-                                            main_scheduler.pending = res;
-                                            main_scheduler.waiting[res.id].c.notify();
+                                            main_scheduler.wait_manager.pending = res;
+                                            main_scheduler.wait_manager.waiting[res.id].c.notify();
                                         });
                                 }
                             });
 
                             Response res;
                             main_scheduler.spawn(() {
-                                res = main_scheduler.waitResponse(command.id, this.timeout);
+                                res = main_scheduler.wait_manager.waitResponse(command.id, this.timeout);
                                 terminated = true;
                             });
                             while (!terminated) Thread.sleep(1.msecs);
@@ -863,9 +789,9 @@ public final class RemoteAPI (API) : API
                         res = () @trusted {
                             auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                                 .serializeToJsonString();
-                            Command command = Command(C.thisMessageDispatcher(), node_scheduler.getNextResponseId(), ovrld.mangleof, serialized);
+                            Command command = Command(C.thisMessageDispatcher(), node_scheduler.wait_manager.getNextResponseId(), ovrld.mangleof, serialized);
                             this.childTid.send(command);
-                            return node_scheduler.waitResponse(command.id, this.timeout);
+                            return node_scheduler.wait_manager.waitResponse(command.id, this.timeout);
                         }();
                     }
                     else if (cast(LocalRemoteScheduler)C.thisScheduler)
@@ -875,7 +801,7 @@ public final class RemoteAPI (API) : API
                             auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                                 .serializeToJsonString();
 
-                            Command command = Command(C.thisMessageDispatcher(), remote_scheduler.getNextResponseId(), ovrld.mangleof, serialized);
+                            Command command = Command(C.thisMessageDispatcher(), remote_scheduler.wait_manager.getNextResponseId(), ovrld.mangleof, serialized);
 
                             bool terminated = false;
                             remote_scheduler.spawn(() {
@@ -884,16 +810,17 @@ public final class RemoteAPI (API) : API
                                 {
                                     C.thisMessageDispatcher.receiveTimeout(10.msecs,
                                         (Response res) {
-                                            remote_scheduler.pending = res;
-                                            remote_scheduler.waiting[res.id].c.notify();
+                                            remote_scheduler.wait_manager.pending = res;
+                                            remote_scheduler.wait_manager.waiting[res.id].c.notify();
                                         });
                                 }
                             });
 
                             Response res;
                             remote_scheduler.start(() {
-                                res = remote_scheduler.waitResponse(command.id, this.timeout);
+                                res = remote_scheduler.wait_manager.waitResponse(command.id, this.timeout);
                                 terminated = true;
+                                C.thisInfo.cleanup(true);
                             });
                             return res;
                         }();
@@ -913,7 +840,8 @@ public final class RemoteAPI (API) : API
                 });
         }
 }
-/*
+
+import std.stdio;
 /// Simple usage example
 unittest
 {
@@ -944,7 +872,7 @@ unittest
 
     test.ctrl.shutdown();
 }
-
+/*
 /// In a real world usage, users will most likely need to use the registry
 unittest
 {
@@ -953,7 +881,6 @@ unittest
     import geod24.Registry;
 
     __gshared Registry registry;
-
     registry.initialize();
 
     static interface API
@@ -1027,9 +954,9 @@ unittest
         assert(node2.last() == "pubkey");
         node1.ctrl.shutdown();
         node2.ctrl.shutdown();
-
         thisScheduler.start({
             parent.send(42);
+            thisInfo.cleanup(true);
         });
     }
 
@@ -1119,6 +1046,7 @@ unittest
 /// Support for circular nodes call
 unittest
 {
+    static import geod24.MessageDispatcher;
     import std.format;
 
     __gshared C.MessageDispatcher[string] tbn;
@@ -1173,8 +1101,6 @@ unittest
 {
     static import core.thread;
     import core.time;
-    import core.sync.mutex;
-    static import geod24.MessageDispatcher;
 
     static interface API
     {
@@ -1191,9 +1117,7 @@ unittest
 
         public override ulong getCounter ()
         {
-            scope (exit) {
-                this.counter = 0;
-            }
+            scope (exit) this.counter = 0;
             return this.counter;
         }
 
@@ -1202,7 +1126,7 @@ unittest
             while (true)
             {
                 this.counter++;
-                C.sleep(50.msecs);
+                sleep(50.msecs);
             }
         }
 
@@ -1252,7 +1176,6 @@ unittest
 // Simulate temporary outage
 unittest
 {
-    static import geod24.MessageDispatcher;
     __gshared C.MessageDispatcher n1tid;
 
     static interface API
@@ -1648,7 +1571,7 @@ unittest
 
             // Requests are dropped, so it times out
             assert(node.ping() == 42);
-            node.ctrl.sleep(20.msecs, true);
+            node.ctrl.sleep(30.msecs, true);
             assertThrown!Exception(node.ping());
         }
     }
@@ -1682,9 +1605,7 @@ unittest
         override void check ()
         {
             auto node = new RemoteAPI!API(node_tid, 5000.msecs);
-
             assert(node.ping() == 42);
-
             // We need to return immediately so that the main thread
             // puts us to sleep
             node.ctrl.sleep(200.msecs);
@@ -1734,4 +1655,5 @@ unittest
         assert(ex.msg == `"Request timed-out"`);
     }
 }
+
 */
