@@ -18,6 +18,31 @@ import core.stdc.stdlib : exit;
 import std.stdio;
 import vibe.data.json;
 
+
+public class MyBox (T)
+{
+	public void send(T) (T val)
+	{
+		writeln("send %s", val);
+	}
+}
+
+/*
+public class MyNode (T, U)
+{
+	this
+}
+*/
+
+public void viewOptions(T...) (T ops)
+{
+	foreach (i, t1; T)
+	{
+		writefln("%s", t1);
+	}
+}
+
 void main()
 {
+	viewOptions(int, double);
 }

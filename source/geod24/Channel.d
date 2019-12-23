@@ -93,14 +93,14 @@ public class Channel (T)
             SudoFiber!T sf = this.recvq.front;
             this.recvq.removeFront();
 
-            this.mutex.unlock();
-
             *(sf.elem_ptr) = elem;
 
             if (sf.fiber !is null)
                 sf.fiber.call();
             else if (sf.swdg !is null)
                 sf.swdg();
+
+            this.mutex.unlock();
 
             return true;
         }
