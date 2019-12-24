@@ -1,48 +1,84 @@
-/+ dub.sdl:
-	name "test"
-	description "Tests vibe.d's std.concurrency integration"
-	dependency "vibe-core" path="../"
-+/
 module test;
 
-import vibe.core.core;
-import vibe.core.log;
-import vibe.http.router;
-import vibe.http.server;
-import vibe.web.rest;
-
+import std.stdio;
 import core.atomic;
 import core.time;
-import core.stdc.stdlib : exit;
 
-import std.stdio;
-import vibe.data.json;
+import core.sync.condition;
+import core.thread;
+import core.sync.mutex;
+import core.sync.semaphore;
 
+import geod24.tinfo;
 
-public class MyBox (T)
+void testWaitTimeout()
 {
-	public void send(T) (T val)
+	auto mutex      = new Mutex;
+	auto condReady  = new Condition( mutex );
+	bool waiting    = false;
+	bool alertedOne = true;
+	bool alertedTwo = true;
+
+	void waiter()
 	{
-		writeln("send %s", val);
+		synchronized( mutex )
+		{
+			waiting    = true;
+			writeln("wait 1");
+			// we never want to miss the notification (30s)
+			alertedOne = condReady.wait( dur!"seconds"(30) );
+			writeln("wait 2");
+			// but we don't want to wait long for the timeout (10ms)
+			alertedTwo = condReady.wait( dur!"msecs"(10) );
+			writeln("wait 3");
+		}
 	}
+
+	auto thread = new Thread( &waiter );
+	thread.start();
+
+	int count = 0;
+	while ( true )
+	{
+		synchronized( mutex )
+		{
+			if ( waiting )
+			{
+				writefln("notify - %s", ++count);
+				condReady.notify();
+				break;
+			}
+		}
+		Thread.yield();
+	}
+	thread.join();
+	assert( waiting );
+	assert( alertedOne );
+	assert( !alertedTwo );
 }
 
-/*
-public class MyNode (T, U)
+void test1 ()
 {
-	this
-}
-*/
+	auto thread1 = new Thread({
+		tinfo.id = "hello";
+		while (true)
+		{
+			writefln("%s", tinfo.id);
+		}
+	});
+	thread1.start();
 
-public void viewOptions(T...) (T ops)
-{
-	foreach (i, t1; T)
-	{
-		writefln("%s", t1);
-	}
+	auto thread2 = new Thread({
+		tinfo.id = "kim";
+		while (true)
+		{
+			writefln("%s", tinfo.id);
+		}
+	});
+	thread2.start();
 }
 
 void main()
 {
-	viewOptions(int, double);
+	test1();
 }
