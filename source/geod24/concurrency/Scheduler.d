@@ -1,342 +1,3 @@
-module geod24.concurrency;
-
-import std.container;
-import std.range.primitives;
-import std.range.interfaces : InputRange;
-
-import core.sync.condition;
-import core.sync.mutex;
-import core.time : MonoTime;
-import core.thread;
-import std.typecons : Tuple;
-
-///
-public struct ThreadInfo
-{
-    /// Manages fiber's work schedule inside current thread.
-    public Scheduler scheduler;
-
-    public Object[string] members;
-
-    static @property ref thisInfo () nothrow
-    {
-        static ThreadInfo val;
-        return val;
-    }
-
-    public void cleanup ()
-    {
-
-    }
-}
-
-public @property ref ThreadInfo thisInfo () nothrow
-{
-    return ThreadInfo.thisInfo;
-}
-
-/***************************************************************************
-
-    Returns a Scheduler assigned to a called thread.
-
-***************************************************************************/
-
-public @property Scheduler thisScheduler () nothrow
-{
-    return thisInfo.scheduler;
-}
-
-///
-public class MessageDispatcher (T)
-{
-    public FiberScheduler scheduler;
-    public Thread thread;
-
-    public this (void function() fn, ulong sz = 0LU) pure nothrow @nogc @safe
-    {
-        super(fn, sz);
-        this.scheduler = new FiberScheduler;
-        this.chan = new Channel!T(this.scheduler);
-    }
-
-    public this (void delegate() dg, ulong sz = 0LU) pure nothrow @nogc @safe
-    {
-        super(dg, sz);
-        this.scheduler = new FiberScheduler!T();
-        this.chan = new Channel!T(this.scheduler, chan_size);
-    }
-
-    public void send (T) (T msg)
-    {
-        auto f = cast(MessageInfoFiber) Fiber.getThis();
-        if (f !is null)
-            this.chan.put(msg);
-        else
-        {
-            auto cond = this.scheduler.newCondition(null);
-            this.spawnFiber(
-            {
-                this.chan.put(msg);
-                cond.notify();
-            });
-            cond.wait();
-        }
-    }
-
-    public T receive ()
-    {
-        auto f = cast(MessageInfoFiber) Fiber.getThis();
-        if (f !is null)
-            return this.chan.get();
-        else
-        {
-            T res;
-            auto cond = this.scheduler.newCondition(null);
-            this.spawnFiber(
-            {
-                this.chan.get(&res);
-                cond.notify();
-            });
-            cond.wait();
-            return res;
-        }
-    }
-
-    public void startFiber (void delegate () op)
-    {
-        this.scheduler.start(op);
-    }
-
-    public void spawnFiber (void delegate () op)
-    {
-        this.scheduler.spawn(op);
-    }
-}
-
-/*******************************************************************************
-
-    This channel has queues that senders and receivers can wait for.
-    With these queues, a single thread alone can exchange data with each other.
-
-    This channel use `NonBlockingQueue`. This is not uses `Lock`
-    A channel is a communication class using which fiber can communicate
-    with each other.
-    Technically, a channel is a data trancontexter pipe where data can be passed
-    into or read from.
-    Hence one fiber can send data into a channel, while other fiber can read
-    that data from the same channel
-
-*******************************************************************************/
-
-public class Channel (T)
-{
-    /// closed
-    private bool closed;
-
-    /// lock
-    private Mutex mutex;
-
-
-    /// collection of send waiters
-    private DList!(ChannelContext!(T)) sendq;
-
-    /// collection of recv waiters
-    private DList!(ChannelContext!(T)) recvq;
-
-    private Scheduler scheduler;
-
-
-    /// Ctor
-    public this (Scheduler sche)
-    {
-        this.closed = false;
-        this.mutex = new Mutex;
-        this.scheduler = sche;
-    }
-
-    /***************************************************************************
-
-        Send data `msg`.
-        First, check the receiving waiter that is in the `recvq`.
-        If there are no targets there, add data to the `queue`.
-        If queue is full then stored waiter(fiber) to the `sendq`.
-
-        Params:
-            msg = value to send
-
-        Return:
-            true if the sending is succescontextul, otherwise false
-
-    ***************************************************************************/
-
-    public bool put (T msg)
-    {
-        this.mutex.lock();
-
-        if (this.closed)
-        {
-            this.mutex.unlock();
-            return false;
-        }
-
-        if (this.recvq[].walkLength > 0)
-        {
-            ChannelContext!T context = this.recvq.front;
-            this.recvq.removeFront();
-
-            this.mutex.unlock();
-
-            *(context.msg_ptr) = msg;
-
-            if (context.condition !is null)
-                context.condition.notify();
-
-            return true;
-        }
-
-        {
-            ChannelContext!T new_context;
-            new_context.msg_ptr = null;
-            new_context.msg = msg;
-            new_context.create_time = MonoTime.currTime;
-            new_context.condition = this.scheduler.newCondition(null);
-
-            this.sendq.insertBack(new_context);
-            this.mutex.unlock();
-
-            new_context.condition.wait();
-        }
-
-        return true;
-    }
-
-    /***************************************************************************
-
-        Write the data received in `msg`
-
-        Params:
-            msg = value to receive
-
-        Return:
-            true if the receiving is succescontextul, otherwise false
-
-    ***************************************************************************/
-
-    public bool get (T* msg)
-    {
-        this.mutex.lock();
-
-        if (this.closed)
-        {
-            (*msg) = T.init;
-            this.mutex.unlock();
-
-            return false;
-        }
-
-        if (this.sendq[].walkLength > 0)
-        {
-            ChannelContext!T context = this.sendq.front;
-            this.sendq.removeFront();
-
-            *(msg) = context.msg;
-
-            if (context.condition !is null)
-                context.condition.notify();
-
-            this.mutex.unlock();
-
-            return true;
-        }
-
-        {
-            ChannelContext!T new_context;
-            new_context.msg_ptr = msg;
-            new_context.create_time = MonoTime.currTime;
-            new_context.condition = this.scheduler.newCondition(null);
-
-            this.recvq.insertBack(new_context);
-            this.mutex.unlock();
-
-            new_context.condition.wait();
-        }
-
-        return true;
-    }
-
-    /***************************************************************************
-
-        Return closing status
-
-        Return:
-            true if channel is closed, otherwise false
-
-    ***************************************************************************/
-
-    public @property bool isClosed () @safe @nogc pure
-    {
-        synchronized (this.mutex)
-        {
-            return this.closed;
-        }
-    }
-
-    /***************************************************************************
-
-        Close Channel
-
-    ***************************************************************************/
-
-    public void close ()
-    {
-        ChannelContext!T context;
-
-        this.mutex.lock();
-        scope (exit) this.mutex.unlock();
-
-        this.closed = true;
-
-        while (true)
-        {
-            if (this.recvq[].walkLength == 0)
-                break;
-
-            context = this.recvq.front;
-            this.recvq.removeFront();
-            if (context.condition !is null)
-                context.condition.notify();
-        }
-
-        while (true)
-        {
-            if (this.sendq[].walkLength == 0)
-                break;
-
-            context = this.sendq.front;
-            this.sendq.removeFront();
-            if (context.condition !is null)
-                context.condition.notify();
-        }
-    }
-}
-
-///
-private struct ChannelContext (T)
-{
-    /// This is a message. Used in put
-    public T  msg;
-
-    /// This is a message point. Used in get
-    public T* msg_ptr;
-
-    /// The creating time
-    public MonoTime create_time;
-
-    //  Waiting Condition
-    public Condition condition;
-}
-
-
 /*******************************************************************************
 
     A Scheduler controls how threading is performed by spawn.
@@ -372,6 +33,16 @@ private struct ChannelContext (T)
 
 *******************************************************************************/
 
+module geod24.concurrency.Scheduler;
+
+import core.sync.condition;
+import core.sync.mutex;
+import core.thread;
+import std.process;
+
+import geod24.concurrency.ThreadInfo;
+
+/// Ditto
 interface Scheduler
 {
     /***************************************************************************
@@ -393,15 +64,13 @@ interface Scheduler
 
     void start (void delegate() op);
 
+
     /***************************************************************************
 
         Assigns a logical thread to execute the supplied op.
 
         This routine is called by spawn.  It is expected to instantiate a new
-        logical thread and run the supplied operation.  This thread must call
-        thisInfo.cleanup() when the thread terminates if the scheduled thread
-        is not a kernel thread--all kernel threads will have their ThreadInfo
-        cleaned up automatically by a thread-local destructor.
+        logical thread and run the supplied operation.
 
         Params:
             op = The function to execute. This may be the actual function passed
@@ -425,6 +94,19 @@ interface Scheduler
     ***************************************************************************/
 
     void yield () nothrow;
+
+    /***************************************************************************
+
+        Returns an appropriate ThreadInfo instance.
+
+        Returns an instance of ThreadInfo specific to the logical thread that
+        is calling this routine or, if the calling thread was not create by
+        this scheduler, returns ThreadInfo.thisInfo instead.
+
+    ***************************************************************************/
+
+    @property ref ThreadInfo thisInfo () nothrow;
+
 
     /***************************************************************************
 
@@ -459,8 +141,18 @@ interface Scheduler
 
 *******************************************************************************/
 
-class ThreadScheduler : Scheduler
+public class ThreadScheduler : Scheduler
 {
+    private static ThreadScheduler scheduler;
+
+    public static @property ThreadScheduler instance ()
+    {
+        if (scheduler is null)
+            scheduler = new ThreadScheduler();
+
+        return scheduler;
+    }
+
 
     /***************************************************************************
 
@@ -474,6 +166,7 @@ class ThreadScheduler : Scheduler
         op();
     }
 
+
     /***************************************************************************
 
         Creates a new kernel thread and assigns it to run the supplied op.
@@ -483,11 +176,15 @@ class ThreadScheduler : Scheduler
     void spawn (void delegate () op)
     {
         auto t = new Thread({
-            scope (exit) thisInfo.cleanup();
+            auto info = thisInfo;
+            scope (exit) {
+                thisInfo.cleanup();
+            }
             op();
         });
         t.start();
     }
+
 
     /***************************************************************************
 
@@ -500,6 +197,7 @@ class ThreadScheduler : Scheduler
         // no explicit yield needed
     }
 
+
     /***************************************************************************
 
         Returns ThreadInfo.thisInfo, since it is a thread-local instance of
@@ -511,6 +209,7 @@ class ThreadScheduler : Scheduler
     {
         return ThreadInfo.thisInfo;
     }
+
 
     /***************************************************************************
 
@@ -549,6 +248,7 @@ class FiberScheduler : Scheduler
         dispatch();
     }
 
+
     /***************************************************************************
 
         This created a new Fiber for the supplied op and adds it to the
@@ -561,6 +261,7 @@ class FiberScheduler : Scheduler
         create(op);
         yield();
     }
+
 
     /***************************************************************************
 
@@ -578,6 +279,7 @@ class FiberScheduler : Scheduler
             Fiber.yield();
     }
 
+
     /***************************************************************************
 
         Returns an appropriate ThreadInfo instance.
@@ -590,6 +292,10 @@ class FiberScheduler : Scheduler
 
     @property ref ThreadInfo thisInfo () nothrow
     {
+        auto f = cast(InfoFiber) Fiber.getThis();
+
+        if (f !is null)
+            return f.info;
         return ThreadInfo.thisInfo;
     }
 
@@ -716,4 +422,23 @@ private:
 private:
     Fiber[] m_fibers;
     size_t m_pos;
+}
+
+/***************************************************************************
+
+    Returns a Scheduler assigned to a called thread.
+
+***************************************************************************/
+
+public @property Scheduler thisScheduler () nothrow
+{
+    if (auto p = "scheduler" in thisInfo.objectValues)
+        return cast(Scheduler)(*p);
+    else
+        return null;
+}
+
+public @property void thisScheduler (Scheduler value) nothrow
+{
+    thisInfo.objectValues["scheduler"] = cast(Object)value;
 }
