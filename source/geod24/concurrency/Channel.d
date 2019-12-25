@@ -1,4 +1,3 @@
-
 /*******************************************************************************
 
     This channel has queues that senders and receivers can wait for.
@@ -19,6 +18,7 @@ module geod24.concurrency.Channel;
 import geod24.concurrency.Scheduler;
 
 import std.container;
+import std.range;
 import core.sync.condition;
 import core.sync.mutex;
 import core.time : MonoTime;
@@ -233,4 +233,58 @@ private struct ChannelContext (T)
 
     //  Waiting Condition
     public Condition condition;
+}
+
+
+/*
+unittest
+{
+    import std.stdio;
+
+    Channel!int chan = new Channel!int();
+    ThreadScheduler thread_scheduler = new ThreadScheduler();
+
+    thread_scheduler.spawn({
+        FiberScheduler fiber_scheduler = new FiberScheduler();
+        fiber_scheduler.start({
+            fiber_scheduler.spawn({
+                thisScheduler = fiber_scheduler;
+
+                writefln("send %s", 1);
+                chan.put(1);
+
+            });
+            fiber_scheduler.spawn({
+                thisScheduler = fiber_scheduler;
+                int res;
+                chan.get(&res);
+                writefln("receive %s", res);
+            });
+        });
+    });
+}
+*/
+
+unittest
+{
+    import std.stdio;
+    import core.thread;
+
+    Channel!int chan = new Channel!int();
+    ThreadScheduler thread_scheduler = new ThreadScheduler();
+
+    thread_scheduler.spawn({
+        thisScheduler = thread_scheduler;
+        writefln("send %s", 1);
+        chan.put(1);
+    });
+
+    thread_scheduler.spawn({
+        thisScheduler = thread_scheduler;
+        int res;
+        chan.get(&res);
+        writefln("receive %s", res);
+    });
+
+    Thread.sleep(10000.msecs);
 }

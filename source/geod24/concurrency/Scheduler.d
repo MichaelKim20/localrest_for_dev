@@ -13,7 +13,7 @@
 
     Example:
     ---
-    import std.concurrency;
+    import std.concurrency;d
     import std.stdio;
 
     void main()
