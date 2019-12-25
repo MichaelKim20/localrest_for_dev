@@ -1,12 +1,12 @@
 module geod24.concurrency.MessageDispatcher;
 
+import geod24.concurrency.Scheduler;
+
 import std.container;
 import core.sync.condition;
 import core.sync.mutex;
 import core.time : MonoTime;
 import core.thread;
-
-import geod24.concurrency.Scheduler;
 
 /// Ditto
 public class MessageDispatcher (T)

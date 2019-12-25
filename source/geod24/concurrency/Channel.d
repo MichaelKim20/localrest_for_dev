@@ -16,12 +16,12 @@
 
 module geod24.concurrency.Channel;
 
+import geod24.concurrency.Scheduler;
+
 import std.container;
 import core.sync.condition;
 import core.sync.mutex;
 import core.time : MonoTime;
-
-import geod24.concurrency.Scheduler;
 
 /// Ditto
 public class Channel (T)
@@ -96,7 +96,6 @@ public class Channel (T)
             ChannelContext!T new_context;
             new_context.msg_ptr = null;
             new_context.msg = msg;
-            new_context.create_time = MonoTime.currTime;
             new_context.condition = thisScheduler.newCondition(null);
 
             this.sendq.insertBack(new_context);
@@ -156,7 +155,6 @@ public class Channel (T)
         {
             ChannelContext!T new_context;
             new_context.msg_ptr = msg;
-            new_context.create_time = MonoTime.currTime;
             new_context.condition = thisScheduler.newCondition(null);
 
             this.recvq.insertBack(new_context);
@@ -233,10 +231,6 @@ private struct ChannelContext (T)
     /// This is a message point. Used in get
     public T* msg_ptr;
 
-    /// The creating time
-    public MonoTime create_time;
-
     //  Waiting Condition
     public Condition condition;
 }
-

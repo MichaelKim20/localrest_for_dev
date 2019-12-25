@@ -35,12 +35,12 @@
 
 module geod24.concurrency.Scheduler;
 
+import geod24.concurrency.ThreadInfo;
+
 import core.sync.condition;
 import core.sync.mutex;
 import core.thread;
 import std.process;
-
-import geod24.concurrency.ThreadInfo;
 
 /// Ditto
 interface Scheduler
