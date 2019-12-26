@@ -35,6 +35,7 @@
 
 module geod24.concurrency.Scheduler;
 
+import geod24.concurrency.Exception;
 import geod24.concurrency.ThreadInfo;
 
 import core.sync.condition;
@@ -389,7 +390,7 @@ private:
         while (m_fibers.length > 0)
         {
             auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
-            if (t !is null)
+            if (t !is null && !(cast(ChannelClosed) t))
             {
                 throw t;
             }

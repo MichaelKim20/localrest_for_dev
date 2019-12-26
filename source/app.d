@@ -9,8 +9,6 @@ import core.thread;
 import core.sync.mutex;
 import core.sync.semaphore;
 
-import geod24.tinfo;
-
 void testWaitTimeout()
 {
 	auto mutex      = new Mutex;
@@ -57,28 +55,27 @@ void testWaitTimeout()
 	assert( !alertedTwo );
 }
 
-void test1 ()
+void test2 ()
 {
+	auto m = new Mutex();
+	auto cond = new Condition(m);
 	auto thread1 = new Thread({
-		tinfo.id = "hello";
-		while (true)
-		{
-			writefln("%s", tinfo.id);
-		}
+			writefln("wait");
+			m.lock();
+			cond.wait();
+			m.unlock();
+			writefln("doing");
 	});
 	thread1.start();
 
-	auto thread2 = new Thread({
-		tinfo.id = "kim";
-		while (true)
-		{
-			writefln("%s", tinfo.id);
-		}
-	});
-	thread2.start();
+	Thread.sleep(1.seconds);
+	writefln("notify");
+	cond.notifyAll();
+
+	Thread.sleep(5.seconds);
 }
 
 void main()
 {
-	test1();
+	test2();
 }
