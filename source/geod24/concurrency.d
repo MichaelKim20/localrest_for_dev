@@ -958,16 +958,12 @@ unittest
         channel_qs0.send(2);
         result = channel_qs0.receive();
         synchronized (m)
-        {
             c.notify();
-        }
     });
 
     synchronized (m)
-    {
-        assert(!c.wait(1000.msecs));
-        assert(result == 0);
-    }
+        c.wait(200.msecs);
+    assert(result == 0);
 
     // Thread2 - Unravel a tangle
     thread_scheduler.spawn({
@@ -977,10 +973,8 @@ unittest
     });
 
     synchronized (m)
-    {
-        assert(c.wait(1000.msecs));
-        assert(result == 2);
-    }
+        c.wait(200.msecs);
+    assert(result == 2);
 
     result = 0;
     // Thread3 - It'll not be tangled, because queue size is 1
@@ -989,16 +983,12 @@ unittest
         channel_qs1.send(2);
         result = channel_qs1.receive();
         synchronized (m)
-        {
             c.notify();
-        }
     });
 
     synchronized (m)
-    {
-        assert(c.wait(1000.msecs));
-        assert(result == 2);
-    }
+        c.wait(200.msecs);
+    assert(result == 2);
 }
 
 // If the queue size is 0, it will block when it is sent and received on the same fiber.
@@ -1023,16 +1013,12 @@ unittest
                 channel_qs0.send(2);
                 result = channel_qs0.receive();
                 synchronized (m)
-                {
                     c.notify();
-                }
             });
 
             synchronized (m)
-            {
-                assert(!c.wait(1000.msecs));
-                assert(result == 0);
-            }
+                c.wait(200.msecs);
+            assert(result == 0);
 
             //  Fiber2 - Unravel a tangle
             fiber_scheduler.spawn({
@@ -1042,10 +1028,8 @@ unittest
             });
 
             synchronized (m)
-            {
-                assert(c.wait(1000.msecs));
-                assert(result == 2);
-            }
+                c.wait(200.msecs);
+            assert(result == 2);
 
             //  Fiber3 - It'll not be tangled, because queue size is 1
             fiber_scheduler.spawn({
@@ -1053,16 +1037,14 @@ unittest
                 channel_qs1.send(2);
                 result = channel_qs1.receive();
                 synchronized (m)
-                {
                     c.notify();
-                }
             });
 
             synchronized (m)
-            {
-                assert(c.wait(1000.msecs));
-                assert(result == 2);
-            }
+                c.wait(200.msecs);
+            assert(result == 2);
+
         });
     });
+    thread_joinAll();
 }
