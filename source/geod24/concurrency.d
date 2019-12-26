@@ -814,6 +814,8 @@ private struct ChannelContext (T)
     public Condition condition;
 }
 
+import std.stdio;
+
 /// Fiber1 -> [ channel2 ] -> Fiber2 -> [ channel1 ] -> Fiber1
 unittest
 {
@@ -821,7 +823,6 @@ unittest
     auto channel2 = new Channel!int;
     auto thread_scheduler = new ThreadScheduler();
     int result = 0;
-    bool done = false;
 
     auto m = new Mutex;
     auto c = thread_scheduler.newCondition(m);
@@ -835,10 +836,6 @@ unittest
                 thisScheduler = fiber_scheduler;
                 channel2.send(2);
                 result = channel1.receive();
-                synchronized (m)
-                {
-                    c.notify();
-                }
             });
             //  Fiber2
             fiber_scheduler.spawn({
@@ -849,11 +846,9 @@ unittest
         });
     });
 
-    synchronized (m)
-    {
-        assert(c.wait(1000.msecs));
-        assert(result == 4);
-    }
+    //Thread.sleep(1000.msecs);
+    thread_joinAll();
+    assert(result == 4);
 }
 
 /// Fiber1 in Thread1 -> [ channel2 ] -> Fiber2 in Thread2 -> [ channel1 ] -> Fiber1 in Thread1
@@ -864,9 +859,6 @@ unittest
     auto thread_scheduler = new ThreadScheduler();
     int result;
 
-    auto m = new Mutex;
-    auto c = thread_scheduler.newCondition(m);
-
     // Thread1
     thread_scheduler.spawn({
         auto fiber_scheduler = new FiberScheduler();
@@ -875,10 +867,6 @@ unittest
             thisScheduler = fiber_scheduler;
             channel2.send(2);
             result = channel1.receive();
-            synchronized (m)
-            {
-                c.notify();
-            }
         });
     });
 
@@ -893,11 +881,8 @@ unittest
         });
     });
 
-    synchronized (m)
-    {
-        assert(c.wait(1000.msecs));
-        assert(result == 4);
-    }
+    thread_joinAll();
+    assert(result == 4);
 }
 
 /// Thread1 -> [ channel2 ] -> Thread2 -> [ channel1 ] -> Thread1
@@ -907,46 +892,23 @@ unittest
     auto channel2 = new Channel!int;
     auto thread_scheduler = new ThreadScheduler();
     int result;
-    int max = 100;
-    bool terminate = false;
-
-    auto m = new Mutex;
-    auto c = thread_scheduler.newCondition(m);
 
     // Thread1
     thread_scheduler.spawn({
         thisScheduler = thread_scheduler;
-        foreach (idx; 1 .. max+1)
-        {
-            channel2.send(idx);
-            result = channel1.receive();
-            assert(result == idx*idx);
-        }
-        synchronized (m)
-        {
-            terminate = true;
-            c.notify();
-        }
+        channel2.send(2);
+        result = channel1.receive();
     });
 
     // Thread2
     thread_scheduler.spawn({
         thisScheduler = thread_scheduler;
-        int res;
-        while (!terminate)
-        {
-            res = channel2.receive();
-            channel1.send(res*res);
-         }
+        int res = channel2.receive();
+        channel1.send(res*res);
     });
 
-    synchronized (m)
-    {
-        assert(c.wait(5000.msecs));
-        assert(result == max*max);
-    }
-    channel1.close();
-    channel2.close();
+    thread_joinAll();
+    assert(result == 4);
 }
 
 /// Thread1 -> [ channel2 ] -> Fiber1 in Thread 2 -> [ channel1 ] -> Thread1
@@ -957,18 +919,11 @@ unittest
     auto thread_scheduler = new ThreadScheduler();
     int result;
 
-    auto m = new Mutex;
-    auto c = thread_scheduler.newCondition(m);
-
     // Thread1
     thread_scheduler.spawn({
         thisScheduler = thread_scheduler;
         channel2.send(2);
         result = channel1.receive();
-        synchronized (m)
-        {
-            c.notify();
-        }
     });
 
     // Thread2
@@ -982,11 +937,8 @@ unittest
         });
     });
 
-    synchronized (m)
-    {
-        assert(c.wait(3000.msecs));
-        assert(result == 4);
-    }
+    thread_joinAll();
+    assert(result == 4);
 }
 
 // If the queue size is 0, it will block when it is sent and received on the same thread.
