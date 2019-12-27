@@ -241,6 +241,15 @@ interface Scheduler
 public class ThreadScheduler : Scheduler
 {
 
+    private static ThreadScheduler scheduler;
+
+    @property static instance ()
+    {
+        if (scheduler is null)
+            scheduler = new ThreadScheduler();
+        return scheduler;
+    }
+
     /***************************************************************************
 
         This simply runs op directly, since no real scheduling is needed by
@@ -618,7 +627,7 @@ public class Channel (T)
 
     ***************************************************************************/
 
-    public bool send (T msg)
+    public bool send (ref T msg)
     in
     {
         assert(thisScheduler !is null,
@@ -815,7 +824,7 @@ private struct ChannelContext (T)
 }
 
 import std.stdio;
-
+/*
 /// Fiber1 -> [ channel2 ] -> Fiber2 -> [ channel1 ] -> Fiber1
 unittest
 {
@@ -962,7 +971,7 @@ unittest
     });
 
     synchronized (m)
-        c.wait(200.msecs);
+        c.wait(1000.msecs);
     assert(result == 0);
 
     // Thread2 - Unravel a tangle
@@ -973,7 +982,7 @@ unittest
     });
 
     synchronized (m)
-        c.wait(200.msecs);
+        c.wait(1000.msecs);
     assert(result == 2);
 
     result = 0;
@@ -987,7 +996,7 @@ unittest
     });
 
     synchronized (m)
-        c.wait(200.msecs);
+        c.wait(1000.msecs);
     assert(result == 2);
 }
 
@@ -1017,7 +1026,7 @@ unittest
             });
 
             synchronized (m)
-                c.wait(200.msecs);
+                c.wait(1000.msecs);
             assert(result == 0);
 
             //  Fiber2 - Unravel a tangle
@@ -1028,7 +1037,7 @@ unittest
             });
 
             synchronized (m)
-                c.wait(200.msecs);
+                c.wait(1000.msecs);
             assert(result == 2);
 
             //  Fiber3 - It'll not be tangled, because queue size is 1
@@ -1041,10 +1050,518 @@ unittest
             });
 
             synchronized (m)
-                c.wait(200.msecs);
+                c.wait(1000.msecs);
             assert(result == 2);
 
         });
     });
     thread_joinAll();
+}
+*/
+
+private struct Request
+{
+    INode sender;
+    size_t id;
+    string method;
+    string args;
+};
+
+private enum Status
+{
+    Failed,
+    Timeout,
+    Success
+};
+
+private struct Response
+{
+    Status status;
+    size_t id;
+    string data;
+};
+
+private interface INode
+{
+    void send (ref Request msg);
+    void send (ref Response msg);
+}
+
+private class Node : INode
+{
+    public Channel!Request  req;
+    public Channel!Response res;
+
+    public this ()
+    {
+        req = new Channel!Request();
+        res = new Channel!Response();
+    }
+
+    public void toString (scope void delegate(const(char)[]) sink)
+    {
+        import std.format : formattedWrite;
+        formattedWrite(sink, "Node(%x:%s)", cast(void*) req, cast(void*) res);
+    }
+
+    public void send (ref Request msg)
+    {
+        this.req.send(msg);
+    }
+
+    public void send (ref Response msg)
+    {
+        this.res.send(msg);
+    }
+
+    public void close ()
+    {
+        this.req.close();
+        this.res.close();
+    }
+};
+
+
+/// Fiber1 in Thread1 -> [ channel2 ] -> Fiber2 in Thread2 -> [ channel1 ] -> Fiber1 in Thread1
+unittest
+{
+    Node node1, node2;
+
+    node1 = new Node();
+    node2 = new Node();
+
+    auto thread_scheduler = new ThreadScheduler();
+
+    // Thread1
+    thread_scheduler.spawn({
+        auto fiber_scheduler = new FiberScheduler();
+        // Fiber1
+        fiber_scheduler.start({
+            thisScheduler = fiber_scheduler;
+            bool terminate = false;
+
+            //  processing of requests
+            fiber_scheduler.spawn({
+                thisScheduler = fiber_scheduler;
+                while (!terminate)
+                {
+                    Request msg = node1.req.receive();
+                    if (msg.method == "name")
+                    {
+                        Response res = Response(Status.Success, 0, "Tom");
+                        msg.sender.send(res);
+                    }
+                    else if (msg.method == "age")
+                    {
+                        Response res = Response(Status.Success, 0, "25");
+                        msg.sender.send(res);
+                    }
+                    else if (msg.method == "exit")
+                    {
+                        terminate = true;
+                        Response res = Response(Status.Success, 0, "exit");
+                        msg.sender.send(res);
+                    }
+                }
+                node1.close();
+            });
+
+            //  Response received from another node
+            fiber_scheduler.spawn({
+                thisScheduler = fiber_scheduler;
+                while (!terminate)
+                {
+                    Response msg = node1.res.receive();
+                    if (msg.data == "exit")
+                        terminate = true;
+                }
+                node1.close();
+            });
+
+            //  Request to another node
+            fiber_scheduler.spawn({
+                thisScheduler = fiber_scheduler;
+                Request msg;
+                msg = Request(node1, 0, "name");
+                node2.send(msg);
+                msg = Request(node1, 0, "age");
+                node2.send(msg);
+                msg = Request(node1, 0, "exit");
+                node2.send(msg);
+            });
+        });
+    });
+
+    // Thread2
+    thread_scheduler.spawn({
+        auto fiber_scheduler = new FiberScheduler();
+        // Fiber2
+        fiber_scheduler.start({
+            thisScheduler = fiber_scheduler;
+            bool terminate = false;
+
+            //  processing of requests
+            fiber_scheduler.spawn({
+                thisScheduler = fiber_scheduler;
+                while (!terminate)
+                {
+                    Request msg = node2.req.receive();
+                    //writefln("%s %s", node2, msg);
+                    if (msg.method == "name")
+                    {
+                        Response res = Response(Status.Success, 0, "Tom");
+                        msg.sender.send(res);
+                    }
+                    else if (msg.method == "age")
+                    {
+                        Response res = Response(Status.Success, 0, "25");
+                        msg.sender.send(res);
+                    }
+                    else if (msg.method == "exit")
+                    {
+                        terminate = true;
+                        Response res = Response(Status.Success, 0, "exit");
+                        msg.sender.send(res);
+                    }
+                }
+                node2.close();
+            });
+
+            //  Response received from another node
+            fiber_scheduler.spawn({
+                thisScheduler = fiber_scheduler;
+                while (!terminate)
+                {
+                    Response msg = node2.res.receive();
+                    if (msg.data == "exit")
+                        terminate = true;
+                }
+                node2.close();
+            });
+        });
+    });
+}
+
+
+private class ClientNode : INode
+{
+    public Channel!Response res;
+
+    public this ()
+    {
+        res = new Channel!Response();
+    }
+
+    public void toString (scope void delegate(const(char)[]) sink)
+    {
+        import std.format : formattedWrite;
+        formattedWrite(sink, "ClientNode(%x)", cast(void*) res);
+    }
+
+    public void send (ref Request msg)
+    {
+    }
+
+    public void send (ref Response msg)
+    {
+        this.res.send(msg);
+    }
+
+    public void close ()
+    {
+        this.res.close();
+    }
+}
+
+/// It's a class to wait for a response.
+private class WaitManager
+{
+    /// Just a FiberCondition with a state
+    struct Waiting
+    {
+        Condition c;
+        bool busy;
+    }
+
+    /// The 'Response' we are currently processing, if any
+    public Response pending;
+
+    /// Request IDs waiting for a response
+    public Waiting[ulong] waiting;
+
+    private Mutex wait_mutex;
+
+    /// Ctor
+    public this ()
+    {
+        this.wait_mutex = new Mutex();
+    }
+
+    /// Get the next available request ID
+    public size_t getNextResponseId ()
+    {
+        static size_t last_idx;
+        return last_idx++;
+    }
+
+    /// Wait for a response.
+    public Response waitResponse (size_t id, Duration duration)
+    {
+        if (id !in this.waiting)
+            this.waiting[id] = Waiting(thisScheduler.newCondition(this.wait_mutex), false);
+
+        Waiting* ptr = &this.waiting[id];
+        if (ptr.busy)
+            assert(0, "Trying to override a pending request");
+
+        // We yield and wait for an answer
+        ptr.busy = true;
+
+        if (duration == Duration.init)
+            ptr.c.wait();
+        else if (!ptr.c.wait(duration))
+            this.pending = Response(Status.Timeout, this.pending.id);
+
+        ptr.busy = false;
+        // After control returns to us, `pending` has been filled
+        scope(exit) this.pending = Response.init;
+        return this.pending;
+    }
+
+    /// Called when a waiting condition was handled and can be safely removed
+    public void remove (size_t id)
+    {
+        this.waiting.remove(id);
+    }
+}
+
+private class NodeInterface
+{
+    private Node _node;
+    private WaitManager wait_manager;
+    private string name;
+    private string age;
+
+    public this (string name, string age)
+    {
+        this.name = name;
+        this.age = age;
+
+        this._node = new Node();
+        this.wait_manager = new WaitManager();
+
+        this.launchNode();
+    }
+
+    @property public Node node ()
+    {
+        return this._node;
+    }
+
+    private void launchNode ()
+    {
+        auto thread_scheduler = ThreadScheduler.instance;
+        thread_scheduler.spawn({
+            auto fiber_scheduler = new FiberScheduler();
+            // Fiber1
+            fiber_scheduler.start({
+                thisScheduler = fiber_scheduler;
+                bool terminate = false;
+
+                //  processing of requests
+                fiber_scheduler.spawn({
+                    thisScheduler = fiber_scheduler;
+                    while (!terminate)
+                    {
+                        Request msg = this.node.req.receive();
+                        writefln("%s", msg);
+                        if (msg.method == "name")
+                        {
+                            fiber_scheduler.spawn({
+                                thisScheduler = fiber_scheduler;
+                                Response res = Response(Status.Success, msg.id, this.name);
+                                writefln("%s", res);
+                                msg.sender.send(res);
+                            });
+                        }
+                        else if (msg.method == "age")
+                        {
+                            fiber_scheduler.spawn({
+                                thisScheduler = fiber_scheduler;
+                                Response res = Response(Status.Success, msg.id, this.age);
+                                writefln("%s", res);
+                                msg.sender.send(res);
+                            });
+                        }
+                        else if (msg.method == "exit")
+                        {
+                            terminate = true;
+                            fiber_scheduler.spawn({
+                                thisScheduler = fiber_scheduler;
+                                Response res = Response(Status.Success, msg.id, "exit");
+                                msg.sender.send(res);
+                            });
+                        }
+                    }
+                    this.node.close();
+                });
+
+                fiber_scheduler.spawn({
+                    thisScheduler = fiber_scheduler;
+                    while (!terminate)
+                    {
+                        Response res = this.node.res.receive();
+                        writefln("%s", res);
+                        if (!(res.id in this.wait_manager.waiting))
+                        {
+                            auto cond = thisScheduler.newCondition(null);
+                            while (!(res.id in this.wait_manager.waiting))
+                            {
+                                cond.wait(5.msecs);
+                            }
+                        }
+                        this.wait_manager.pending = res;
+                        this.wait_manager.waiting[res.id].c.notify();
+                    }
+                });
+            });
+        });
+    }
+
+    public void query (Node remote, ref Request req, ref Response res)
+    {
+        req.id = this.wait_manager.getNextResponseId();
+        req.sender = this.node;
+
+        res = () @trusted
+        {
+            FiberScheduler fiber_scheduler;
+            //if (thisScheduler is null)
+            //{
+                fiber_scheduler = new FiberScheduler();
+                thisScheduler = fiber_scheduler;
+            //} else {
+            //    fiber_scheduler = thisScheduler;
+            //}
+            Response val;
+            fiber_scheduler.spawn({
+                thisScheduler = fiber_scheduler;
+                remote.send(req);
+            });
+            fiber_scheduler.start({
+                thisScheduler = fiber_scheduler;
+                val = this.wait_manager.waitResponse(req.id, 3000.msecs);
+            });
+            return val;
+        } ();
+    }
+
+    public string getName (Node remote)
+    {
+        Request req = Request(this.node, 0, "name", "");
+        Response res;
+        this.query(remote, req, res);
+        return res.data;
+    }
+
+    public string getAge (Node remote)
+    {
+        Request req = Request(this.node, 0, "age", "");
+        Response res;
+        this.query(remote, req, res);
+        return res.data;
+    }
+}
+
+private class ClientInterface
+{
+    private ClientNode  _client;
+    private WaitManager wait_manager;
+
+    public this ()
+    {
+        this._client = new ClientNode;
+        this.wait_manager = new WaitManager();
+    }
+
+    @property public ClientNode client ()
+    {
+        return this._client;
+    }
+
+    public void query (Node remote, ref Request req, ref Response res)
+    {
+        req.id = this.wait_manager.getNextResponseId();
+        req.sender = this.client;
+
+        res = () @trusted
+        {
+            auto fiber_scheduler = new FiberScheduler();
+            bool terminate = false;
+
+            fiber_scheduler.spawn({
+                thisScheduler = fiber_scheduler;
+                remote.send(req);
+                while (!terminate)
+                {
+                    Response res = this.client.res.receive();
+                    if (!(res.id in this.wait_manager.waiting))
+                    {
+                        auto cond = thisScheduler.newCondition(null);
+                        while (!(res.id in this.wait_manager.waiting))
+                        {
+                            cond.wait(5.msecs);
+                        }
+                    }
+                    this.wait_manager.pending = res;
+                    this.wait_manager.waiting[res.id].c.notify();
+                }
+            });
+
+            Response val;
+            fiber_scheduler.start({
+                thisScheduler = fiber_scheduler;
+                val = this.wait_manager.waitResponse(req.id, 3000.msecs);
+                terminate = true;
+            });
+            return val;
+        }();
+    }
+
+    public string getName (Node remote)
+    {
+        Request req = Request(this.client, 0, "name", "");
+        Response res;
+        this.query(remote, req, res);
+        return res.data;
+    }
+
+    public string getAge (Node remote)
+    {
+        Request req = Request(this.client, 0, "age", "");
+        Response res;
+        this.query(remote, req, res);
+        return res.data;
+    }
+}
+
+
+unittest
+{
+    NodeInterface node1, node2;
+
+    node1 = new NodeInterface("Tom", "30");
+    node2 = new NodeInterface("Jain", "24");
+
+    //auto thread_scheduler = ThreadScheduler.instance;
+    //thread_scheduler.spawn({
+        //auto fiber_scheduler = new FiberScheduler();
+        //fiber_scheduler.start({
+            //thisScheduler = fiber_scheduler;
+            writeln(node1.getName(node2.node));
+            writeln(node1.getAge(node2.node));
+            //assert (node1.getName(node2.node) == "Jain");
+            //assert (node1.getAge(node2.node) == "24");
+        //});
+    //});
 }
