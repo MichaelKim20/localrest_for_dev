@@ -56,9 +56,7 @@ private class Node : INode
     public void send (Request msg)
     {
         if (thisScheduler !is null)
-        {
             this.req.send(msg);
-        }
         else
         {
             auto fiber_scheduler = new FiberScheduler();
@@ -74,9 +72,7 @@ private class Node : INode
     public void send (Response msg)
     {
         if (thisScheduler !is null)
-        {
             this.res.send(msg);
-        }
         else
         {
             auto fiber_scheduler = new FiberScheduler();
@@ -273,14 +269,6 @@ private class WaitManager
 
     /// Request IDs waiting for a response
     public Waiting[ulong] waiting;
-
-    private Mutex wait_mutex;
-
-    /// Ctor
-    public this ()
-    {
-        this.wait_mutex = new Mutex();
-    }
 
     /// Get the next available request ID
     public size_t getNextResponseId ()
