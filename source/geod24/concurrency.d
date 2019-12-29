@@ -323,15 +323,16 @@ public class ThreadScheduler : Scheduler
 
     void spawn (void delegate () op)
     {
+        auto owner_scheduler = this;
         auto t = new Thread({
             scope (exit) {
                 thisInfo.cleanup();
             }
+            thisScheduler = owner_scheduler;
             op();
         });
         t.start();
     }
-
 
     /***************************************************************************
 
@@ -436,6 +437,13 @@ public class ThreadScheduler : Scheduler
 
     void notify (Condition c)
     {
+        if (c.mutex !is null)
+            c.mutex.lock();
+
+        scope (exit)
+             if (c.mutex !is null)
+                c.mutex.unlock();
+
         c.notify();
     }
 
@@ -452,6 +460,13 @@ public class ThreadScheduler : Scheduler
 
     void notifyAll (Condition c)
     {
+        if (c.mutex !is null)
+            c.mutex.lock();
+
+        scope (exit)
+             if (c.mutex !is null)
+                c.mutex.unlock();
+
         c.notifyAll();
     }
 }
@@ -554,6 +569,13 @@ class FiberScheduler : Scheduler
 
     void wait (Condition c)
     {
+        if (c.mutex !is null)
+            c.mutex.lock();
+
+        scope (exit)
+             if (c.mutex !is null)
+                c.mutex.unlock();
+
         c.wait();
     }
 
@@ -572,6 +594,13 @@ class FiberScheduler : Scheduler
 
     bool wait (Condition c, Duration period)
     {
+        if (c.mutex !is null)
+            c.mutex.lock();
+
+        scope (exit)
+             if (c.mutex !is null)
+                c.mutex.unlock();
+
         return c.wait(period);
     }
 
@@ -588,6 +617,13 @@ class FiberScheduler : Scheduler
 
     void notify (Condition c)
     {
+        if (c.mutex !is null)
+            c.mutex.lock();
+
+        scope (exit)
+             if (c.mutex !is null)
+                c.mutex.unlock();
+
         c.notify();
     }
 
@@ -604,6 +640,13 @@ class FiberScheduler : Scheduler
 
     void notifyAll (Condition c)
     {
+        if (c.mutex !is null)
+            c.mutex.lock();
+
+        scope (exit)
+             if (c.mutex !is null)
+                c.mutex.unlock();
+
         c.notifyAll();
     }
 
@@ -1064,8 +1107,7 @@ unittest
     auto thread_scheduler = new ThreadScheduler();
     int result = 0;
 
-    auto m = new Mutex;
-    auto c = thread_scheduler.newCondition(m);
+    auto cond = thread_scheduler.newCondition(null);
 
     // Thread1
     thread_scheduler.spawn({
@@ -1076,6 +1118,7 @@ unittest
                 thisScheduler = fiber_scheduler;
                 channel2.send(2);
                 result = channel1.receive();
+                thread_scheduler.notify(cond);
             });
             //  Fiber2
             fiber_scheduler.spawn({
@@ -1086,8 +1129,7 @@ unittest
         });
     });
 
-    //Thread.sleep(1000.msecs);
-    thread_joinAll();
+    thread_scheduler.wait(cond, 1000.msecs);
     assert(result == 4);
 }
 
@@ -1099,6 +1141,8 @@ unittest
     auto thread_scheduler = new ThreadScheduler();
     int result;
 
+    auto cond = thread_scheduler.newCondition(null);
+
     // Thread1
     thread_scheduler.spawn({
         auto fiber_scheduler = new FiberScheduler();
@@ -1107,6 +1151,7 @@ unittest
             thisScheduler = fiber_scheduler;
             channel2.send(2);
             result = channel1.receive();
+            thread_scheduler.notify(cond);
         });
     });
 
@@ -1121,7 +1166,7 @@ unittest
         });
     });
 
-    thread_joinAll();
+    thread_scheduler.wait(cond, 1000.msecs);
     assert(result == 4);
 }
 
@@ -1133,11 +1178,14 @@ unittest
     auto thread_scheduler = new ThreadScheduler();
     int result;
 
+    auto cond = thread_scheduler.newCondition(null);
+
     // Thread1
     thread_scheduler.spawn({
         thisScheduler = thread_scheduler;
         channel2.send(2);
         result = channel1.receive();
+        thread_scheduler.notify(cond);
     });
 
     // Thread2
@@ -1147,7 +1195,7 @@ unittest
         channel1.send(res*res);
     });
 
-    thread_joinAll();
+    thread_scheduler.wait(cond, 1000.msecs);
     assert(result == 4);
 }
 
@@ -1159,11 +1207,14 @@ unittest
     auto thread_scheduler = new ThreadScheduler();
     int result;
 
+    auto cond = thread_scheduler.newCondition(null);
+
     // Thread1
     thread_scheduler.spawn({
         thisScheduler = thread_scheduler;
         channel2.send(2);
         result = channel1.receive();
+        thread_scheduler.notify(cond);
     });
 
     // Thread2
@@ -1177,7 +1228,7 @@ unittest
         });
     });
 
-    thread_joinAll();
+    thread_scheduler.wait(cond, 1000.msecs);
     assert(result == 4);
 }
 
@@ -1189,20 +1240,17 @@ unittest
     auto thread_scheduler = new ThreadScheduler();
     int result = 0;
 
-    auto m = new Mutex;
-    auto c = thread_scheduler.newCondition(m);
+    auto cond = thread_scheduler.newCondition(null);
 
     // Thread1 - It'll be tangled.
     thread_scheduler.spawn({
         thisScheduler = thread_scheduler;
         channel_qs0.send(2);
         result = channel_qs0.receive();
-        synchronized (m)
-            c.notify();
+        thread_scheduler.notify(cond);
     });
 
-    synchronized (m)
-        c.wait(1000.msecs);
+    assert(!thread_scheduler.wait(cond, 1000.msecs));
     assert(result == 0);
 
     // Thread2 - Unravel a tangle
@@ -1212,8 +1260,7 @@ unittest
         channel_qs0.send(2);
     });
 
-    synchronized (m)
-        c.wait(1000.msecs);
+    thread_scheduler.wait(cond, 1000.msecs);
     assert(result == 2);
 
     result = 0;
@@ -1222,12 +1269,10 @@ unittest
         thisScheduler = thread_scheduler;
         channel_qs1.send(2);
         result = channel_qs1.receive();
-        synchronized (m)
-            c.notify();
+        thread_scheduler.notify(cond);
     });
 
-    synchronized (m)
-        c.wait(1000.msecs);
+    thread_scheduler.wait(cond, 1000.msecs);
     assert(result == 2);
 }
 
@@ -1243,8 +1288,7 @@ unittest
     thread_scheduler.spawn({
         auto fiber_scheduler = new FiberScheduler();
 
-        auto m = new Mutex;
-        auto c = fiber_scheduler.newCondition(m);
+        auto cond = fiber_scheduler.newCondition(null);
 
         fiber_scheduler.start({
             //  Fiber1 - It'll be tangled.
@@ -1252,12 +1296,10 @@ unittest
                 thisScheduler = fiber_scheduler;
                 channel_qs0.send(2);
                 result = channel_qs0.receive();
-                synchronized (m)
-                    c.notify();
+                fiber_scheduler.notify(cond);
             });
 
-            synchronized (m)
-                c.wait(1000.msecs);
+            assert(!fiber_scheduler.wait(cond, 1000.msecs));
             assert(result == 0);
 
             //  Fiber2 - Unravel a tangle
@@ -1267,8 +1309,7 @@ unittest
                 channel_qs0.send(2);
             });
 
-            synchronized (m)
-                c.wait(1000.msecs);
+            fiber_scheduler.wait(cond, 1000.msecs);
             assert(result == 2);
 
             //  Fiber3 - It'll not be tangled, because queue size is 1
@@ -1276,15 +1317,11 @@ unittest
                 thisScheduler = fiber_scheduler;
                 channel_qs1.send(2);
                 result = channel_qs1.receive();
-                synchronized (m)
-                    c.notify();
+                fiber_scheduler.notify(cond);
             });
 
-            synchronized (m)
-                c.wait(1000.msecs);
+            fiber_scheduler.wait(cond, 1000.msecs);
             assert(result == 2);
-
         });
     });
-    thread_joinAll();
 }

@@ -523,7 +523,6 @@ unittest
     node2.shutdown();
 }
 
-/*
 unittest
 {
     NodeInterface node;
@@ -534,29 +533,6 @@ unittest
     assert (client.getAge(node.node) == "30");
     node.shutdown();
     client.shutdown();
-}
-*/
-
-unittest
-{
-    NodeInterface node1, node2;
-    node1 = new NodeInterface("Tom", "30");
-    node2 = new NodeInterface("Jain", "24");
-    assert (node1.getName(node2.node) == "Jain");
-    assert (node1.getAge(node2.node) == "24");
-    node1.shutdown();
-    node2.shutdown();
-}
-
-unittest
-{
-    NodeInterface node1, node2;
-    node1 = new NodeInterface("Tom", "30");
-    node2 = new NodeInterface("Jain", "24");
-    assert (node1.getName(node2.node) == "Jain");
-    assert (node1.getAge(node2.node) == "24");
-    node1.shutdown();
-    node2.shutdown();
 }
 
 
