@@ -320,19 +320,45 @@ private class WaitManager
     }
 }
 
+private interface API
+{
+    string name ();
+    string age ();
+}
+
+private class NodeAPI : API
+{
+    public string _name;
+    public string _age;
+
+    public this (string name, string age)
+    {
+        this._name = name;
+        this._age = age;
+    }
+
+    public string name ()
+    {
+        return this._name;
+    }
+
+    public string age ()
+    {
+        return this._age;
+    }
+}
+
 private class NodeInterface
 {
     private Node local_node;
     private WaitManager wait_manager;
     private shared(bool) terminate;
 
-    private string name;
-    private string age;
+    private NodeAPI instanseOfAPI;
 
     public this (string name, string age)
     {
-        this.name = name;
-        this.age = age;
+        this.instanseOfAPI = new NodeAPI(name, age);
 
         this.local_node = new Node();
         this.wait_manager = new WaitManager();
@@ -354,7 +380,7 @@ private class NodeInterface
             fiber_scheduler.start({
                 this.terminate = false;
                 thisScheduler.spawn({
-                    while (!terminate)
+                    while (!this.terminate)
                     {
                         Request msg = local.req.receive();
 
@@ -364,14 +390,14 @@ private class NodeInterface
                         if (msg.method == "name")
                         {
                             thisScheduler.spawn({
-                                Response res = Response(Status.Success, msg.id, this.name);
+                                Response res = Response(Status.Success, msg.id, this.instanseOfAPI.name);
                                 msg.sender.send(res);
                             });
                         }
                         else if (msg.method == "age")
                         {
                             thisScheduler.spawn({
-                                Response res = Response(Status.Success, msg.id, this.age);
+                                Response res = Response(Status.Success, msg.id, this.instanseOfAPI.age);
                                 msg.sender.send(res);
                             });
                         }
