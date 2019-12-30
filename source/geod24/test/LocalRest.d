@@ -2,11 +2,19 @@ module geod24.test.LocalRest;
 
 import geod24.concurrency;
 
+import vibe.data.json;
+
+import std.meta : AliasSeq;
 import std.traits : Parameters, ReturnType;
 
 import core.sync.condition;
 import core.sync.mutex;
 import core.thread;
+import core.time;
+
+
+import std.stdio;
+
 
 private struct Request
 {
@@ -29,6 +37,15 @@ private struct Response
     size_t id;
     string data;
 };
+
+/// Simple wrapper to deal with tuples
+/// Vibe.d might emit a pragma(msg) when T.length == 0
+private struct ArgWrapper (T...)
+{
+    static if (T.length == 0)
+        size_t dummy;
+    T args;
+}
 
 /// Filter out requests before they reach a node
 private struct FilterAPI
@@ -197,22 +214,23 @@ private class WaitManager
     }
 }
 
+/// Helper template to get the constructor's parameters
+private static template CtorParams (Impl)
+{
+    static if (is(typeof(Impl.__ctor)))
+        private alias CtorParams = Parameters!(Impl.__ctor);
+    else
+        private alias CtorParams = AliasSeq!();
+}
+
 private class Server (API)
 {
-    public static Server spawn (Implementation) (CtorParams!Implementation args)
+    public static Server!API spawn (Implementation) (CtorParams!Implementation args)
     {
         auto res = spawned!Implementation(args);
         return new Server(res);
     }
 
-    /// Helper template to get the constructor's parameters
-    private static template CtorParams (Impl)
-    {
-        static if (is(typeof(Impl.__ctor)))
-            private alias CtorParams = Parameters!(Impl.__ctor);
-        else
-            private alias CtorParams = AliasSeq!();
-    }
 
     private static void handleRequest (Request req, API node, FilterAPI filter)
     {
@@ -228,24 +246,13 @@ private class Server (API)
                     case `%2$s`:
                     try
                     {
-                        if (req.method == filter.func_mangleof)
-                        {
-                            // we have to send back a message
-                            import std.format;
-                            req.sender.send(Response(Status.Failed, req.id,
-                                format("Filtered method '%%s'", filter.pretty_func)));
-                            return;
-                        }
 
                         auto args = req.args.deserializeJson!(ArgWrapper!(Parameters!ovrld));
 
                         static if (!is(ReturnType!ovrld == void))
                         {
-                            req.sender.send(
-                                Response(
-                                    Status.Success,
-                                    req.id,
-                                    node.%1$s(args.args).serializeToJsonString()));
+                            auto res = Response(Status.Success, req.id, node.%1$s(args.args).serializeToJsonString());
+                            req.sender.send(res);
                         }
                         else
                         {
@@ -263,14 +270,17 @@ private class Server (API)
                 }.format(member, ovrld.mangleof));
             }
         default:
-            assert(0, "Unmatched method name: " ~ cmd.method);
+            assert(0, "Unmatched method name: " ~ req.method);
         }
     }
 
     private static ServerTransceiver spawned (Implementation) (CtorParams!Implementation cargs)
     {
+        import std.datetime.systime : Clock, SysTime;
+        import std.algorithm : each;
+        import std.range;
+
         ServerTransceiver transceiver = new ServerTransceiver();
-        scope node = new Implementation(cargs);
         auto thread_scheduler = ThreadScheduler.instance;
 
         // used for controling filtering / sleep
@@ -284,20 +294,24 @@ private class Server (API)
         Control control;
 
         thread_scheduler.spawn({
+            scope node = new Implementation(cargs);
 
             auto fiber_scheduler = new FiberScheduler();
             fiber_scheduler.start({
-                this._terminate = false;
+                bool terminate = false;
                 thisScheduler.spawn({
-                    while (!this._terminate)
+                    while (!terminate)
                     {
                         Request req = transceiver.req.receive();
 
-                        if (this._terminate)
+                        if (req.method == "shutdown@command")
+                            terminate = true;
+
+                        if (terminate)
                             break;
 
                         thisScheduler.spawn({
-                            handleRequest(req, node, control.filter);
+                            Server!(API).handleRequest(req, node, control.filter);
                         });
                     }
                 });
@@ -310,8 +324,6 @@ private class Server (API)
     /// Where to send message to
     private ServerTransceiver _transceiver;
 
-    private shared(bool) _terminate;
-
     /// Timeout to use when issuing requests
     private const Duration _timeout;
 
@@ -319,7 +331,6 @@ private class Server (API)
     {
         this._transceiver = transceiver;
         this._timeout = timeout;
-        this._terminate = false;
     }
 
     @property public ServerTransceiver transceiver ()
@@ -329,7 +340,7 @@ private class Server (API)
 
     public void shutdown ()
     {
-        this._terminate = true;
+        this.transceiver.send(Request(null, 0, "shutdown@command", ""));
         this.transceiver.close();
     }
 }
@@ -370,12 +381,16 @@ private class Client
                 while (!this._terminate)
                 {
                     Response res = this.transceiver.res.receive();
+
                     if (this._terminate)
                         break;
+
                     while (!(res.id in this._wait_manager.waiting))
                         cond.wait(1.msecs);
+
                     this._wait_manager.pending = res;
                     this._wait_manager.waiting[res.id].c.notify();
+                    this._wait_manager.remove(res.id);
                 }
             });
 
@@ -393,17 +408,49 @@ private class Client
         this._terminate = true;
         this.transceiver.close();
     }
+
+    public size_t getNextResponseId ()
+    {
+        return this._wait_manager.getNextResponseId();
+    }
 }
 
-private class RemoteAPI (API) : API
+public class RemoteAPI (API) : API
 {
     public static RemoteAPI!(API) spawn (Implementation) (CtorParams!Implementation args)
     {
-        //return new RemoteAPI();
+        auto server = Server!API.spawn!Implementation(args);
+        return new RemoteAPI(server.transceiver);
     }
 
-    public this ()
+    private ServerTransceiver _transceiver;
+    private Server!API server;
+    private Client client;
+
+    public this (Server!API s, Duration timeout = Duration.init)
     {
+        this.server = s;
+        this._transceiver = this.server.transceiver;
+        this.client = new Client(timeout);
+    }
+
+    public this (ServerTransceiver transceiver, Duration timeout = Duration.init)
+    {
+        this.server = null;
+        this._transceiver = transceiver;
+        this.client = new Client(timeout);
+    }
+
+    @property public ServerTransceiver transceiver ()
+    {
+        return this._transceiver;
+    }
+
+    public void shutdown () @trusted
+    {
+        this.transceiver.send(Request(null, 0, "shutdown@command", ""));
+        this.transceiver.close();
+        this.client.shutdown();
     }
 
     static foreach (member; __traits(allMembers, API))
@@ -412,7 +459,12 @@ private class RemoteAPI (API) : API
             mixin(q{
                 override ReturnType!(ovrld) } ~ member ~ q{ (Parameters!ovrld params)
                 {
+                    auto serialized = ArgWrapper!(Parameters!ovrld)(params)
+                        .serializeToJsonString();
 
+                    auto req = Request(this.client.transceiver, this.client.getNextResponseId(), ovrld.mangleof, serialized);
+                    Response res;
+                    this.client.query(this.transceiver, req, res);
 
                     if (res.status == Status.Failed)
                         throw new Exception(res.data);
@@ -427,24 +479,22 @@ private class RemoteAPI (API) : API
         }
 }
 
-/*
 /// Simple usage example
 unittest
 {
     static interface API
     {
-        @safe:
         public @property ulong getValue ();
     }
 
     static class MyAPI : API
     {
-        @safe:
         public override @property ulong getValue ()
         { return 42; }
     }
 
     scope test = RemoteAPI!API.spawn!MyAPI();
     assert(test.getValue() == 42);
+
+    test.shutdown();
 }
-*/
