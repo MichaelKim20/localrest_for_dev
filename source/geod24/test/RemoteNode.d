@@ -10,7 +10,7 @@ import std.stdio;
 
 private struct Request
 {
-    INode sender;
+    ITransceiver sender;
     size_t id;
     string method;
     string args;
@@ -30,13 +30,13 @@ private struct Response
     string data;
 };
 
-private interface INode
+private interface ITransceiver
 {
     void send (Request msg);
     void send (Response msg);
 }
 
-private class Node : INode
+private class ServerTransceiver : ITransceiver
 {
     public Channel!Request  req;
     public Channel!Response res;
@@ -50,7 +50,7 @@ private class Node : INode
     public void toString (scope void delegate(const(char)[]) sink)
     {
         import std.format : formattedWrite;
-        formattedWrite(sink, "Node(%x:%s)", cast(void*) req, cast(void*) res);
+        formattedWrite(sink, "STR(%x:%s)", cast(void*) req, cast(void*) res);
     }
 
     public void send (Request msg)
@@ -94,10 +94,10 @@ private class Node : INode
 
 unittest
 {
-    Node node1, node2;
+    ServerTransceiver server1, server2;
 
-    node1 = new Node();
-    node2 = new Node();
+    server1 = new ServerTransceiver();
+    server2 = new ServerTransceiver();
 
     auto thread_scheduler = new ThreadScheduler();
 
@@ -114,7 +114,7 @@ unittest
                 thisScheduler = fiber_scheduler;
                 while (!terminate)
                 {
-                    Request msg = node1.req.receive();
+                    Request msg = server1.req.receive();
                     if (msg.method == "name")
                     {
                         Response res = Response(Status.Success, 0, "Tom");
@@ -132,31 +132,31 @@ unittest
                         msg.sender.send(res);
                     }
                 }
-                node1.close();
+                server1.close();
             });
 
-            //  Response received from another node
+            //  Response received from another server
             fiber_scheduler.spawn({
                 thisScheduler = fiber_scheduler;
                 while (!terminate)
                 {
-                    Response msg = node1.res.receive();
+                    Response msg = server1.res.receive();
                     if (msg.data == "exit")
                         terminate = true;
                 }
-                node1.close();
+                server1.close();
             });
 
-            //  Request to another node
+            //  Request to another server
             fiber_scheduler.spawn({
                 thisScheduler = fiber_scheduler;
                 Request msg;
-                msg = Request(node1, 0, "name");
-                node2.send(msg);
-                msg = Request(node1, 0, "age");
-                node2.send(msg);
-                msg = Request(node1, 0, "exit");
-                node2.send(msg);
+                msg = Request(server1, 0, "name");
+                server2.send(msg);
+                msg = Request(server1, 0, "age");
+                server2.send(msg);
+                msg = Request(server1, 0, "exit");
+                server2.send(msg);
             });
         });
     });
@@ -174,8 +174,8 @@ unittest
                 thisScheduler = fiber_scheduler;
                 while (!terminate)
                 {
-                    Request msg = node2.req.receive();
-                    //writefln("%s %s", node2, msg);
+                    Request msg = server2.req.receive();
+                    //writefln("%s %s", server2, msg);
                     if (msg.method == "name")
                     {
                         Response res = Response(Status.Success, 0, "Tom");
@@ -193,25 +193,25 @@ unittest
                         msg.sender.send(res);
                     }
                 }
-                node2.close();
+                server2.close();
             });
 
-            //  Response received from another node
+            //  Response received from another server
             fiber_scheduler.spawn({
                 thisScheduler = fiber_scheduler;
                 while (!terminate)
                 {
-                    Response msg = node2.res.receive();
+                    Response msg = server2.res.receive();
                     if (msg.data == "exit")
                         terminate = true;
                 }
-                node2.close();
+                server2.close();
             });
         });
     });
 }
 
-private class ClientNode : INode
+private class ClientTransceiver : ITransceiver
 {
     public Channel!Response res;
 
@@ -223,7 +223,7 @@ private class ClientNode : INode
     public void toString (scope void delegate(const(char)[]) sink)
     {
         import std.format : formattedWrite;
-        formattedWrite(sink, "ClientNode(%x)", cast(void*) res);
+        formattedWrite(sink, "CTR(0:%x)", cast(void*) res);
     }
 
     public void send (Request msg)
@@ -233,9 +233,7 @@ private class ClientNode : INode
     public void send (Response msg)
     {
         if (thisScheduler !is null)
-        {
             this.res.send(msg);
-        }
         else
         {
             auto fiber_scheduler = new FiberScheduler();
@@ -336,9 +334,9 @@ private class NodeAPI : API
     }
 }
 
-private class NodeInterface
+private class Server
 {
-    private Node local_node;
+    private ServerTransceiver _transceiver;
     private WaitManager wait_manager;
     private shared(bool) terminate;
 
@@ -348,19 +346,19 @@ private class NodeInterface
     {
         this.instanseOfAPI = new NodeAPI(name, age);
 
-        this.local_node = new Node();
+        this._transceiver = new ServerTransceiver();
         this.wait_manager = new WaitManager();
         this.terminate = false;
 
-        this.spawnNode(this.local_node);
+        this.spawnNode(this.transceiver);
     }
 
-    @property public Node node ()
+    @property public ServerTransceiver transceiver ()
     {
-        return this.local_node;
+        return this._transceiver;
     }
 
-    private void spawnNode (Node local)
+    private void spawnNode (ServerTransceiver local)
     {
         auto thread_scheduler = ThreadScheduler.instance;
         thread_scheduler.spawn({
@@ -412,7 +410,7 @@ private class NodeInterface
         });
     }
 
-    public void query (Node remote, ref Request req, ref Response res)
+    public void query (ServerTransceiver remote, ref Request req, ref Response res)
     {
         if (thisScheduler is null)
             thisScheduler = new FiberScheduler();
@@ -426,17 +424,17 @@ private class NodeInterface
         });
     }
 
-    public string getName (Node remote)
+    public string getName (ServerTransceiver remote)
     {
-        Request req = Request(this.local_node, this.wait_manager.getNextResponseId(), "name", "");
+        Request req = Request(this.transceiver, this.wait_manager.getNextResponseId(), "name", "");
         Response res;
         this.query(remote, req, res);
         return res.data;
     }
 
-    public string getAge (Node remote)
+    public string getAge (ServerTransceiver remote)
     {
-        Request req = Request(this.local_node, this.wait_manager.getNextResponseId(), "age", "");
+        Request req = Request(this.transceiver, this.wait_manager.getNextResponseId(), "age", "");
         Response res;
         this.query(remote, req, res);
         return res.data;
@@ -445,29 +443,29 @@ private class NodeInterface
     public void shutdown ()
     {
         this.terminate = true;
-        this.local_node.close();
+        this.transceiver.close();
     }
 }
 
-private class ClientInterface
+private class Client
 {
-    private ClientNode  local_node;
+    private ClientTransceiver _transceiver;
     private WaitManager wait_manager;
     private FiberScheduler query_scheduler;
     private shared(bool) terminate;
 
     public this ()
     {
-        this.local_node = new ClientNode;
+        this._transceiver = new ClientTransceiver;
         this.wait_manager = new WaitManager();
     }
 
-    @property public ClientNode client ()
+    @property public ClientTransceiver transceiver ()
     {
-        return this.local_node;
+        return this._transceiver;
     }
 
-    public void query (Node remote, ref Request req, ref Response res)
+    public void query (ServerTransceiver remote, ref Request req, ref Response res)
     {
         res = () @trusted
         {
@@ -481,7 +479,7 @@ private class ClientInterface
                 remote.send(req);
                 while (!this.terminate)
                 {
-                    Response res = this.local_node.res.receive();
+                    Response res = this.transceiver.res.receive();
 
                     if (this.terminate)
                         break;
@@ -503,17 +501,17 @@ private class ClientInterface
         }();
     }
 
-    public string getName (Node remote)
+    public string getName (ServerTransceiver remote)
     {
-        Request req = Request(this.local_node, this.wait_manager.getNextResponseId(), "name", "");
+        Request req = Request(this.transceiver, this.wait_manager.getNextResponseId(), "name", "");
         Response res;
         this.query(remote, req, res);
         return res.data;
     }
 
-    public string getAge (Node remote)
+    public string getAge (ServerTransceiver remote)
     {
-        Request req = Request(this.local_node, this.wait_manager.getNextResponseId(), "age", "");
+        Request req = Request(this.transceiver, this.wait_manager.getNextResponseId(), "age", "");
         Response res;
         this.query(remote, req, res);
         return res.data;
@@ -522,30 +520,30 @@ private class ClientInterface
     public void shutdown ()
     {
         this.terminate = true;
-        this.local_node.close();
+        this.transceiver.close();
     }
 }
 
 unittest
 {
-    NodeInterface node1, node2;
-    node1 = new NodeInterface("Tom", "30");
-    node2 = new NodeInterface("Jain", "24");
-    assert (node1.getName(node2.node) == "Jain");
-    assert (node1.getAge(node2.node) == "24");
-    node1.shutdown();
-    node2.shutdown();
+    Server server1, server2;
+    server1 = new Server("Tom", "30");
+    server2 = new Server("Jain", "24");
+    assert (server1.getName(server2.transceiver) == "Jain");
+    assert (server1.getAge(server2.transceiver) == "24");
+    server1.shutdown();
+    server2.shutdown();
 }
 
 unittest
 {
-    NodeInterface node;
-    ClientInterface client;
-    node = new NodeInterface("Tom", "30");
-    client = new ClientInterface();
-    assert (client.getName(node.node) == "Tom");
-    assert (client.getAge(node.node) == "30");
-    node.shutdown();
+    Server server;
+    Client client;
+    server = new Server("Tom", "30");
+    client = new Client();
+    assert (client.getName(server.transceiver) == "Tom");
+    assert (client.getAge(server.transceiver) == "30");
+    server.shutdown();
     client.shutdown();
 }
 
