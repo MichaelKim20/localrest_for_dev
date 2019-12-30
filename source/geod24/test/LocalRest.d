@@ -395,167 +395,15 @@ private class Client
     }
 }
 
-struct ResultOfSpawan
-{
-    ServerTransceiver transceiver;
-    WaitManager manager;
-}
-
 private class RemoteAPI (API) : API
 {
-    public static Server!(API) spawn (Implementation) (CtorParams!Implementation args)
+    public static RemoteAPI!(API) spawn (Implementation) (CtorParams!Implementation args)
     {
-        auto res = spawned!Implementation(args);
-        return new Server(res.transceiver, res.wait_manager);
+        //return new RemoteAPI();
     }
 
-    /// Helper template to get the constructor's parameters
-    private static template CtorParams (Impl)
+    public this ()
     {
-        static if (is(typeof(Impl.__ctor)))
-            private alias CtorParams = Parameters!(Impl.__ctor);
-        else
-            private alias CtorParams = AliasSeq!();
-    }
-
-    private static void handleRequest (Request req, API node, FilterAPI filter)
-    {
-        import std.format;
-
-        switch (req.method)
-        {
-            static foreach (member; __traits(allMembers, API))
-            static foreach (ovrld; __traits(getOverloads, API, member))
-            {
-                mixin(
-                q{
-                    case `%2$s`:
-                    try
-                    {
-                        if (req.method == filter.func_mangleof)
-                        {
-                            // we have to send back a message
-                            import std.format;
-                            req.sender.send(Response(Status.Failed, req.id,
-                                format("Filtered method '%%s'", filter.pretty_func)));
-                            return;
-                        }
-
-                        auto args = req.args.deserializeJson!(ArgWrapper!(Parameters!ovrld));
-
-                        static if (!is(ReturnType!ovrld == void))
-                        {
-                            req.sender.send(
-                                Response(
-                                    Status.Success,
-                                    req.id,
-                                    node.%1$s(args.args).serializeToJsonString()));
-                        }
-                        else
-                        {
-                            node.%1$s(args.args);
-                            req.sender.send(Response(Status.Success, req.id));
-                        }
-                    }
-                    catch (Throwable t)
-                    {
-                        // Our sender expects a response
-                        req.sender.send(Response(Status.Failed, req.id, t.toString()));
-                    }
-
-                    return;
-                }.format(member, ovrld.mangleof));
-            }
-        default:
-            assert(0, "Unmatched method name: " ~ cmd.method);
-        }
-    }
-
-    private static ResultOfSpawan spawned (Implementation) (CtorParams!Implementation cargs)
-    {
-        ServerTransceiver transceiver = new ServerTransceiver();
-        WaitManager wait_manager = new WaitManager();
-        scope node = new Implementation(cargs);
-        auto thread_scheduler = ThreadScheduler.instance;
-
-        // used for controling filtering / sleep
-        struct Control
-        {
-            FilterAPI filter;    // filter specific messages
-            SysTime sleep_until; // sleep until this time
-            bool drop;           // drop messages if sleeping
-        }
-
-        Control control;
-
-        thread_scheduler.spawn({
-
-            auto fiber_scheduler = new FiberScheduler();
-            fiber_scheduler.start({
-                this._terminate = false;
-                thisScheduler.spawn({
-                    while (!this._terminate)
-                    {
-                        Request req = transceiver.req.receive();
-
-                        if (this._terminate)
-                            break;
-
-                        thisScheduler.spawn({
-                            handleCommand(req, node, control.filter);
-                        });
-                    }
-                });
-
-                thisScheduler.spawn({
-                    Condition cond = thisScheduler.newCondition(null);
-                    while (!this._terminate)
-                    {
-                        Response res = transceiver.res.receive();
-
-                        if (this._terminate)
-                            break;
-
-                        while (!(res.id in this.wait_manager.waiting))
-                            cond.wait(1.msecs);
-
-                        wait_manager.pending = res;
-                        wait_manager.waiting[res.id].c.notify();
-                        wait_manager.remove(res.id);
-                    }
-                });
-            });
-        });
-
-        return ResultOfSpawan(transceiver, wait_manager);
-    }
-
-    /// Where to send message to
-    private ServerTransceiver _transceiver;
-    private WaitManager _wait_manager;
-    private shared(bool) _terminate;
-
-    /// Timeout to use when issuing requests
-    private const Duration _timeout;
-
-
-    public this (ServerTransceiver transceiver, WaitManager wait_manager, Duration timeout = Duration.init)
-    {
-        this._transceiver = transceiver;
-        this._wait_manager = wait_manager;
-        this._timeout = timeout;
-        this._terminate = false;
-    }
-
-    @property public ServerTransceiver transceiver ()
-    {
-        return this._transceiver;
-    }
-
-    public void shutdown ()
-    {
-        this._terminate = true;
-        this.transceiver.close();
     }
 
     static foreach (member; __traits(allMembers, API))
@@ -564,23 +412,7 @@ private class RemoteAPI (API) : API
             mixin(q{
                 override ReturnType!(ovrld) } ~ member ~ q{ (Parameters!ovrld params)
                 {
-                    if (thisScheduler is null)
-                        thisScheduler = new FiberScheduler();
 
-                    auto res = () @trusted {
-                        auto serialized = ArgWrapper!(Parameters!ovrld)(params)
-                            .serializeToJsonString();
-
-                        auto req = Request(this.transceiver, scheduler.getNextResponseId(), ovrld.mangleof, serialized);
-
-                        thisScheduler.spawn({
-                            this.transceiver.send(req);
-                        });
-
-                        thisScheduler.start({
-                            res = this._wait_manager.waitResponse(req.id, this._timeout);
-                        });
-                    } ();
 
                     if (res.status == Status.Failed)
                         throw new Exception(res.data);
