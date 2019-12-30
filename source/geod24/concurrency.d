@@ -301,7 +301,6 @@ public class ThreadScheduler : Scheduler
         return scheduler;
     }
 
-
     /***************************************************************************
 
         This simply runs op directly, since no real scheduling is needed by
@@ -333,6 +332,7 @@ public class ThreadScheduler : Scheduler
         });
         t.start();
     }
+
 
     /***************************************************************************
 
@@ -484,6 +484,7 @@ class FiberScheduler : Scheduler
 {
     private Mutex mutex;
 
+
     /***************************************************************************
 
         This creates a new Fiber for the supplied op and then starts the
@@ -497,6 +498,7 @@ class FiberScheduler : Scheduler
         dispatch();
     }
 
+
     /***************************************************************************
 
         This created a new Fiber for the supplied op and adds it to the
@@ -509,6 +511,7 @@ class FiberScheduler : Scheduler
         create(op);
         yield();
     }
+
 
     /***************************************************************************
 
@@ -525,6 +528,7 @@ class FiberScheduler : Scheduler
         if (Fiber.getThis())
             Fiber.yield();
     }
+
 
     /***************************************************************************
 
@@ -544,6 +548,7 @@ class FiberScheduler : Scheduler
             return f.info;
         return ThreadInfo.thisInfo;
     }
+
 
     /***************************************************************************
 
@@ -652,6 +657,7 @@ class FiberScheduler : Scheduler
 
 protected:
 
+
     /***************************************************************************
 
         Creates a new Fiber which calls the given delegate.
@@ -664,6 +670,7 @@ protected:
     void create(void delegate() op) nothrow
     {
         auto owner_scheduler = this;
+
         void wrap()
         {
             scope (exit)
@@ -676,6 +683,7 @@ protected:
 
         m_fibers ~= new InfoFiber(&wrap);
     }
+
 
     /***************************************************************************
 

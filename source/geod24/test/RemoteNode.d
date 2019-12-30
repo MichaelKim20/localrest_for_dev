@@ -30,6 +30,16 @@ private struct Response
     string data;
 };
 
+/// Filter out requests before they reach a node
+private struct FilterAPI
+{
+    /// the mangled symbol name of the function to filter
+    string func_mangleof;
+
+    /// used for debugging
+    string pretty_func;
+}
+
 private interface ITransceiver
 {
     void send (Request msg);
@@ -337,7 +347,7 @@ private class NodeAPI : API
 private class Server
 {
     private ServerTransceiver _transceiver;
-    private WaitManager wait_manager;
+    private WaitManager _wait_manager;
     private shared(bool) terminate;
 
     private NodeAPI instanseOfAPI;
@@ -347,7 +357,7 @@ private class Server
         this.instanseOfAPI = new NodeAPI(name, age);
 
         this._transceiver = new ServerTransceiver();
-        this.wait_manager = new WaitManager();
+        this._wait_manager = new WaitManager();
         this.terminate = false;
 
         this.spawnNode(this.transceiver);
@@ -399,11 +409,11 @@ private class Server
                         if (this.terminate)
                             break;
 
-                        while (!(res.id in this.wait_manager.waiting))
+                        while (!(res.id in this._wait_manager.waiting))
                             cond.wait(1.msecs);
 
-                        this.wait_manager.pending = res;
-                        this.wait_manager.waiting[res.id].c.notify();
+                        this._wait_manager.pending = res;
+                        this._wait_manager.waiting[res.id].c.notify();
                     }
                 });
             });
@@ -420,13 +430,13 @@ private class Server
         });
 
         thisScheduler.start({
-            res = this.wait_manager.waitResponse(req.id, 3000.msecs);
+            res = this._wait_manager.waitResponse(req.id, 3000.msecs);
         });
     }
 
     public string getName (ServerTransceiver remote)
     {
-        Request req = Request(this.transceiver, this.wait_manager.getNextResponseId(), "name", "");
+        Request req = Request(this.transceiver, this._wait_manager.getNextResponseId(), "name", "");
         Response res;
         this.query(remote, req, res);
         return res.data;
@@ -434,7 +444,7 @@ private class Server
 
     public string getAge (ServerTransceiver remote)
     {
-        Request req = Request(this.transceiver, this.wait_manager.getNextResponseId(), "age", "");
+        Request req = Request(this.transceiver, this._wait_manager.getNextResponseId(), "age", "");
         Response res;
         this.query(remote, req, res);
         return res.data;
@@ -450,14 +460,13 @@ private class Server
 private class Client
 {
     private ClientTransceiver _transceiver;
-    private WaitManager wait_manager;
-    private FiberScheduler query_scheduler;
+    private WaitManager _wait_manager;
     private shared(bool) terminate;
 
     public this ()
     {
         this._transceiver = new ClientTransceiver;
-        this.wait_manager = new WaitManager();
+        this._wait_manager = new WaitManager();
     }
 
     @property public ClientTransceiver transceiver ()
@@ -471,30 +480,27 @@ private class Client
         {
             this.terminate = false;
 
-            if (this.query_scheduler is null)
-                this.query_scheduler = new FiberScheduler();
+            if (thisScheduler is null)
+                thisScheduler = new FiberScheduler();
 
-            Condition cond = this.query_scheduler.newCondition(null);
-            this.query_scheduler.spawn({
+            Condition cond = thisScheduler.newCondition(null);
+            thisScheduler.spawn({
                 remote.send(req);
                 while (!this.terminate)
                 {
                     Response res = this.transceiver.res.receive();
-
                     if (this.terminate)
                         break;
-
-                    while (!(res.id in this.wait_manager.waiting))
+                    while (!(res.id in this._wait_manager.waiting))
                         cond.wait(1.msecs);
-
-                    this.wait_manager.pending = res;
-                    this.wait_manager.waiting[res.id].c.notify();
+                    this._wait_manager.pending = res;
+                    this._wait_manager.waiting[res.id].c.notify();
                 }
             });
 
             Response val;
-            this.query_scheduler.start({
-                val = this.wait_manager.waitResponse(req.id, 3000.msecs);
+            thisScheduler.start({
+                val = this._wait_manager.waitResponse(req.id, 3000.msecs);
                 terminate = true;
             });
             return val;
@@ -503,7 +509,7 @@ private class Client
 
     public string getName (ServerTransceiver remote)
     {
-        Request req = Request(this.transceiver, this.wait_manager.getNextResponseId(), "name", "");
+        Request req = Request(this.transceiver, this._wait_manager.getNextResponseId(), "name", "");
         Response res;
         this.query(remote, req, res);
         return res.data;
@@ -511,7 +517,7 @@ private class Client
 
     public string getAge (ServerTransceiver remote)
     {
-        Request req = Request(this.transceiver, this.wait_manager.getNextResponseId(), "age", "");
+        Request req = Request(this.transceiver, this._wait_manager.getNextResponseId(), "age", "");
         Response res;
         this.query(remote, req, res);
         return res.data;
