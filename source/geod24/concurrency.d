@@ -371,6 +371,7 @@ public class ThreadScheduler : Scheduler
         {
             if (this.mutex is null)
                 this.mutex = new Mutex;
+
             m = this.mutex;
         }
         return  new Condition(m);

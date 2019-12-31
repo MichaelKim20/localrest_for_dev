@@ -76,7 +76,7 @@
 
 *******************************************************************************/
 
-module geod24.test.LocalRest;
+module geod24.LocalRest;
 
 import geod24.concurrency;
 
@@ -152,28 +152,57 @@ private struct FilterAPI
     string pretty_func;
 }
 
-/// Receve request and respanse
+/*******************************************************************************
+
+    Receve request and respanse
+    Interfaces to and from data
+
+*******************************************************************************/
+
 private interface ITransceiver
 {
+    /***************************************************************************
+
+        It is a function that accepts `Request`.
+
+    ***************************************************************************/
+
     void send (Request msg);
+
+
+    /***************************************************************************
+
+        It is a function that accepts `Response`.
+
+    ***************************************************************************/
+
     void send (Response msg);
 }
 
-/// Receive request
+
+/*******************************************************************************
+
+    Accept only Request.
+    It has `Channel!Request`
+
+*******************************************************************************/
+
 private class ServerTransceiver : ITransceiver
 {
-    public Channel!Request  req;
+    private Channel!Request  req;
 
+    /// Ctor
     public this ()
     {
         req = new Channel!Request();
     }
 
-    public void toString (scope void delegate(const(char)[]) sink)
-    {
-        import std.format : formattedWrite;
-        formattedWrite(sink, "STR(%x:0)", cast(void*) req);
-    }
+
+    /***************************************************************************
+
+        It is a function that accepts `Request`.
+
+    ***************************************************************************/
 
     public void send (Request msg)
     {
@@ -191,35 +220,73 @@ private class ServerTransceiver : ITransceiver
         }
     }
 
+
+    /***************************************************************************
+
+        It is a function that accepts `Response`.
+        It is not use.
+
+    ***************************************************************************/
+
     public void send (Response msg)
     {
     }
 
+
+    /***************************************************************************
+
+        Close the `Channel`
+
+    ***************************************************************************/
+
     public void close ()
     {
         this.req.close();
+    }
+
+
+    /***************************************************************************
+
+        Generate a convenient string for identifying this ServerTransceiver.
+
+    ***************************************************************************/
+
+    public void toString (scope void delegate(const(char)[]) sink)
+    {
+        import std.format : formattedWrite;
+        formattedWrite(sink, "STR(%x:0)", cast(void*) req);
     }
 }
 
 /// Receive response
 private class ClientTransceiver : ITransceiver
 {
-    public Channel!Response res;
+    private Channel!Response res;
 
+    /// Ctor
     public this ()
     {
         res = new Channel!Response();
     }
 
-    public void toString (scope void delegate(const(char)[]) sink)
-    {
-        import std.format : formattedWrite;
-        formattedWrite(sink, "CTR(0:%x)", cast(void*) res);
-    }
+
+    /***************************************************************************
+
+        It is a function that accepts `Request`.
+        It is not use.
+
+    ***************************************************************************/
 
     public void send (Request msg)
     {
     }
+
+
+    /***************************************************************************
+
+        It is a function that accepts `Response`.
+
+    ***************************************************************************/
 
     public void send (Response msg)
     {
@@ -237,9 +304,29 @@ private class ClientTransceiver : ITransceiver
         }
     }
 
+
+    /***************************************************************************
+
+        Close the `Channel`
+
+    ***************************************************************************/
+
     public void close ()
     {
         this.res.close();
+    }
+
+
+    /***************************************************************************
+
+        Generate a convenient string for identifying this ServerTransceiver.
+
+    ***************************************************************************/
+
+    public void toString (scope void delegate(const(char)[]) sink)
+    {
+        import std.format : formattedWrite;
+        formattedWrite(sink, "CTR(0:%x)", cast(void*) res);
     }
 }
 
@@ -310,11 +397,52 @@ private static template CtorParams (Impl)
 /// them to an instance of the Node.
 private class Server (API)
 {
-    public static Server!API spawn (Implementation) (CtorParams!Implementation args)
+    /***************************************************************************
+
+        Instantiate a node and start it
+
+        This is usually called from the main thread, which will start all the
+        nodes and then start to process request.
+        In order to have a connected network, no nodes in any thread should have
+        a different reference to the same node.
+        In practice, this means there should only be one `ServerTransceiver`
+        per "address".
+
+        Note:
+          When the `Server` returned by this function is finalized,
+          the child thread will be shut down.
+          This ownership mechanism should be replaced with reference counting
+          in a later version.
+
+        Params:
+          Impl = Type of the implementation to instantiate
+          args = Arguments to the object's constructor
+
+        Returns:
+          A `Server` owning the node reference
+
+    ***************************************************************************/
+
+    public static Server!API spawn (Impl) (CtorParams!Impl args)
     {
-        auto res = spawned!Implementation(args);
-        return new Server(res);
+        auto transceiver = spawned!Impl(args);
+        return new Server(transceiver);
     }
+
+
+    /***************************************************************************
+
+        Handler function
+
+        Performs the dispatch from `req` to the proper `node` function,
+        provided the function is not filtered.
+
+        Params:
+            req    = the request to run (contains the method name and the arguments)
+            node   = the node to invoke the method on
+            filter = used for filtering API calls (returns default response)
+
+    ***************************************************************************/
 
     private static void handleRequest (Request req, API node, FilterAPI filter)
     {
@@ -358,11 +486,23 @@ private class Server (API)
         }
     }
 
+    /***************************************************************************
+
+        Main dispatch function
+
+        This function receive string-serialized messages from the calling thread,
+        which is a struct with the sender's Tid, the method's mangleof,
+        and the method's arguments as a tuple, serialized to a JSON string.
+
+        Params:
+           Implementation = Type of the implementation to instantiate
+           args = Arguments to `Implementation`'s constructor
+
+    ***************************************************************************/
+
     private static ServerTransceiver spawned (Implementation) (CtorParams!Implementation cargs)
     {
-        import std.datetime.systime : Clock, SysTime;
-        import std.algorithm : each;
-        import std.range;
+        import std.datetime.systime : SysTime;
 
         ServerTransceiver transceiver = new ServerTransceiver();
         auto thread_scheduler = ThreadScheduler.instance;
@@ -405,26 +545,49 @@ private class Server (API)
     }
 
     /// Where to send message to
-    private ServerTransceiver trsrecv;
+    private ServerTransceiver _transceiver;
 
-    /// Timeout to use when issuing requests
-    private const Duration timeout;
 
-    public this (ServerTransceiver transceiver, Duration timeout = Duration.init)
+
+    /***************************************************************************
+
+        Create an instante of a `Server`
+
+        Params:
+          transceiver = `ServerTransceiver` of the node.
+
+    ***************************************************************************/
+
+    public this (ServerTransceiver transceiver)
     {
-        this.trsrecv = transceiver;
-        this.timeout = timeout;
+        this._transceiver = transceiver;
     }
+
+    /***************************************************************************
+
+        Returns the `ServerTransceiver`
+
+        This can be useful for calling `geod24.concurrency.register` or similar.
+        Note that the `ServerTransceiver` should not be used directly,
+        as our event loop, would error out on an unknown message.
+
+    ***************************************************************************/
 
     @property public ServerTransceiver transceiver ()
     {
-        return this.trsrecv;
+        return this._transceiver;
     }
+
+    /***************************************************************************
+
+        Send an async message to the thread to immediately shut down.
+
+    ***************************************************************************/
 
     public void shutdown ()
     {
-        this.transceiver.send(Request(null, 0, "shutdown@command", ""));
-        this.transceiver.close();
+        this._transceiver.send(Request(null, 0, "shutdown@command", ""));
+        this._transceiver.close();
     }
 }
 
@@ -432,29 +595,33 @@ private class Server (API)
 private class Client
 {
     /// Where to send message to
-    private ClientTransceiver trsrecv;
-    private WaitManager wait_manager;
-    /// Timeout to use when issuing requests
-    private const Duration timeout;
-    private shared(bool) terminate;
+    private ClientTransceiver _transceiver;
+    private WaitManager _wait_manager;
 
+    /// Timeout to use when issuing requests
+    private Duration _timeout;
+    private bool _terminate;
+
+    /// Ctor
     public this (Duration timeout = Duration.init)
     {
-        this.trsrecv = new ClientTransceiver;
-        this.timeout = timeout;
-        this.wait_manager = new WaitManager();
+        this._transceiver = new ClientTransceiver;
+        this._timeout = timeout;
+        this._wait_manager = new WaitManager();
     }
 
+    ///
     @property public ClientTransceiver transceiver ()
     {
-        return this.trsrecv;
+        return this._transceiver;
     }
 
+    ///
     public void query (ServerTransceiver remote, ref Request req, ref Response res)
     {
         res = () @trusted
         {
-            this.terminate = false;
+            this._terminate = false;
 
             if (thisScheduler is null)
                 thisScheduler = new FiberScheduler();
@@ -462,40 +629,42 @@ private class Client
             Condition cond = thisScheduler.newCondition(null);
             thisScheduler.spawn({
                 remote.send(req);
-                while (!this.terminate)
+                while (!this._terminate)
                 {
-                    Response res = this.transceiver.res.receive();
+                    Response res = this._transceiver.res.receive();
 
-                    if (this.terminate)
+                    if (this._terminate)
                         break;
 
-                    while (!(res.id in this.wait_manager.waiting))
+                    while (!(res.id in this._wait_manager.waiting))
                         cond.wait(1.msecs);
 
-                    this.wait_manager.pending = res;
-                    this.wait_manager.waiting[res.id].c.notify();
-                    this.wait_manager.remove(res.id);
+                    this._wait_manager.pending = res;
+                    this._wait_manager.waiting[res.id].c.notify();
+                    this._wait_manager.remove(res.id);
                 }
             });
 
             Response val;
             thisScheduler.start({
-                val = this.wait_manager.waitResponse(req.id, this.timeout);
-                this.terminate = true;
+                val = this._wait_manager.waitResponse(req.id, this._timeout);
+                this._terminate = true;
             });
             return val;
         }();
     }
 
+    ///
     public void shutdown ()
     {
-        this.terminate = true;
-        this.transceiver.close();
+        this._terminate = true;
+        this._transceiver.close();
     }
 
+    ///
     public size_t getNextResponseId ()
     {
-        return this.wait_manager.getNextResponseId();
+        return this._wait_manager.getNextResponseId();
     }
 }
 
@@ -508,34 +677,34 @@ public class RemoteAPI (API) : API
         return new RemoteAPI(server.transceiver);
     }
 
-    private ServerTransceiver trsrecv;
-    private Server!API server;
-    private Client client;
+    private ServerTransceiver _server_transceiver;
+    private Server!API _server;
+    private Client _client;
 
-    public this (Server!API sv, Duration timeout = Duration.init)
+    public this (Server!API server, Duration timeout = Duration.init)
     {
-        this.server = sv;
-        this.trsrecv = this.server.transceiver;
-        this.client = new Client(timeout);
+        this._server = server;
+        this._server_transceiver = this._server.transceiver;
+        this._client = new Client(timeout);
     }
 
-    public this (ServerTransceiver trsrecv, Duration timeout = Duration.init)
+    public this (ServerTransceiver transceiver, Duration timeout = Duration.init)
     {
-        this.server = null;
-        this.trsrecv = trsrecv;
-        this.client = new Client(timeout);
+        this._server = null;
+        this._server_transceiver = transceiver;
+        this._client = new Client(timeout);
     }
 
     @property public ServerTransceiver transceiver ()
     {
-        return this.trsrecv;
+        return this._server_transceiver;
     }
 
     public void shutdown () @trusted
     {
-        this.transceiver.send(Request(null, 0, "shutdown@command", ""));
-        this.transceiver.close();
-        this.client.shutdown();
+        this._server_transceiver.send(Request(null, 0, "shutdown@command", ""));
+        this._server_transceiver.close();
+        this._client.shutdown();
     }
 
     static foreach (member; __traits(allMembers, API))
@@ -547,9 +716,9 @@ public class RemoteAPI (API) : API
                     auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                         .serializeToJsonString();
 
-                    auto req = Request(this.client.transceiver, this.client.getNextResponseId(), ovrld.mangleof, serialized);
+                    auto req = Request(this._client.transceiver, this._client.getNextResponseId(), ovrld.mangleof, serialized);
                     Response res;
-                    this.client.query(this.transceiver, req, res);
+                    this._client.query(this._server_transceiver, req, res);
 
                     if (res.status == Status.Failed)
                         throw new Exception(res.data);
