@@ -70,6 +70,9 @@
     as Vibe.d is the only available JSON module known to the author
     to provide an interface to deserialize composite types.
 
+    Removed Tid
+    Added ITransceiver
+
     Author:         Mathias 'Geod24' Lang
     License:        MIT (See LICENSE.txt)
     Copyright:      Copyright (c) 2018-2019 Mathias Lang. All rights reserved.
@@ -133,13 +136,13 @@ private struct Response
     string data;
 };
 
-/// Simple wrapper to deal with tuples
-/// Vibe.d might emit a pragma(msg) when T.length == 0
-private struct ArgWrapper (T...)
+/// Ask the node to exhibit a certain behavior for a given time
+private struct TimeCommand
 {
-    static if (T.length == 0)
-        size_t dummy;
-    T args;
+    /// For how long our remote node apply this behavior
+    Duration dur;
+    /// Whether or not affected messages should be dropped
+    bool drop = false;
 }
 
 /// Filter out requests before they reach a node
@@ -152,9 +155,18 @@ private struct FilterAPI
     string pretty_func;
 }
 
+/// Simple wrapper to deal with tuples
+/// Vibe.d might emit a pragma(msg) when T.length == 0
+private struct ArgWrapper (T...)
+{
+    static if (T.length == 0)
+        size_t dummy;
+    T args;
+}
+
 /*******************************************************************************
 
-    Receve request and respanse
+    Receve request and response
     Interfaces to and from data
 
 *******************************************************************************/
@@ -177,24 +189,41 @@ private interface ITransceiver
     ***************************************************************************/
 
     void send (Response msg);
+
+
+    /***************************************************************************
+
+        Generate a convenient string for identifying this ServerTransceiver.
+
+    ***************************************************************************/
+
+    void toString (scope void delegate(const(char)[]) sink);
 }
 
 
 /*******************************************************************************
 
-    Accept only Request.
-    It has `Channel!Request`
+    Accept only Request. It has `Channel!Request`
 
 *******************************************************************************/
 
 private class ServerTransceiver : ITransceiver
 {
-    private Channel!Request  req;
+    /// Channel of Request
+    private Channel!Request req;
+
+    /// Channel of TimeCommand - Using for sleeping
+    private Channel!TimeCommand ctrl_time;
+
+    /// Channel of FilterAPI - Using for filtering
+    private Channel!FilterAPI ctrl_filter;
 
     /// Ctor
-    public this ()
+    public this () @safe nothrow
     {
         req = new Channel!Request();
+        ctrl_time = new Channel!TimeCommand();
+        ctrl_filter = new Channel!FilterAPI();
     }
 
 
@@ -204,7 +233,7 @@ private class ServerTransceiver : ITransceiver
 
     ***************************************************************************/
 
-    public void send (Request msg)
+    public void send (Request msg) @trusted
     {
         if (thisScheduler !is null)
             this.req.send(msg);
@@ -223,12 +252,57 @@ private class ServerTransceiver : ITransceiver
 
     /***************************************************************************
 
+        It is a function that accepts `TimeCommand`.
+
+    ***************************************************************************/
+
+    public void send (TimeCommand msg) @trusted
+    {
+        if (thisScheduler !is null)
+            this.ctrl_time.send(msg);
+        else
+        {
+            auto fiber_scheduler = new FiberScheduler();
+            auto condition = fiber_scheduler.newCondition(null);
+            fiber_scheduler.start({
+                this.ctrl_time.send(msg);
+                condition.notify();
+            });
+            condition.wait();
+        }
+    }
+
+    /***************************************************************************
+
+        It is a function that accepts `FilterAPI`.
+
+    ***************************************************************************/
+
+    public void send (FilterAPI msg) @trusted
+    {
+        if (thisScheduler !is null)
+            this.ctrl_filter.send(msg);
+        else
+        {
+            auto fiber_scheduler = new FiberScheduler();
+            auto condition = fiber_scheduler.newCondition(null);
+            fiber_scheduler.start({
+                this.ctrl_filter.send(msg);
+                condition.notify();
+            });
+            condition.wait();
+        }
+    }
+
+
+    /***************************************************************************
+
         It is a function that accepts `Response`.
         It is not use.
 
     ***************************************************************************/
 
-    public void send (Response msg)
+    public void send (Response msg) @trusted
     {
     }
 
@@ -239,9 +313,11 @@ private class ServerTransceiver : ITransceiver
 
     ***************************************************************************/
 
-    public void close ()
+    public void close () @trusted
     {
         this.req.close();
+        this.ctrl_time.close();
+        this.ctrl_filter.close();
     }
 
 
@@ -258,13 +334,19 @@ private class ServerTransceiver : ITransceiver
     }
 }
 
-/// Receive response
+/*******************************************************************************
+
+    Accept only Response. It has `Channel!Response`
+
+*******************************************************************************/
+
 private class ClientTransceiver : ITransceiver
 {
+    /// Channel of Response
     private Channel!Response res;
 
     /// Ctor
-    public this ()
+    public this () @safe nothrow
     {
         res = new Channel!Response();
     }
@@ -277,7 +359,7 @@ private class ClientTransceiver : ITransceiver
 
     ***************************************************************************/
 
-    public void send (Request msg)
+    public void send (Request msg) @trusted
     {
     }
 
@@ -288,7 +370,7 @@ private class ClientTransceiver : ITransceiver
 
     ***************************************************************************/
 
-    public void send (Response msg)
+    public void send (Response msg) @trusted
     {
         if (thisScheduler !is null)
             this.res.send(msg);
@@ -311,7 +393,7 @@ private class ClientTransceiver : ITransceiver
 
     ***************************************************************************/
 
-    public void close ()
+    public void close () @trusted
     {
         this.res.close();
     }
@@ -330,11 +412,18 @@ private class ClientTransceiver : ITransceiver
     }
 }
 
-/// It's a class to wait for a response.
-private class WaitManager
+
+/*******************************************************************************
+
+    After making the request, wait until the response comes,
+    and find the response that suits the request.
+
+*******************************************************************************/
+
+private class WaitingManager
 {
-    /// Just a FiberCondition with a state
-    struct Waiting
+    /// Just a Condition with a state
+    private struct Waiting
     {
         Condition c;
         bool busy;
@@ -347,40 +436,54 @@ private class WaitManager
     public Waiting[ulong] waiting;
 
     /// Get the next available request ID
-    public size_t getNextResponseId ()
+    public size_t getNextResponseId () @safe nothrow
     {
         static size_t last_idx;
         return last_idx++;
     }
 
     /// Wait for a response.
-    public Response waitResponse (size_t id, Duration duration)
+    public Response waitResponse (size_t id, Duration duration) @trusted nothrow
     {
-        if (id !in this.waiting)
-            this.waiting[id] = Waiting(thisScheduler.newCondition(null), false);
+        try
+        {
+            if (id !in this.waiting)
+                this.waiting[id] = Waiting(thisScheduler.newCondition(null), false);
 
-        Waiting* ptr = &this.waiting[id];
-        if (ptr.busy)
-            assert(0, "Trying to override a pending request");
+            Waiting* ptr = &this.waiting[id];
+            if (ptr.busy)
+                assert(0, "Trying to override a pending request");
 
-        // We yield and wait for an answer
-        ptr.busy = true;
+            // We yield and wait for an answer
+            ptr.busy = true;
 
-        if (duration == Duration.init)
-            ptr.c.wait();
-        else if (!ptr.c.wait(duration))
-            this.pending = Response(Status.Timeout, id, "");
+            if (duration == Duration.init)
+                ptr.c.wait();
+            else if (!ptr.c.wait(duration))
+                this.pending = Response(Status.Timeout, id, "");
 
-        ptr.busy = false;
-        // After control returns to us, `pending` has been filled
-        scope(exit) this.pending = Response.init;
-        return this.pending;
+            ptr.busy = false;
+            // After control returns to us, `pending` has been filled
+            scope(exit) this.pending = Response.init;
+            return this.pending;
+        }
+        catch (Exception e)
+        {
+            import std.format;
+            assert(0, format("Exception - %s", e.message));
+        }
     }
 
     /// Called when a waiting condition was handled and can be safely removed
-    public void remove (size_t id)
+    public void remove (size_t id) @safe nothrow
     {
         this.waiting.remove(id);
+    }
+
+    /// Returns true if a key value equal to id exists.
+    public bool exist (size_t id) @safe nothrow
+    {
+        return ((id in this.waiting) !is null);
     }
 }
 
@@ -393,8 +496,14 @@ private static template CtorParams (Impl)
         private alias CtorParams = AliasSeq!();
 }
 
-/// Receive requests, To obtain and return results by passing
-/// them to an instance of the Node.
+
+/*******************************************************************************
+
+    Receive requests, To obtain and return results by passing
+    them to an instance of the Node.
+
+*******************************************************************************/
+
 private class Server (API)
 {
     /***************************************************************************
@@ -409,17 +518,17 @@ private class Server (API)
         per "address".
 
         Note:
-          When the `Server` returned by this function is finalized,
-          the child thread will be shut down.
-          This ownership mechanism should be replaced with reference counting
-          in a later version.
+            When the `Server` returned by this function is finalized,
+            the child thread will be shut down.
+            This ownership mechanism should be replaced with reference counting
+            in a later version.
 
         Params:
-          Impl = Type of the implementation to instantiate
-          args = Arguments to the object's constructor
+            Impl = Type of the implementation to instantiate
+            args = Arguments to the object's constructor
 
         Returns:
-          A `Server` owning the node reference
+            A `Server` owning the node reference
 
     ***************************************************************************/
 
@@ -458,13 +567,20 @@ private class Server (API)
                     case `%2$s`:
                     try
                     {
+                        if (req.method == filter.func_mangleof)
+                        {
+                            // we have to send back a message
+                            import std.format;
+                            req.sender.send(Response(Status.Failed, req.id,
+                                format("Filtered method '%%s'", filter.pretty_func)));
+                            return;
+                        }
 
                         auto args = req.args.deserializeJson!(ArgWrapper!(Parameters!ovrld));
 
                         static if (!is(ReturnType!ovrld == void))
                         {
-                            auto res = Response(Status.Success, req.id, node.%1$s(args.args).serializeToJsonString());
-                            req.sender.send(res);
+                            req.sender.send(Response(Status.Success, req.id, node.%1$s(args.args).serializeToJsonString()));
                         }
                         else
                         {
@@ -486,23 +602,24 @@ private class Server (API)
         }
     }
 
+
     /***************************************************************************
 
         Main dispatch function
 
         This function receive string-serialized messages from the calling thread,
-        which is a struct with the sender's Tid, the method's mangleof,
+        which is a struct with the sender's ITransceiver, the method's mangleof,
         and the method's arguments as a tuple, serialized to a JSON string.
 
         Params:
-           Implementation = Type of the implementation to instantiate
-           args = Arguments to `Implementation`'s constructor
+            Implementation = Type of the implementation to instantiate
+            args = Arguments to `Implementation`'s constructor
 
     ***************************************************************************/
 
     private static ServerTransceiver spawned (Implementation) (CtorParams!Implementation cargs)
     {
-        import std.datetime.systime : SysTime;
+        import std.datetime.systime : Clock, SysTime;
 
         ServerTransceiver transceiver = new ServerTransceiver();
         auto thread_scheduler = ThreadScheduler.instance;
@@ -516,8 +633,23 @@ private class Server (API)
         }
 
         thread_scheduler.spawn({
+
             scope node = new Implementation(cargs);
+
             Control control;
+
+            bool isSleeping()
+            {
+                return control.sleep_until != SysTime.init
+                    && Clock.currTime < control.sleep_until;
+            }
+
+            void handle (Request req)
+            {
+                thisScheduler.spawn(() {
+                    Server!(API).handleRequest(req, node, control.filter);
+                });
+            }
 
             auto fiber_scheduler = new FiberScheduler();
             fiber_scheduler.start({
@@ -533,9 +665,46 @@ private class Server (API)
                         if (terminate)
                             break;
 
-                        thisScheduler.spawn({
-                            Server!(API).handleRequest(req, node, control.filter);
-                        });
+                        if (!isSleeping())
+                        {
+                            thisScheduler.spawn({
+                                Server!(API).handleRequest(req, node, control.filter);
+                            });
+                        }
+                        else if (!control.drop)
+                        {
+                            auto c = thisScheduler.newCondition(null);
+                            thisScheduler.spawn({
+                                while (isSleeping())
+                                    thisScheduler.wait(c, 1.msecs);
+                                Server!(API).handleRequest(req, node, control.filter);
+                            });
+                        }
+                    }
+                });
+
+                thisScheduler.spawn({
+                    while (!terminate)
+                    {
+                        TimeCommand time_command = transceiver.ctrl_time.receive();
+
+                        if (terminate)
+                            break;
+
+                        control.sleep_until = Clock.currTime + time_command.dur;
+                        control.drop = time_command.drop;
+                    }
+                });
+
+                thisScheduler.spawn({
+                    while (!terminate)
+                    {
+                        FilterAPI filter = transceiver.ctrl_filter.receive();
+
+                        if (terminate)
+                            break;
+
+                        control.filter = filter;
                     }
                 });
             });
@@ -544,9 +713,8 @@ private class Server (API)
         return transceiver;
     }
 
-    /// Where to send message to
+    /// Devices that can receive requests.
     private ServerTransceiver _transceiver;
-
 
 
     /***************************************************************************
@@ -554,14 +722,16 @@ private class Server (API)
         Create an instante of a `Server`
 
         Params:
-          transceiver = `ServerTransceiver` of the node.
+            transceiver = This is an instance of `ServerTransceiver` and
+                a device that can receive requests.
 
     ***************************************************************************/
 
-    public this (ServerTransceiver transceiver)
+    public this (ServerTransceiver transceiver) @nogc pure nothrow
     {
         this._transceiver = transceiver;
     }
+
 
     /***************************************************************************
 
@@ -573,10 +743,11 @@ private class Server (API)
 
     ***************************************************************************/
 
-    @property public ServerTransceiver transceiver ()
+    @property public ServerTransceiver transceiver () @safe nothrow
     {
         return this._transceiver;
     }
+
 
     /***************************************************************************
 
@@ -584,127 +755,363 @@ private class Server (API)
 
     ***************************************************************************/
 
-    public void shutdown ()
+    public void shutdown () @trusted
     {
-        this._transceiver.send(Request(null, 0, "shutdown@command", ""));
+        this._transceiver.send(Request(null, 0, "shutdown@command"));
         this._transceiver.close();
     }
 }
 
-/// Request to the `Server`, receive a response
+
+/*******************************************************************************
+
+    Request to the `Server`, receive a response
+
+*******************************************************************************/
+
 private class Client
 {
-    /// Where to send message to
+    /// Devices that can receive a response
     private ClientTransceiver _transceiver;
-    private WaitManager _wait_manager;
+
+    /// After making the request, wait until the response comes,
+    /// and find the response that suits the request.
+    private WaitingManager _manager;
 
     /// Timeout to use when issuing requests
     private Duration _timeout;
+
+    ///
     private bool _terminate;
 
     /// Ctor
-    public this (Duration timeout = Duration.init)
+    public this (Duration timeout = Duration.init) @safe nothrow
     {
         this._transceiver = new ClientTransceiver;
+        this._manager = new WaitingManager();
         this._timeout = timeout;
-        this._wait_manager = new WaitManager();
     }
 
-    ///
-    @property public ClientTransceiver transceiver ()
+
+    /***************************************************************************
+
+        Returns client's Transceiver.
+        It accept only `Response`.
+
+        Returns:
+            Client's Transceiver
+
+    ***************************************************************************/
+
+    @property public ClientTransceiver transceiver () @safe nothrow
     {
         return this._transceiver;
     }
 
-    ///
-    public void query (ServerTransceiver remote, ref Request req, ref Response res)
+
+    /***************************************************************************
+
+        This enables appropriate responses to requests through the API
+
+        Params:
+           remote = Instance of ServerTransceiver
+           req = `Request`
+           res = `Response`
+
+    ***************************************************************************/
+
+    public void router (ServerTransceiver remote, ref Request req, ref Response res) @trusted
     {
-        res = () @trusted
-        {
-            this._terminate = false;
+        this._terminate = false;
 
-            if (thisScheduler is null)
-                thisScheduler = new FiberScheduler();
+        if (thisScheduler is null)
+            thisScheduler = new FiberScheduler();
 
-            Condition cond = thisScheduler.newCondition(null);
-            thisScheduler.spawn({
-                remote.send(req);
-                while (!this._terminate)
-                {
-                    Response res = this._transceiver.res.receive();
+        thisScheduler.spawn({
+            remote.send(req);
+        });
 
-                    if (this._terminate)
-                        break;
+        Condition cond = thisScheduler.newCondition(null);
+        thisScheduler.spawn({
+            while (!this._terminate)
+            {
+                Response res = this._transceiver.res.receive();
 
-                    while (!(res.id in this._wait_manager.waiting))
-                        cond.wait(1.msecs);
+                if (this._terminate)
+                    break;
 
-                    this._wait_manager.pending = res;
-                    this._wait_manager.waiting[res.id].c.notify();
-                    this._wait_manager.remove(res.id);
-                }
-            });
+                while (!this._manager.exist(res.id))
+                    cond.wait(1.msecs);
 
-            Response val;
-            thisScheduler.start({
-                val = this._wait_manager.waitResponse(req.id, this._timeout);
-                this._terminate = true;
-            });
-            return val;
-        }();
+                this._manager.pending = res;
+                this._manager.waiting[res.id].c.notify();
+                this._manager.remove(res.id);
+            }
+        });
+
+        thisScheduler.start({
+            res = this._manager.waitResponse(req.id, this._timeout);
+            this._terminate = true;
+        });
     }
 
-    ///
-    public void shutdown ()
+
+    /***************************************************************************
+
+        Send an async message to the thread to immediately shut down.
+
+    ***************************************************************************/
+
+    public void shutdown () @trusted
     {
         this._terminate = true;
         this._transceiver.close();
     }
 
-    ///
-    public size_t getNextResponseId ()
+
+    /***************************************************************************
+
+        Get next response id
+
+        Returns:
+            Next Response id, It use in Resuest's id
+
+    ***************************************************************************/
+
+    public size_t getNextResponseId () @trusted nothrow
     {
-        return this._wait_manager.getNextResponseId();
+        return this._manager.getNextResponseId();
     }
 }
 
-///
+
+/*******************************************************************************
+
+    It has one `Server` and one `Client`. make a new thread It uses `Server`.
+
+*******************************************************************************/
+
 public class RemoteAPI (API) : API
 {
-    public static RemoteAPI!(API) spawn (Implementation) (CtorParams!Implementation args)
+    /***************************************************************************
+
+        Instantiate a node and start it
+
+        This is usually called from the main thread, which will start all the
+        nodes and then start to process request.
+        In order to have a connected network, no nodes in any thread should have
+        a different reference to the same node.
+        In practice, this means there should only be one `ServerTransceiver`
+        per "address".
+
+        Note:
+          When the `RemoteAPI` returned by this function is finalized,
+          the child thread will be shut down.
+          This ownership mechanism should be replaced with reference counting
+          in a later version.
+
+        Params:
+          Impl = Type of the implementation to instantiate
+          args = Arguments to the object's constructor
+          timeout = (optional) timeout to use with requests
+
+        Returns:
+          A `RemoteAPI` owning the node reference
+
+    ***************************************************************************/
+
+    public static RemoteAPI!(API) spawn (Impl) (CtorParams!Impl args)
     {
-        auto server = Server!API.spawn!Implementation(args);
+        auto server = Server!API.spawn!Impl(args);
         return new RemoteAPI(server.transceiver);
     }
 
+    /// A device that can requests.
     private ServerTransceiver _server_transceiver;
-    private Server!API _server;
+
+    /// Request to the `Server`, receive a response
     private Client _client;
 
-    public this (Server!API server, Duration timeout = Duration.init)
-    {
-        this._server = server;
-        this._server_transceiver = this._server.transceiver;
-        this._client = new Client(timeout);
-    }
+    // Vibe.d mandates that method must be @safe
+    @safe:
 
-    public this (ServerTransceiver transceiver, Duration timeout = Duration.init)
+    /***************************************************************************
+
+        Create an instante of a client
+
+        This connects to an already instantiated node.
+        In order to instantiate a node, see the static `spawn` function.
+
+        Params:
+            transceiver = `ServerTransceiver` of the node.
+            timeout = any timeout to use
+
+    ***************************************************************************/
+
+    public this (ServerTransceiver transceiver, Duration timeout = Duration.init) @safe nothrow
     {
-        this._server = null;
         this._server_transceiver = transceiver;
         this._client = new Client(timeout);
     }
 
-    @property public ServerTransceiver transceiver ()
-    {
-        return this._server_transceiver;
-    }
 
-    public void shutdown () @trusted
+    /***************************************************************************
+
+        Introduce a namespace to avoid name clashes
+
+        The only way we have a name conflict is if someone exposes `ctrl`,
+        in which case they will be served an error along the following line:
+        LocalRest.d(...): Error: function `RemoteAPI!(...).ctrl` conflicts
+        with mixin RemoteAPI!(...).ControlInterface!() at LocalRest.d(...)
+
+    ***************************************************************************/
+
+    public mixin ControlInterface!() ctrl;
+
+    /// Ditto
+    private mixin template ControlInterface ()
     {
-        this._server_transceiver.send(Request(null, 0, "shutdown@command", ""));
-        this._server_transceiver.close();
-        this._client.shutdown();
+
+        /***********************************************************************
+
+            Returns the `ServerTransceiver`
+
+        ***********************************************************************/
+
+        @property public ServerTransceiver transceiver () @safe nothrow
+        {
+            return this._server_transceiver;
+        }
+
+
+        /***********************************************************************
+
+            Send an async message to the thread to immediately shut down.
+
+        ***********************************************************************/
+
+        public void shutdown () @trusted
+        {
+            this._server_transceiver.send(Request(null, 0, "shutdown@command"));
+            this._server_transceiver.close();
+            this._client.shutdown();
+        }
+
+
+        /***********************************************************************
+
+            Make the remote node sleep for `Duration`
+
+            The remote node will call `Thread.sleep`, becoming completely
+            unresponsive, potentially having multiple tasks hanging.
+            This is useful to simulate a delay or a network outage.
+
+            Params:
+              delay = Duration the node will sleep for
+              dropMessages = Whether to process the pending requests when the
+                             node come back online (the default), or to drop
+                             pending traffic
+
+        ***********************************************************************/
+
+        public void sleep (Duration d, bool dropMessages = false) @trusted
+        {
+            this._server_transceiver.send(TimeCommand(d, dropMessages));
+        }
+
+
+        /***********************************************************************
+
+            Filter any requests issued to the provided method.
+
+            Calling the API endpoint will throw an exception,
+            therefore the request will fail.
+
+            Use via:
+
+            ----
+            interface API { void call(); }
+            class C : API { void call() { } }
+            auto obj = new RemoteAPI!API(...);
+            obj.filter!(API.call);
+            ----
+
+            To match a specific overload of a method, specify the
+            parameters to match against in the call. For example:
+
+            ----
+            interface API { void call(int); void call(int, float); }
+            class C : API { void call(int) {} void call(int, float) {} }
+            auto obj = new RemoteAPI!API(...);
+            obj.filter!(API.call, int, float);  // only filters the second overload
+            ----
+
+            Params:
+              method = the API method for which to filter out requests
+              OverloadParams = (optional) the parameters to match against
+                  to select an overload. Note that if the method has no other
+                  overloads, then even if that method takes parameters and
+                  OverloadParams is empty, it will match that method
+                  out of convenience.
+
+        ***********************************************************************/
+
+        public void filter (alias method, OverloadParams...) () @trusted
+        {
+            import std.format;
+            import std.traits;
+            enum method_name = __traits(identifier, method);
+
+            // return the mangled name of the matching overload
+            template getBestMatch (T...)
+            {
+                static if (is(Parameters!(T[0]) == OverloadParams))
+                {
+                    enum getBestMatch = T[0].mangleof;
+                }
+                else static if (T.length > 0)
+                {
+                    enum getBestMatch = getBestMatch!(T[1 .. $]);
+                }
+                else
+                {
+                    static assert(0,
+                        format("Couldn't select best overload of '%s' for " ~
+                        "parameter types: %s",
+                        method_name, OverloadParams.stringof));
+                }
+            }
+
+            // ensure it's used with API.method, *not* RemoteAPI.method which
+            // is an override of API.method. Otherwise mangling won't match!
+            // special-case: no other overloads, and parameter list is empty:
+            // just select that one API method
+            alias Overloads = __traits(getOverloads, API, method_name);
+            static if (Overloads.length == 1 && OverloadParams.length == 0)
+            {
+                immutable pretty = method_name ~ Parameters!(Overloads[0]).stringof;
+                enum mangled = Overloads[0].mangleof;
+            }
+            else
+            {
+                immutable pretty = format("%s%s", method_name, OverloadParams.stringof);
+                enum mangled = getBestMatch!Overloads;
+            }
+
+            this._server_transceiver.send(FilterAPI(mangled, pretty));
+        }
+
+
+        /***********************************************************************
+
+            Clear out any filtering set by a call to filter()
+
+        ***********************************************************************/
+
+        public void clearFilter () @trusted
+        {
+            this._server_transceiver.send(FilterAPI(""));
+        }
     }
 
     static foreach (member; __traits(allMembers, API))
@@ -718,7 +1125,7 @@ public class RemoteAPI (API) : API
 
                     auto req = Request(this._client.transceiver, this._client.getNextResponseId(), ovrld.mangleof, serialized);
                     Response res;
-                    this._client.query(this._server_transceiver, req, res);
+                    this._client.router(this._server_transceiver, req, res);
 
                     if (res.status == Status.Failed)
                         throw new Exception(res.data);
@@ -738,11 +1145,13 @@ unittest
 {
     static interface API
     {
+        @safe:
         public @property ulong getValue ();
     }
 
     static class MyAPI : API
     {
+        @safe:
         public override @property ulong getValue ()
         { return 42; }
     }

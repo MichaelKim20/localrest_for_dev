@@ -291,8 +291,18 @@ interface Scheduler
 
 public class ThreadScheduler : Scheduler
 {
+    /// For Condition
     private Mutex mutex;
+
+    /// static instance of singletone
     private static ThreadScheduler scheduler;
+
+
+    /***************************************************************************
+
+        Returns singletone instance
+
+    ***************************************************************************/
 
     @property static instance ()
     {
@@ -300,6 +310,7 @@ public class ThreadScheduler : Scheduler
             scheduler = new ThreadScheduler();
         return scheduler;
     }
+
 
     /***************************************************************************
 
@@ -828,7 +839,7 @@ private:
 
 /***************************************************************************
 
-    Returns a Scheduler assigned to a called thread.
+    Getter of Scheduler assigned to a called thread.
 
 ***************************************************************************/
 
@@ -839,6 +850,12 @@ public @property Scheduler thisScheduler () nothrow
     else
         return null;
 }
+
+/***************************************************************************
+
+    Setter of Scheduler assigned to a called thread.
+
+***************************************************************************/
 
 public @property void thisScheduler (Scheduler value) nothrow
 {
