@@ -6,8 +6,6 @@ import core.sync.condition;
 import core.sync.mutex;
 import core.thread;
 
-import std.stdio;
-
 private struct Request
 {
     ITransceiver sender;

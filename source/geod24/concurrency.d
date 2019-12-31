@@ -795,6 +795,7 @@ private:
     }
 
 private:
+
     void dispatch ()
     {
         import std.algorithm.mutation : remove;
@@ -898,7 +899,6 @@ public class Channel (T)
     {
         this.closed = false;
         this.mutex = new Mutex;
-        //this.waiting_mutex = new Mutex;
         this.qsize = qsize;
     }
 
