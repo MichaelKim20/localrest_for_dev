@@ -82,6 +82,7 @@
 module geod24.LocalRest;
 
 import geod24.concurrency;
+import geod24.Transceiver;
 
 import vibe.data.json;
 
@@ -92,68 +93,6 @@ import core.sync.condition;
 import core.sync.mutex;
 import core.thread;
 import core.time;
-
-/// Data sent by the caller
-private struct Request
-{
-    /// ITransceiver of the sender thread
-    ITransceiver sender;
-    /// In order to support re-entrancy, every request contains an id
-    /// which should be copied in the `Response`
-    /// Initialized to `size_t.max` so not setting it crashes the program
-    size_t id;
-    /// Method to call
-    string method;
-    /// Arguments to the method, JSON formatted
-    string args;
-};
-
-/// Status of a request
-private enum Status
-{
-    /// Request failed
-    Failed,
-
-    /// Request timed-out
-    Timeout,
-
-    /// Request succeeded
-    Success
-};
-
-/// Data sent by the callee back to the caller
-private struct Response
-{
-    /// Final status of a request (failed, timeout, success, etc)
-    Status status;
-    /// In order to support re-entrancy, every request contains an id
-    /// which should be copied in the `Response` so the scheduler can
-    /// properly dispatch this event
-    /// Initialized to `size_t.max` so not setting it crashes the program
-    size_t id;
-    /// If `status == Status.Success`, the JSON-serialized return value.
-    /// Otherwise, it contains `Exception.toString()`.
-    string data;
-};
-
-/// Ask the node to exhibit a certain behavior for a given time
-private struct TimeCommand
-{
-    /// For how long our remote node apply this behavior
-    Duration dur;
-    /// Whether or not affected messages should be dropped
-    bool drop = false;
-}
-
-/// Filter out requests before they reach a node
-private struct FilterAPI
-{
-    /// the mangled symbol name of the function to filter
-    string func_mangleof;
-
-    /// used for debugging
-    string pretty_func;
-}
 
 /// Simple wrapper to deal with tuples
 /// Vibe.d might emit a pragma(msg) when T.length == 0
@@ -166,273 +105,6 @@ private struct ArgWrapper (T...)
 
 /// Commands used to shutdown the server
 const string SHUTDOWN_COMMAND = "shutdown@command";
-
-/*******************************************************************************
-
-    Receve request and response
-    Interfaces to and from data
-
-*******************************************************************************/
-
-private interface ITransceiver
-{
-    /***************************************************************************
-
-        It is a function that accepts `Request`.
-
-    ***************************************************************************/
-
-    void send (Request msg);
-
-
-    /***************************************************************************
-
-        It is a function that accepts `Response`.
-
-    ***************************************************************************/
-
-    void send (Response msg);
-
-
-    /***************************************************************************
-
-        Generate a convenient string for identifying this ServerTransceiver.
-
-    ***************************************************************************/
-
-    void toString (scope void delegate(const(char)[]) sink);
-}
-
-
-/*******************************************************************************
-
-    Accept only Request. It has `Channel!Request`
-
-*******************************************************************************/
-
-private class ServerTransceiver : ITransceiver
-{
-    /// Channel of Request
-    private Channel!Request req;
-
-    /// Channel of TimeCommand - Using for sleeping
-    private Channel!TimeCommand ctrl_time;
-
-    /// Channel of FilterAPI - Using for filtering
-    private Channel!FilterAPI ctrl_filter;
-
-    /// Channel of Response
-    private Channel!Response res;
-
-    /// Ctor
-    public this () @safe nothrow
-    {
-        req = new Channel!Request();
-        ctrl_time = new Channel!TimeCommand();
-        ctrl_filter = new Channel!FilterAPI();
-        res = new Channel!Response();
-    }
-
-
-    /***************************************************************************
-
-        It is a function that accepts `Request`.
-
-    ***************************************************************************/
-
-    public void send (Request msg) @trusted
-    {
-        if (thisScheduler !is null)
-            this.req.send(msg);
-        else
-        {
-            auto fiber_scheduler = new FiberScheduler();
-            auto condition = fiber_scheduler.newCondition(null);
-            fiber_scheduler.start({
-                this.req.send(msg);
-                condition.notify();
-            });
-            condition.wait();
-        }
-    }
-
-
-    /***************************************************************************
-
-        It is a function that accepts `TimeCommand`.
-
-    ***************************************************************************/
-
-    public void send (TimeCommand msg) @trusted
-    {
-        if (thisScheduler !is null)
-            this.ctrl_time.send(msg);
-        else
-        {
-            auto fiber_scheduler = new FiberScheduler();
-            auto condition = fiber_scheduler.newCondition(null);
-            fiber_scheduler.start({
-                this.ctrl_time.send(msg);
-                condition.notify();
-            });
-            condition.wait();
-        }
-    }
-
-    /***************************************************************************
-
-        It is a function that accepts `FilterAPI`.
-
-    ***************************************************************************/
-
-    public void send (FilterAPI msg) @trusted
-    {
-        if (thisScheduler !is null)
-            this.ctrl_filter.send(msg);
-        else
-        {
-            auto fiber_scheduler = new FiberScheduler();
-            auto condition = fiber_scheduler.newCondition(null);
-            fiber_scheduler.start({
-                this.ctrl_filter.send(msg);
-                condition.notify();
-            });
-            condition.wait();
-        }
-    }
-
-
-    /***************************************************************************
-
-        It is a function that accepts `Response`.
-        It is not use.
-
-    ***************************************************************************/
-
-    public void send (Response msg) @trusted
-    {
-        if (thisScheduler !is null)
-            this.res.send(msg);
-        else
-        {
-            auto fiber_scheduler = new FiberScheduler();
-            auto condition = fiber_scheduler.newCondition(null);
-            fiber_scheduler.start({
-                this.res.send(msg);
-                condition.notify();
-            });
-            condition.wait();
-        }
-    }
-
-
-    /***************************************************************************
-
-        Close the `Channel`
-
-    ***************************************************************************/
-
-    public void close () @trusted
-    {
-        this.req.close();
-        this.ctrl_time.close();
-        this.ctrl_filter.close();
-        this.res.close();
-    }
-
-
-    /***************************************************************************
-
-        Generate a convenient string for identifying this ServerTransceiver.
-
-    ***************************************************************************/
-
-    public void toString (scope void delegate(const(char)[]) sink)
-    {
-        import std.format : formattedWrite;
-        formattedWrite(sink, "STR(%x:%x)", cast(void*) req, cast(void*) res);
-    }
-}
-
-
-/*******************************************************************************
-
-    Accept only Response. It has `Channel!Response`
-
-*******************************************************************************/
-
-private class ClientTransceiver : ITransceiver
-{
-    /// Channel of Response
-    private Channel!Response res;
-
-    /// Ctor
-    public this () @safe nothrow
-    {
-        res = new Channel!Response();
-    }
-
-
-    /***************************************************************************
-
-        It is a function that accepts `Request`.
-        It is not use.
-
-    ***************************************************************************/
-
-    public void send (Request msg) @trusted
-    {
-    }
-
-
-    /***************************************************************************
-
-        It is a function that accepts `Response`.
-
-    ***************************************************************************/
-
-    public void send (Response msg) @trusted
-    {
-        if (thisScheduler !is null)
-            this.res.send(msg);
-        else
-        {
-            auto fiber_scheduler = new FiberScheduler();
-            auto condition = fiber_scheduler.newCondition(null);
-            fiber_scheduler.start({
-                this.res.send(msg);
-                condition.notify();
-            });
-            condition.wait();
-        }
-    }
-
-
-    /***************************************************************************
-
-        Close the `Channel`
-
-    ***************************************************************************/
-
-    public void close () @trusted
-    {
-        this.res.close();
-    }
-
-
-    /***************************************************************************
-
-        Generate a convenient string for identifying this ServerTransceiver.
-
-    ***************************************************************************/
-
-    public void toString (scope void delegate(const(char)[]) sink)
-    {
-        import std.format : formattedWrite;
-        formattedWrite(sink, "CTR(0:%x)", cast(void*) res);
-    }
-}
-
 
 /*******************************************************************************
 
@@ -1003,6 +675,37 @@ private class Client
     }
 }
 
+/*******************************************************************************
+
+    Provide eventloop-like functionalities
+
+    Since nodes instantiated via this modules are Vibe.d server,
+    they expect the ability to run an asynchronous task ,
+    usually provided by `vibe.core.core : runTask`.
+
+    In order for them to properly work, we need to integrate them to our event
+    loop by providing the ability to spawn a task, and wait on some condition,
+    optionally with a timeout.
+
+    The following functions do that.
+    Note that those facilities are not available from the main thread,
+    while is supposed to do tests and doesn't have a scheduler.
+
+*******************************************************************************/
+
+public void runTask (scope void delegate() dg)
+{
+    assert(thisScheduler !is null, "Cannot call this function from the main thread");
+    thisScheduler.spawn(dg);
+}
+
+/// Ditto
+public void sleep (Duration timeout)
+{
+    assert(thisScheduler !is null, "Cannot call this function from the main thread");
+    scope c = thisScheduler.newCondition(null);
+    thisScheduler.wait(c, timeout);
+}
 
 /*******************************************************************************
 
@@ -1263,18 +966,116 @@ unittest
     static interface API
     {
         @safe:
-        public @property ulong getValue ();
+        public @property ulong pubkey ();
+        public Json getValue (ulong idx);
+        public Json getQuorumSet ();
+        public string recv (Json data);
     }
 
-    static class MyAPI : API
+    static class MockAPI : API
     {
         @safe:
-        public override @property ulong getValue ()
+        public override @property ulong pubkey ()
         { return 42; }
+        public override Json getValue (ulong idx)
+        { assert(0); }
+        public override Json getQuorumSet ()
+        { assert(0); }
+        public override string recv (Json data)
+        { assert(0); }
     }
 
-    scope test = RemoteAPI!API.spawn!MyAPI();
-    assert(test.getValue() == 42);
-
-    test.shutdown();
+    scope test = RemoteAPI!API.spawn!MockAPI();
+    assert(test.pubkey() == 42);
+    test.ctrl.shutdown();
 }
+/*
+/// In a real world usage, users will most likely need to use the registry
+unittest
+{
+    import std.conv;
+    static import geod24.concurrency;
+    import geod24.Registry;
+
+    __gshared Registry registry;
+    registry.initialize();
+
+    static interface API
+    {
+        @safe:
+        public @property ulong pubkey ();
+        public Json getValue (ulong idx);
+        public string recv (Json data);
+        public string recv (ulong index, Json data);
+
+        public string last ();
+    }
+
+    static class Node : API
+    {
+        @safe:
+        public this (bool isByzantine) { this.isByzantine = isByzantine; }
+        public override @property ulong pubkey ()
+        { lastCall = `pubkey`; return this.isByzantine ? 0 : 42; }
+        public override Json getValue (ulong idx)
+        { lastCall = `getValue`; return Json.init; }
+        public override string recv (Json data)
+        { lastCall = `recv@1`; return null; }
+        public override string recv (ulong index, Json data)
+        { lastCall = `recv@2`; return null; }
+
+        public override string last () { return this.lastCall; }
+
+        private bool isByzantine;
+        private string lastCall;
+    }
+
+    static RemoteAPI!API factory (string type, ulong hash)
+    {
+        const name = hash.to!string;
+        auto tid = registry.locate(name);
+        if (tid != tid.init)
+            return new RemoteAPI!API(tid);
+
+        switch (type)
+        {
+        case "normal":
+            auto ret =  RemoteAPI!API.spawn!Node(false);
+            registry.register(name, ret.tid());
+            return ret;
+        case "byzantine":
+            auto ret =  RemoteAPI!API.spawn!Node(true);
+            registry.register(name, ret.tid());
+            return ret;
+        default:
+            assert(0, type);
+        }
+    }
+
+    auto node1 = factory("normal", 1);
+    auto node2 = factory("byzantine", 2);
+
+    static void testFunc(ITransceiver parent)
+    {
+        auto node1 = factory("this does not matter", 1);
+        auto node2 = factory("neither does this", 2);
+        assert(node1.pubkey() == 42);
+        assert(node1.last() == "pubkey");
+        assert(node2.pubkey() == 0);
+        assert(node2.last() == "pubkey");
+
+        node1.recv(42, Json.init);
+        assert(node1.last() == "recv@2");
+        node1.recv(Json.init);
+        assert(node1.last() == "recv@1");
+        assert(node2.last() == "pubkey");
+        node1.ctrl.shutdown();
+        node2.ctrl.shutdown();
+        geod24.concurrency.send(parent, 42);
+    }
+
+    auto testerFiber = geod24.concurrency.spawn(&testFunc, geod24.concurrency.thisTid);
+    // Make sure our main thread terminates after everyone else
+    geod24.concurrency.receiveOnly!int();
+}
+*/
