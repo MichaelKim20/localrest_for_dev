@@ -682,6 +682,7 @@ protected:
     void create(void delegate() op) nothrow
     {
         auto owner_scheduler = this;
+        auto owner_objects = thisInfo.objectValues;
 
         void wrap()
         {
@@ -689,7 +690,13 @@ protected:
             {
                 thisInfo.cleanup();
             }
+
+            foreach (key, ref value; owner_objects)
+                if (!(key in thisInfo.objectValues))
+                    thisInfo.objectValues[key] = value;
+
             thisScheduler = owner_scheduler;
+
             op();
         }
 

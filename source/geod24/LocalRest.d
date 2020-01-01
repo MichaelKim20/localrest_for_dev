@@ -164,6 +164,9 @@ private struct ArgWrapper (T...)
     T args;
 }
 
+/// Commands used to shutdown the server
+const string SHUTDOWN_COMMAND = "shutdown@command";
+
 /*******************************************************************************
 
     Receve request and response
@@ -218,12 +221,16 @@ private class ServerTransceiver : ITransceiver
     /// Channel of FilterAPI - Using for filtering
     private Channel!FilterAPI ctrl_filter;
 
+    /// Channel of Response
+    private Channel!Response res;
+
     /// Ctor
     public this () @safe nothrow
     {
         req = new Channel!Request();
         ctrl_time = new Channel!TimeCommand();
         ctrl_filter = new Channel!FilterAPI();
+        res = new Channel!Response();
     }
 
 
@@ -304,6 +311,18 @@ private class ServerTransceiver : ITransceiver
 
     public void send (Response msg) @trusted
     {
+        if (thisScheduler !is null)
+            this.res.send(msg);
+        else
+        {
+            auto fiber_scheduler = new FiberScheduler();
+            auto condition = fiber_scheduler.newCondition(null);
+            fiber_scheduler.start({
+                this.res.send(msg);
+                condition.notify();
+            });
+            condition.wait();
+        }
     }
 
 
@@ -318,6 +337,7 @@ private class ServerTransceiver : ITransceiver
         this.req.close();
         this.ctrl_time.close();
         this.ctrl_filter.close();
+        this.res.close();
     }
 
 
@@ -330,7 +350,7 @@ private class ServerTransceiver : ITransceiver
     public void toString (scope void delegate(const(char)[]) sink)
     {
         import std.format : formattedWrite;
-        formattedWrite(sink, "STR(%x:0)", cast(void*) req);
+        formattedWrite(sink, "STR(%x:%x)", cast(void*) req, cast(void*) res);
     }
 }
 
@@ -497,6 +517,59 @@ private static template CtorParams (Impl)
 }
 
 
+/***************************************************************************
+
+    Getter of WaitingManager assigned to a called thread.
+
+***************************************************************************/
+
+public @property WaitingManager thisWaitingManager () nothrow
+{
+    if (auto p = "WaitingManager" in thisInfo.objectValues)
+        return cast(WaitingManager)(*p);
+    else
+        return null;
+}
+
+/***************************************************************************
+
+    Setter of WaitingManager assigned to a called thread.
+
+***************************************************************************/
+
+public @property void thisWaitingManager (WaitingManager value) nothrow
+{
+    thisInfo.objectValues["WaitingManager"] = cast(Object)value;
+}
+
+
+
+/***************************************************************************
+
+    Getter of ITransceiver assigned to a called thread.
+
+***************************************************************************/
+
+public @property ITransceiver thisTransceiver () nothrow
+{
+    if (auto p = "ITransceiver" in thisInfo.objectValues)
+        return cast(ITransceiver)(*p);
+    else
+        return null;
+}
+
+/***************************************************************************
+
+    Setter of ITransceiver assigned to a called thread.
+
+***************************************************************************/
+
+public @property void thisTransceiver (ITransceiver value) nothrow
+{
+    thisInfo.objectValues["ITransceiver"] = cast(Object)value;
+}
+
+
 /*******************************************************************************
 
     Receive requests, To obtain and return results by passing
@@ -622,6 +695,7 @@ private class Server (API)
         import std.datetime.systime : Clock, SysTime;
 
         ServerTransceiver transceiver = new ServerTransceiver();
+        WaitingManager waitingManager = new WaitingManager();
         auto thread_scheduler = ThreadScheduler.instance;
 
         // used for controling filtering / sleep
@@ -653,13 +727,15 @@ private class Server (API)
 
             auto fiber_scheduler = new FiberScheduler();
             fiber_scheduler.start({
+                thisTransceiver = transceiver;
+                thisWaitingManager = waitingManager;
                 bool terminate = false;
                 thisScheduler.spawn({
                     while (!terminate)
                     {
                         Request req = transceiver.req.receive();
 
-                        if (req.method == "shutdown@command")
+                        if (req.method == SHUTDOWN_COMMAND)
                             terminate = true;
 
                         if (terminate)
@@ -705,6 +781,28 @@ private class Server (API)
                             break;
 
                         control.filter = filter;
+                    }
+                });
+
+                thisScheduler.spawn({
+                    auto c = thisScheduler.newCondition(null);
+                    while (!terminate)
+                    {
+                        Response res = transceiver.res.receive();
+
+                        if (terminate)
+                            break;
+
+                        foreach (_; 0..10)
+                        {
+                            if (waitingManager.exist(res.id))
+                                break;
+                            thisScheduler.wait(c, 1.msecs);
+                        }
+
+                        waitingManager.pending = res;
+                        waitingManager.waiting[res.id].c.notify();
+                        waitingManager.remove(res.id);
                     }
                 });
             });
@@ -757,7 +855,7 @@ private class Server (API)
 
     public void shutdown () @trusted
     {
-        this._transceiver.send(Request(null, 0, "shutdown@command"));
+        this._transceiver.send(Request(null, 0, SHUTDOWN_COMMAND));
         this._transceiver.close();
     }
 }
@@ -776,7 +874,7 @@ private class Client
 
     /// After making the request, wait until the response comes,
     /// and find the response that suits the request.
-    private WaitingManager _manager;
+    private WaitingManager _waitingManager;
 
     /// Timeout to use when issuing requests
     private Duration _timeout;
@@ -788,7 +886,7 @@ private class Client
     public this (Duration timeout = Duration.init) @safe nothrow
     {
         this._transceiver = new ClientTransceiver;
-        this._manager = new WaitingManager();
+        this._waitingManager = new WaitingManager();
         this._timeout = timeout;
     }
 
@@ -820,41 +918,60 @@ private class Client
 
     ***************************************************************************/
 
-    public void router (ServerTransceiver remote, ref Request req, ref Response res) @trusted
+    public Response router (ServerTransceiver remote, string method, string args) @trusted
     {
-        this._terminate = false;
+        Request req;
+        Response res;
 
-        if (thisScheduler is null)
-            thisScheduler = new FiberScheduler();
-
-        thisScheduler.spawn({
+        // from Node to Node
+        if (thisWaitingManager !is null)
+        {
+            req = Request(thisTransceiver, thisWaitingManager.getNextResponseId(), method, args);
             remote.send(req);
-        });
+            res = thisWaitingManager.waitResponse(req.id, this._timeout);
+        }
+        // from MainThread to Node
+        else
+        {
+            if (thisScheduler is null)
+                thisScheduler = new FiberScheduler();
 
-        Condition cond = thisScheduler.newCondition(null);
-        thisScheduler.spawn({
-            while (!this._terminate)
-            {
-                Response res = this._transceiver.res.receive();
+            thisScheduler.spawn({
+                req = Request(this.transceiver, this._waitingManager.getNextResponseId(), method, args);
+                remote.send(req);
+            });
 
-                if (this._terminate)
-                    break;
+            this._terminate = false;
+            auto c = thisScheduler.newCondition(null);
+            thisScheduler.spawn({
+                while (!this._terminate)
+                {
+                    Response res = this._transceiver.res.receive();
 
-                while (!this._manager.exist(res.id))
-                    cond.wait(1.msecs);
+                    if (this._terminate)
+                        break;
 
-                this._manager.pending = res;
-                this._manager.waiting[res.id].c.notify();
-                this._manager.remove(res.id);
-            }
-        });
+                    foreach (_; 0..10)
+                    {
+                        if (this._waitingManager.exist(res.id))
+                            break;
+                        thisScheduler.wait(c, 1.msecs);
+                    }
 
-        thisScheduler.start({
-            res = this._manager.waitResponse(req.id, this._timeout);
-            this._terminate = true;
-        });
+                    this._waitingManager.pending = res;
+                    this._waitingManager.waiting[res.id].c.notify();
+                    this._waitingManager.remove(res.id);
+                }
+            });
+
+            thisScheduler.start({
+                res = this._waitingManager.waitResponse(req.id, this._timeout);
+                this._terminate = true;
+            });
+        }
+
+        return res;
     }
-
 
     /***************************************************************************
 
@@ -880,7 +997,7 @@ private class Client
 
     public size_t getNextResponseId () @trusted nothrow
     {
-        return this._manager.getNextResponseId();
+        return this._waitingManager.getNextResponseId();
     }
 }
 
@@ -992,7 +1109,7 @@ public class RemoteAPI (API) : API
 
         public void shutdown () @trusted
         {
-            this._server_transceiver.send(Request(null, 0, "shutdown@command"));
+            this._server_transceiver.send(Request(null, 0, SHUTDOWN_COMMAND));
             this._server_transceiver.close();
             this._client.shutdown();
         }
@@ -1123,9 +1240,7 @@ public class RemoteAPI (API) : API
                     auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                         .serializeToJsonString();
 
-                    auto req = Request(this._client.transceiver, this._client.getNextResponseId(), ovrld.mangleof, serialized);
-                    Response res;
-                    this._client.router(this._server_transceiver, req, res);
+                    auto res = this._client.router(this._server_transceiver, ovrld.mangleof, serialized);
 
                     if (res.status == Status.Failed)
                         throw new Exception(res.data);
