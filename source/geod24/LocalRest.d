@@ -354,6 +354,7 @@ private class ServerTransceiver : ITransceiver
     }
 }
 
+
 /*******************************************************************************
 
     Accept only Response. It has `Channel!Response`
@@ -506,6 +507,7 @@ private class WaitingManager
         return ((id in this.waiting) !is null);
     }
 }
+
 
 /// Helper template to get the constructor's parameters
 private static template CtorParams (Impl)
