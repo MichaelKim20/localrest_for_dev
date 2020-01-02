@@ -60,7 +60,7 @@
 
     When spawning a node, a thread is spawned, a node is instantiated with
     the provided arguments, and an event loop waits for messages sent
-    to the Tid. Messages consist of the sender's Tid, the mangled name
+    to the ServerTransceiver. Messages consist of the sender's ServerTransceiver, the mangled name
     of the function to call (to support overloading) and the arguments,
     serialized as a JSON string.
 
@@ -70,7 +70,7 @@
     as Vibe.d is the only available JSON module known to the author
     to provide an interface to deserialize composite types.
 
-    Removed Tid
+    Removed ServerTransceiver
     Added ITransceiver
 
     Author:         Mathias 'Geod24' Lang
@@ -93,6 +93,8 @@ import core.sync.condition;
 import core.sync.mutex;
 import core.thread;
 import core.time;
+
+import std.stdio;
 
 /// Simple wrapper to deal with tuples
 /// Vibe.d might emit a pragma(msg) when T.length == 0
@@ -380,6 +382,7 @@ private class Server (API)
             bool drop;           // drop messages if sleeping
         }
 
+        auto cond = thread_scheduler.newCondition(null);
         thread_scheduler.spawn({
 
             scope node = new Implementation(cargs);
@@ -392,11 +395,16 @@ private class Server (API)
                     && Clock.currTime < control.sleep_until;
             }
 
-            void handle (Request req)
+            void handleReq (Request req)
             {
-                thisScheduler.spawn(() {
-                    Server!(API).handleRequest(req, node, control.filter);
-                });
+                Server!(API).handleRequest(req, node, control.filter);
+            }
+
+            void handleRes (Response res)
+            {
+                waitingManager.pending = res;
+                waitingManager.waiting[res.id].c.notify();
+                waitingManager.remove(res.id);
             }
 
             auto fiber_scheduler = new FiberScheduler();
@@ -405,12 +413,16 @@ private class Server (API)
                 thisWaitingManager = waitingManager;
                 bool terminate = false;
                 thisScheduler.spawn({
+                    auto c = thisScheduler.newCondition(null);
                     while (!terminate)
                     {
-                        Request req = transceiver.req.receive();
+                        auto req = transceiver.req.receive();
 
                         if (req.method == SHUTDOWN_COMMAND)
+                        {
                             terminate = true;
+                            fiber_scheduler.stop();
+                        }
 
                         if (terminate)
                             break;
@@ -418,17 +430,23 @@ private class Server (API)
                         if (!isSleeping())
                         {
                             thisScheduler.spawn({
-                                Server!(API).handleRequest(req, node, control.filter);
+                                handleReq(req);
                             });
                         }
                         else if (!control.drop)
                         {
-                            auto c = thisScheduler.newCondition(null);
                             thisScheduler.spawn({
                                 while (isSleeping())
-                                    thisScheduler.wait(c, 1.msecs);
-                                Server!(API).handleRequest(req, node, control.filter);
+                                    thisScheduler.wait(c, 10.msecs);
+                                handleReq(req);
                             });
+                        }
+                        else
+                        {
+                            //thisScheduler.spawn({
+                            //    auto res = Response(Status.Dropped, req.id, "");
+                            //    req.sender.send(res);
+                            //});
                         }
                     }
                 });
@@ -436,7 +454,7 @@ private class Server (API)
                 thisScheduler.spawn({
                     while (!terminate)
                     {
-                        TimeCommand time_command = transceiver.ctrl_time.receive();
+                        auto time_command = transceiver.ctrl_time.receive();
 
                         if (terminate)
                             break;
@@ -449,7 +467,7 @@ private class Server (API)
                 thisScheduler.spawn({
                     while (!terminate)
                     {
-                        FilterAPI filter = transceiver.ctrl_filter.receive();
+                        auto filter = transceiver.ctrl_filter.receive();
 
                         if (terminate)
                             break;
@@ -462,7 +480,7 @@ private class Server (API)
                     auto c = thisScheduler.newCondition(null);
                     while (!terminate)
                     {
-                        Response res = transceiver.res.receive();
+                        auto res = transceiver.res.receive();
 
                         if (terminate)
                             break;
@@ -474,13 +492,35 @@ private class Server (API)
                             thisScheduler.wait(c, 1.msecs);
                         }
 
-                        waitingManager.pending = res;
-                        waitingManager.waiting[res.id].c.notify();
-                        waitingManager.remove(res.id);
+                        if (!isSleeping())
+                        {
+                            thisScheduler.spawn({
+                                handleRes(res);
+                            });
+                        }
+                        else if (!control.drop)
+                        {
+                            thisScheduler.spawn({
+                                while (isSleeping())
+                                    thisScheduler.wait(c, 10.msecs);
+                                handleRes(res);
+                            });
+                        }
+                        else
+                        {
+                            //res.status = Status.Dropped;
+                            //thisScheduler.spawn({
+                            //    handleRes(res);
+                            //});
+                        }
                     }
                 });
+
+                thread_scheduler.notify(cond);
             });
         });
+
+        thread_scheduler.wait(cond);
 
         return transceiver;
     }
@@ -601,23 +641,25 @@ private class Client
         if (thisWaitingManager !is null)
         {
             req = Request(thisTransceiver, thisWaitingManager.getNextResponseId(), method, args);
+            //writefln("case1 begin %s", req);
             remote.send(req);
             res = thisWaitingManager.waitResponse(req.id, this._timeout);
+            //writefln("case1 end %s %s", req, res);
         }
-        // from MainThread to Node
+        // from Non-Node to Node
         else
         {
-            if (thisScheduler is null)
-                thisScheduler = new FiberScheduler();
+            auto scheduler = new FiberScheduler();
 
-            thisScheduler.spawn({
+            scheduler.spawn({
                 req = Request(this.transceiver, this._waitingManager.getNextResponseId(), method, args);
+                //writefln("case2 beign %s", req);
                 remote.send(req);
             });
 
             this._terminate = false;
-            auto c = thisScheduler.newCondition(null);
-            thisScheduler.spawn({
+            auto c = scheduler.newCondition(null);
+            scheduler.spawn({
                 while (!this._terminate)
                 {
                     Response res = this._transceiver.res.receive();
@@ -629,19 +671,21 @@ private class Client
                     {
                         if (this._waitingManager.exist(res.id))
                             break;
-                        thisScheduler.wait(c, 1.msecs);
+                        scheduler.wait(c, 1.msecs);
                     }
 
                     this._waitingManager.pending = res;
                     this._waitingManager.waiting[res.id].c.notify();
                     this._waitingManager.remove(res.id);
                 }
+                //writefln("stop Client.wait");
             });
 
-            thisScheduler.start({
+            scheduler.start({
                 res = this._waitingManager.waitResponse(req.id, this._timeout);
                 this._terminate = true;
             });
+            //writefln("case2 end %s %s", req, res);
         }
 
         return res;
@@ -655,6 +699,7 @@ private class Client
 
     public void shutdown () @trusted
     {
+
         this._terminate = true;
         this._transceiver.close();
     }
@@ -693,7 +738,7 @@ private class Client
 
 *******************************************************************************/
 
-public void runTask (scope void delegate() dg)
+public void runTask (void delegate() dg)
 {
     assert(thisScheduler !is null, "Cannot call this function from the main thread");
     thisScheduler.spawn(dg);
@@ -742,10 +787,11 @@ public class RemoteAPI (API) : API
 
     ***************************************************************************/
 
-    public static RemoteAPI!(API) spawn (Impl) (CtorParams!Impl args)
+    public static RemoteAPI!(API) spawn (Impl) (CtorParams!Impl args,
+        Duration timeout = Duration.init)
     {
         auto server = Server!API.spawn!Impl(args);
-        return new RemoteAPI(server.transceiver);
+        return new RemoteAPI(server.transceiver, timeout);
     }
 
     /// A device that can requests.
@@ -816,6 +862,13 @@ public class RemoteAPI (API) : API
         {
             this._server_transceiver.send(Request(null, 0, SHUTDOWN_COMMAND));
             this._server_transceiver.close();
+            this._client.shutdown();
+        }
+
+
+        public void shutdownClient () @trusted
+        {
+            //writefln("shutdownClient");
             this._client.shutdown();
         }
 
@@ -989,12 +1042,12 @@ unittest
     assert(test.pubkey() == 42);
     test.ctrl.shutdown();
 }
-/*
+
 /// In a real world usage, users will most likely need to use the registry
 unittest
 {
     import std.conv;
-    static import geod24.concurrency;
+    import geod24.concurrency;
     import geod24.Registry;
 
     __gshared Registry registry;
@@ -1033,19 +1086,19 @@ unittest
     static RemoteAPI!API factory (string type, ulong hash)
     {
         const name = hash.to!string;
-        auto tid = registry.locate(name);
-        if (tid != tid.init)
-            return new RemoteAPI!API(tid);
+        auto transceiver = registry.locate(name);
+        if (transceiver !is null)
+            return new RemoteAPI!API(transceiver);
 
         switch (type)
         {
         case "normal":
             auto ret =  RemoteAPI!API.spawn!Node(false);
-            registry.register(name, ret.tid());
+            registry.register(name, ret.transceiver());
             return ret;
         case "byzantine":
             auto ret =  RemoteAPI!API.spawn!Node(true);
-            registry.register(name, ret.tid());
+            registry.register(name, ret.transceiver());
             return ret;
         default:
             assert(0, type);
@@ -1055,27 +1108,762 @@ unittest
     auto node1 = factory("normal", 1);
     auto node2 = factory("byzantine", 2);
 
-    static void testFunc(ITransceiver parent)
-    {
-        auto node1 = factory("this does not matter", 1);
-        auto node2 = factory("neither does this", 2);
-        assert(node1.pubkey() == 42);
-        assert(node1.last() == "pubkey");
-        assert(node2.pubkey() == 0);
-        assert(node2.last() == "pubkey");
+    auto chan = new Channel!int;
+    auto thread_scheduler = ThreadScheduler.instance;
+    thread_scheduler.spawn({
+        auto fiber_scheduler = new FiberScheduler();
+        fiber_scheduler.start({
+            fiber_scheduler.spawn({
+                auto node1 = factory("this does not matter", 1);
+                auto node2 = factory("neither does this", 2);
 
-        node1.recv(42, Json.init);
-        assert(node1.last() == "recv@2");
-        node1.recv(Json.init);
-        assert(node1.last() == "recv@1");
-        assert(node2.last() == "pubkey");
-        node1.ctrl.shutdown();
-        node2.ctrl.shutdown();
-        geod24.concurrency.send(parent, 42);
+                assert(node1.pubkey() == 42);
+                assert(node1.last() == "pubkey");
+                assert(node2.pubkey() == 0);
+                assert(node2.last() == "pubkey");
+
+                node1.recv(42, Json.init);
+                assert(node1.last() == "recv@2");
+                node1.recv(Json.init);
+                assert(node1.last() == "recv@1");
+                assert(node2.last() == "pubkey");
+
+                node1.ctrl.shutdown();
+                node2.ctrl.shutdown();
+
+                chan.send(42);
+            });
+            fiber_scheduler.spawn({
+                auto result = chan.receive();
+                assert(result == 42);
+            });
+        });
+    });
+}
+
+//  error
+/// This network have different types of nodes in it
+unittest
+{
+    import geod24.concurrency;
+
+    static interface API
+    {
+        @safe:
+        public @property ulong requests ();
+        public @property ulong value ();
     }
 
-    auto testerFiber = geod24.concurrency.spawn(&testFunc, geod24.concurrency.thisTid);
-    // Make sure our main thread terminates after everyone else
-    geod24.concurrency.receiveOnly!int();
+    static class MasterNode : API
+    {
+        @safe:
+        public override @property ulong requests()
+        {
+            return this.requests_;
+        }
+
+        public override @property ulong value()
+        {
+            this.requests_++;
+            return 42; // Of course
+        }
+
+        private ulong requests_;
+    }
+
+    static class SlaveNode : API
+    {
+        @safe:
+        this(ServerTransceiver masterTransceiver)
+        {
+            this.master = new RemoteAPI!API(masterTransceiver);
+        }
+
+        public override @property ulong requests()
+        {
+            return this.requests_;
+        }
+
+        public override @property ulong value()
+        {
+            this.requests_++;
+            return master.value();
+        }
+
+        private API master;
+        private ulong requests_;
+    }
+
+    RemoteAPI!API[4] nodes;
+    auto master = RemoteAPI!API.spawn!MasterNode();
+    nodes[0] = master;
+    nodes[1] = RemoteAPI!API.spawn!SlaveNode(master.transceiver);
+    nodes[2] = RemoteAPI!API.spawn!SlaveNode(master.transceiver);
+    nodes[3] = RemoteAPI!API.spawn!SlaveNode(master.transceiver);
+
+    foreach (n; nodes)
+    {
+        assert(n.requests() == 0);
+        assert(n.value() == 42);
+    }
+
+    assert(nodes[0].requests() == 4);
+
+    foreach (n; nodes[1 .. $])
+    {
+        assert(n.value() == 42);
+        assert(n.requests() == 2);
+    }
+
+    assert(nodes[0].requests() == 7);
+    import std.algorithm;
+    nodes.each!(node => node.ctrl.shutdown());
+}
+
+/// Support for circular nodes call
+unittest
+{
+    import geod24.concurrency;
+    import std.format;
+
+    __gshared ServerTransceiver[string] tbn;
+
+    static interface API
+    {
+        @safe:
+        public ulong call (ulong count, ulong val);
+        public void setNext (string name);
+    }
+
+    static class Node : API
+    {
+        @safe:
+        public override ulong call (ulong count, ulong val)
+        {
+            if (!count)
+                return val;
+            return this.next.call(count - 1, val + count);
+        }
+
+        public override void setNext (string name) @trusted
+        {
+            this.next = new RemoteAPI!API(tbn[name]);
+        }
+
+        private API next;
+    }
+
+    RemoteAPI!(API)[3] nodes = [
+        RemoteAPI!API.spawn!Node(),
+        RemoteAPI!API.spawn!Node(),
+        RemoteAPI!API.spawn!Node(),
+    ];
+
+    foreach (idx, ref api; nodes)
+        tbn[format("node%d", idx)] = api.transceiver();
+    nodes[0].setNext("node1");
+    nodes[1].setNext("node2");
+    nodes[2].setNext("node0");
+
+    // 7 level of re-entrancy
+    assert(210 == nodes[0].call(20, 0));
+
+    import std.algorithm;
+    nodes.each!(node => node.ctrl.shutdown());
+}
+
+/// Nodes can start tasks
+unittest
+{
+    import core.thread;
+    import core.time;
+
+    static interface API
+    {
+        public void start ();
+        public void stop ();
+        public ulong getCounter ();
+    }
+
+    static class Node : API
+    {
+        public override void start ()
+        {
+            terminate = false;
+            runTask(&this.task);
+        }
+
+        public override void stop ()
+        {
+            terminate = true;
+        }
+
+        public override ulong getCounter ()
+        {
+            scope (exit) this.counter = 0;
+            return this.counter;
+        }
+
+        private void task ()
+        {
+            while (!terminate)
+            {
+                this.counter++;
+                sleep(50.msecs);
+            }
+        }
+
+        private ulong counter;
+        private bool terminate;
+    }
+
+    import std.format;
+    auto node = RemoteAPI!API.spawn!Node();
+    assert(node.getCounter() == 0);
+    node.start();
+    assert(node.getCounter() == 1);
+    assert(node.getCounter() == 0);
+    core.thread.Thread.sleep(1.seconds);
+    // It should be 19 but some machines are very slow
+    // (e.g. Travis Mac testers) so be safe
+    assert(node.getCounter() >= 9);
+    assert(node.getCounter() == 0);
+    node.stop();
+    node.ctrl.shutdown();
+}
+
+// Sane name insurance policy
+unittest
+{
+    import geod24.Transceiver;
+
+    static interface API
+    {
+        public ulong transceiver ();
+    }
+
+    static class Node : API
+    {
+        public override ulong transceiver () { return 42; }
+    }
+
+    auto node = RemoteAPI!API.spawn!Node();
+    assert(node.transceiver == 42);
+    assert(node.ctrl.transceiver !is null);
+
+    static interface DoesntWork
+    {
+        public string ctrl ();
+    }
+    static assert(!is(typeof(RemoteAPI!DoesntWork)));
+    node.ctrl.shutdown();
+}
+/*
+// Simulate temporary outage
+unittest
+{
+    __gshared ServerTransceiver n1transceive;
+
+    static interface API
+    {
+        public ulong call ();
+        public void asyncCall ();
+    }
+    static class Node : API
+    {
+        public this()
+        {
+            if (n1transceive !is null)
+                this.remote = new RemoteAPI!API(n1transceive);
+        }
+
+        public override ulong call ()
+        {
+            return ++this.count;
+        }
+
+        public override void  asyncCall ()
+        {
+            thisScheduler.spawn({
+                this.remote.call();
+            });
+        }
+
+        size_t count;
+        RemoteAPI!API remote;
+    }
+
+    writeln("test 1-1");
+    n1transceive = null;
+
+    writeln("test 1-2");
+    auto n1 = RemoteAPI!API.spawn!Node();
+    writeln("test 1-3");
+    n1transceive = n1.ctrl.transceiver;
+    writeln("test 1-4");
+    auto n2 = RemoteAPI!API.spawn!Node();
+    writeln("test 1-5");
+
+    writeln("test 2");
+    /// Make sure calls are *relatively* efficient
+    auto current1 = MonoTime.currTime();
+    assert(1 == n1.call());
+    assert(1 == n2.call());
+    auto current2 = MonoTime.currTime();
+    assert(current2 - current1 < 200.msecs);
+
+    writeln("test 3");
+    // Make one of the node sleep
+    n1.sleep(1.seconds);
+    // Make sure our main thread is not suspended,
+    // nor is the second node
+    assert(2 == n2.call());
+    auto current3 = MonoTime.currTime();
+    assert(current3 - current2 < 400.msecs);
+
+    writeln("test 4");
+    // Wait for n1 to unblock
+    assert(2 == n1.call());
+    writeln("test 4-1");
+    // Check current time >= 1 second
+    auto current4 = MonoTime.currTime();
+    writeln("test 4-2");
+    assert(current4 - current2 >= 1.seconds);
+
+    writeln("test 5");
+    // Now drop many messages
+    n1.sleep(1.seconds, true);
+    for (size_t i = 0; i < 500; i++)
+        n2.asyncCall();
+    // Make sure we don't end up blocked forever
+    Thread.sleep(1.seconds);
+    assert(3 == n1.call());
+    writeln("test 6");
+    // Debug output, uncomment if needed
+    version (none)
+    {
+        import std.stdio;
+        writeln("Two non-blocking calls: ", current2 - current1);
+        writeln("Sleep + non-blocking call: ", current3 - current2);
+        writeln("Delta since sleep: ", current4 - current2);
+    }
+
+    n1.ctrl.shutdown();
+    n2.ctrl.shutdown();
+    writeln("test 7");
 }
 */
+// Filter commands
+unittest
+{
+    __gshared ServerTransceiver node_tid;
+
+    static interface API
+    {
+        size_t fooCount();
+        size_t fooIntCount();
+        size_t barCount ();
+        void foo ();
+        void foo (int);
+        void bar (int);  // not in any overload set
+        void callBar (int);
+        void callFoo ();
+        void callFoo (int);
+    }
+
+    static class Node : API
+    {
+        size_t foo_count;
+        size_t foo_int_count;
+        size_t bar_count;
+        RemoteAPI!API remote;
+
+        public this()
+        {
+            this.remote = new RemoteAPI!API(node_tid);
+        }
+
+        override size_t fooCount() { return this.foo_count; }
+        override size_t fooIntCount() { return this.foo_int_count; }
+        override size_t barCount() { return this.bar_count; }
+        override void foo () { ++this.foo_count; }
+        override void foo (int) { ++this.foo_int_count; }
+        override void bar (int) { ++this.bar_count; }  // not in any overload set
+        // This one is part of the overload set of the node, but not of the API
+        // It can't be accessed via API and can't be filtered out
+        void bar(string) { assert(0); }
+
+        override void callFoo()
+        {
+            try
+            {
+                this.remote.foo();
+            }
+            catch (Exception ex)
+            {
+                assert(ex.msg == "Filtered method 'foo()'");
+            }
+        }
+
+        override void callFoo(int arg)
+        {
+            try
+            {
+                this.remote.foo(arg);
+            }
+            catch (Exception ex)
+            {
+                assert(ex.msg == "Filtered method 'foo(int)'");
+            }
+        }
+
+        override void callBar(int arg)
+        {
+            try
+            {
+                this.remote.bar(arg);
+            }
+            catch (Exception ex)
+            {
+                assert(ex.msg == "Filtered method 'bar(int)'");
+            }
+        }
+    }
+
+    auto filtered = RemoteAPI!API.spawn!Node();
+    node_tid = filtered.ctrl.transceiver;
+
+    // caller will call filtered
+    auto caller = RemoteAPI!API.spawn!Node();
+    caller.callFoo();
+    assert(filtered.fooCount() == 1);
+
+    // both of these work
+    static assert(is(typeof(filtered.filter!(API.foo))));
+    static assert(is(typeof(filtered.filter!(filtered.foo))));
+
+    // only method in the overload set that takes a parameter,
+    // should still match a call to filter with no parameters
+    static assert(is(typeof(filtered.filter!(filtered.bar))));
+
+    // wrong parameters => fail to compile
+    static assert(!is(typeof(filtered.filter!(filtered.bar, float))));
+    // Only `API` overload sets are considered
+    static assert(!is(typeof(filtered.filter!(filtered.bar, string))));
+
+    filtered.filter!(API.foo);
+
+    caller.callFoo();
+    assert(filtered.fooCount() == 1);  // it was not called!
+
+    filtered.clearFilter();  // clear the filter
+    caller.callFoo();
+    assert(filtered.fooCount() == 2);  // it was called!
+
+    // verify foo(int) works first
+    caller.callFoo(1);
+    assert(filtered.fooCount() == 2);
+    assert(filtered.fooIntCount() == 1);  // first time called
+
+    // now filter only the int overload
+    filtered.filter!(API.foo, int);
+
+    // make sure the parameterless overload is still not filtered
+    caller.callFoo();
+    assert(filtered.fooCount() == 3);  // updated
+
+    caller.callFoo(1);
+    assert(filtered.fooIntCount() == 1);  // call filtered!
+
+    // not filtered yet
+    caller.callBar(1);
+    assert(filtered.barCount() == 1);
+
+    filtered.filter!(filtered.bar);
+    caller.callBar(1);
+    assert(filtered.barCount() == 1);  // filtered!
+
+    // last blocking calls, to ensure the previous calls complete
+    filtered.clearFilter();
+    caller.foo();
+    caller.bar(1);
+
+    filtered.ctrl.shutdown();
+    caller.ctrl.shutdown();
+}
+
+// request timeouts (from main thread)
+unittest
+{
+    import core.thread;
+    import std.exception;
+
+    static interface API
+    {
+        size_t sleepFor (long dur);
+    }
+
+    static class Node : API
+    {
+        override size_t sleepFor (long dur)
+        {
+            Thread.sleep(msecs(dur));
+            return 42;
+        }
+    }
+
+    // node with no timeout
+    auto node = RemoteAPI!API.spawn!Node();
+    assert(node.sleepFor(80) == 42);  // no timeout
+
+    // node with a configured timeout
+    auto to_node = RemoteAPI!API.spawn!Node(500.msecs);
+
+    /// none of these should time out
+    assert(to_node.sleepFor(10) == 42);
+    assert(to_node.sleepFor(20) == 42);
+    assert(to_node.sleepFor(30) == 42);
+    assert(to_node.sleepFor(40) == 42);
+
+    assertThrown!Exception(to_node.sleepFor(2000));
+    Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
+    to_node.ctrl.shutdown();
+    node.ctrl.shutdown();
+}
+
+// test-case for responses to re-used requests (from main thread)
+unittest
+{
+    import core.thread;
+    import std.exception;
+
+    static interface API
+    {
+        float getFloat();
+        size_t sleepFor (long dur);
+    }
+
+    static class Node : API
+    {
+        override float getFloat() { return 69.69; }
+        override size_t sleepFor (long dur)
+        {
+            Thread.sleep(msecs(dur));
+            return 42;
+        }
+    }
+
+    // node with no timeout
+    auto node = RemoteAPI!API.spawn!Node();
+    assert(node.sleepFor(80) == 42);  // no timeout
+
+    // node with a configured timeout
+    auto to_node = RemoteAPI!API.spawn!Node(500.msecs);
+
+    /// none of these should time out
+    assert(to_node.sleepFor(10) == 42);
+    assert(to_node.sleepFor(20) == 42);
+    assert(to_node.sleepFor(30) == 42);
+    assert(to_node.sleepFor(40) == 42);
+
+    assertThrown!Exception(to_node.sleepFor(2000));
+    Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
+    import std.stdio;
+    assert(cast(int)to_node.getFloat() == 69);
+
+    to_node.ctrl.shutdown();
+    node.ctrl.shutdown();
+}
+/*
+// request timeouts (foreign node to another node)
+unittest
+{
+    import geod24.Transceiver;
+    import std.exception;
+
+    __gshared ServerTransceiver node_transceiver;
+
+    static interface API
+    {
+        void check ();
+        int ping ();
+    }
+
+    static class Node : API
+    {
+        override int ping () { return 42; }
+
+        override void check ()
+        {
+            auto node = new RemoteAPI!API(node_transceiver, 500.msecs);
+
+            // no time-out
+            node.ctrl.sleep(10.msecs);
+            assert(node.ping() == 42);
+
+            // time-out
+            node.ctrl.sleep(2000.msecs);
+            assertThrown!Exception(node.ping());
+        }
+    }
+
+    auto node_1 = RemoteAPI!API.spawn!Node();
+    auto node_2 = RemoteAPI!API.spawn!Node();
+    node_transceiver = node_2.ctrl.transceiver;
+    node_1.check();
+    node_1.ctrl.shutdown();
+    node_2.ctrl.shutdown();
+}
+
+// test-case for zombie responses
+unittest
+{
+    import geod24.Transceiver;
+    import std.exception;
+
+    __gshared ServerTransceiver node_transceiver;
+
+    static interface API
+    {
+        void check ();
+        int get42 ();
+        int get69 ();
+    }
+
+    static class Node : API
+    {
+        override int get42 () { return 42; }
+        override int get69 () { return 69; }
+
+        override void check ()
+        {
+            auto node = new RemoteAPI!API(node_transceiver, 500.msecs);
+
+            // time-out
+            node.ctrl.sleep(2000.msecs);
+            assertThrown!Exception(node.get42());
+
+            // no time-out
+            node.ctrl.sleep(10.msecs);
+            assert(node.get69() == 69);
+        }
+    }
+
+    auto node_1 = RemoteAPI!API.spawn!Node();
+    auto node_2 = RemoteAPI!API.spawn!Node();
+    node_transceiver = node_2.ctrl.transceiver;
+    node_1.check();
+    node_1.ctrl.shutdown();
+    node_2.ctrl.shutdown();
+}
+*/
+// request timeouts with dropped messages
+unittest
+{
+    import geod24.Transceiver;
+    import std.exception;
+
+    __gshared ServerTransceiver node_transceiver;
+
+    static interface API
+    {
+        void check ();
+        int ping ();
+    }
+
+    static class Node : API
+    {
+        override int ping () { return 42; }
+
+        override void check ()
+        {
+            auto node = new RemoteAPI!API(node_transceiver, 420.msecs);
+
+            // Requests are dropped, so it times out
+            assert(node.ping() == 42);
+            node.ctrl.sleep(10.msecs, true);
+            assertThrown!Exception(node.ping());
+        }
+    }
+
+    auto node_1 = RemoteAPI!API.spawn!Node();
+    auto node_2 = RemoteAPI!API.spawn!Node();
+    node_transceiver = node_2.ctrl.transceiver;
+    node_1.check();
+    node_1.ctrl.shutdown();
+    node_2.ctrl.shutdown();
+}
+/*
+// Test a node that gets a replay while it's delayed
+unittest
+{
+    import geod24.Transceiver;
+    import std.exception;
+
+    __gshared ServerTransceiver node_transceiver;
+
+    static interface API
+    {
+        void check ();
+        int ping ();
+    }
+
+    static class Node : API
+    {
+        override int ping () { return 42; }
+
+        override void check ()
+        {
+            auto node = new RemoteAPI!API(node_transceiver, 5000.msecs);
+            assert(node.ping() == 42);
+            // We need to return immediately so that the main thread
+            // puts us to sleep
+            runTask(() {
+                node.ctrl.sleep(200.msecs);
+                assert(node.ping() == 42);
+            });
+        }
+    }
+
+    auto node_1 = RemoteAPI!API.spawn!Node(500.msecs);
+    auto node_2 = RemoteAPI!API.spawn!Node();
+    node_transceiver = node_2.ctrl.transceiver;
+    node_1.check();
+    node_1.ctrl.sleep(300.msecs);
+    assert(node_1.ping() == 42);
+    node_1.ctrl.shutdown();
+    node_2.ctrl.shutdown();
+}
+*/
+// Test explicit shutdown
+unittest
+{
+    import std.exception;
+
+    static interface API
+    {
+        int myping (int value);
+    }
+
+    static class Node : API
+    {
+        override int myping (int value)
+        {
+            return value;
+        }
+    }
+
+    auto node = RemoteAPI!API.spawn!Node(1.seconds);
+    assert(node.myping(42) == 42);
+    node.ctrl.shutdown();
+
+    try
+    {
+        node.myping(69);
+        assert(0);
+    }
+    catch (Exception ex)
+    {
+        assert(ex.msg == `"Request timed-out"`);
+    }
+}

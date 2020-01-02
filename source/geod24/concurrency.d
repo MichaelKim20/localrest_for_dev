@@ -158,6 +158,9 @@ interface Scheduler
     void start (void delegate() op);
 
 
+    void stop ();
+
+
     /***************************************************************************
 
         Assigns a logical thread to execute the supplied op.
@@ -324,6 +327,10 @@ public class ThreadScheduler : Scheduler
         op();
     }
 
+    void stop ()
+    {
+
+    }
 
     /***************************************************************************
 
@@ -495,7 +502,9 @@ public class ThreadScheduler : Scheduler
 class FiberScheduler : Scheduler
 {
     private Mutex mutex;
-
+    private shared(bool) terminated;
+    private shared(MonoTime) terminated_time;
+    private shared(bool) stoped;
 
     /***************************************************************************
 
@@ -510,6 +519,11 @@ class FiberScheduler : Scheduler
         dispatch();
     }
 
+    void stop ()
+    {
+        terminated = true;
+        terminated_time = MonoTime.currTime;
+    }
 
     /***************************************************************************
 
@@ -818,6 +832,8 @@ private:
     void dispatch ()
     {
         import std.algorithm.mutation : remove;
+        import std.stdio;
+        uint count = 0;
 
         while (m_fibers.length > 0)
         {
@@ -835,6 +851,10 @@ private:
             {
                 m_pos = 0;
             }
+            if (terminated)
+                break;
+            //if ((count++) % 100 == 0)
+            //    writefln("Scheduler %s %s", name, m_fibers.length);
         }
     }
 

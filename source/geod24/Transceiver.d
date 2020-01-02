@@ -28,6 +28,9 @@ public enum Status
     /// Request timed-out
     Timeout,
 
+    /// Request Dropped
+    Dropped,
+
     /// Request succeeded
     Success
 };
