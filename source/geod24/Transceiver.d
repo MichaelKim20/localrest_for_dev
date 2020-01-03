@@ -14,6 +14,7 @@ import geod24.concurrency;
 
 import core.time;
 
+
 /// Data sent by the caller
 public struct Request
 {
@@ -32,6 +33,7 @@ public struct Request
     string args;
 };
 
+
 /// Status of a request
 public enum Status
 {
@@ -48,6 +50,7 @@ public enum Status
     Success
 };
 
+
 /// Data sent by the callee back to the caller
 public struct Response
 {
@@ -62,6 +65,7 @@ public struct Response
     /// Otherwise, it contains `Exception.toString()`.
     string data;
 };
+
 
 /// Ask the node to exhibit a certain behavior for a given time
 public struct TimeCommand
@@ -81,6 +85,7 @@ public struct FilterAPI
     /// used for debugging
     string pretty_func;
 }
+
 
 /*******************************************************************************
 
@@ -193,6 +198,7 @@ public class ServerTransceiver : ITransceiver
             condition.wait();
         }
     }
+
 
     /***************************************************************************
 

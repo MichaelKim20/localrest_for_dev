@@ -94,8 +94,6 @@ import core.sync.mutex;
 import core.thread;
 import core.time;
 
-import std.stdio;
-
 /// Simple wrapper to deal with tuples
 /// Vibe.d might emit a pragma(msg) when T.length == 0
 private struct ArgWrapper (T...)
@@ -731,7 +729,6 @@ private class Client
 
     public void shutdown () @trusted
     {
-
         this._terminate = true;
         this._transceiver.close();
     }
@@ -1677,7 +1674,7 @@ unittest
 
     assertThrown!Exception(to_node.sleepFor(2000));
     Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
-    import std.stdio;
+
     assert(cast(int)to_node.getFloat() == 69);
 
     to_node.ctrl.shutdown();
