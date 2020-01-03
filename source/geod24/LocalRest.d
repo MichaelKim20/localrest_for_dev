@@ -207,6 +207,7 @@ public @property WaitingManager thisWaitingManager () nothrow
         return null;
 }
 
+
 /***************************************************************************
 
     Setter of WaitingManager assigned to a called thread.
@@ -233,6 +234,7 @@ public @property ITransceiver thisTransceiver () nothrow
     else
         return null;
 }
+
 
 /***************************************************************************
 
@@ -369,6 +371,8 @@ private class Server (API)
     private static ServerTransceiver spawned (Implementation) (CtorParams!Implementation cargs)
     {
         import std.datetime.systime : Clock, SysTime;
+        import std.algorithm : each;
+        import std.range;
 
         ServerTransceiver transceiver = new ServerTransceiver();
         WaitingManager waitingManager = new WaitingManager();
@@ -407,11 +411,16 @@ private class Server (API)
                 waitingManager.remove(res.id);
             }
 
+            Request[] await_req;
+            Response[] await_res;
+
             auto fiber_scheduler = new FiberScheduler();
             fiber_scheduler.start({
                 thisTransceiver = transceiver;
                 thisWaitingManager = waitingManager;
                 bool terminate = false;
+
+                //  Process a `Request`
                 thisScheduler.spawn({
                     auto c = thisScheduler.newCondition(null);
                     while (!terminate)
@@ -434,23 +443,13 @@ private class Server (API)
                             });
                         }
                         else if (!control.drop)
-                        {
-                            thisScheduler.spawn({
-                                while (isSleeping())
-                                    thisScheduler.wait(c, 10.msecs);
-                                handleReq(req);
-                            });
-                        }
-                        else
-                        {
-                            //thisScheduler.spawn({
-                            //    auto res = Response(Status.Dropped, req.id, "");
-                            //    req.sender.send(res);
-                            //});
-                        }
+                            await_req ~= req;
+
+                        thisScheduler.yield();
                     }
                 });
 
+                //  Process a `TimeCommand`
                 thisScheduler.spawn({
                     while (!terminate)
                     {
@@ -461,9 +460,12 @@ private class Server (API)
 
                         control.sleep_until = Clock.currTime + time_command.dur;
                         control.drop = time_command.drop;
+
+                        thisScheduler.yield();
                     }
                 });
 
+                //  Process a `FilterAPI`
                 thisScheduler.spawn({
                     while (!terminate)
                     {
@@ -473,9 +475,12 @@ private class Server (API)
                             break;
 
                         control.filter = filter;
+
+                        thisScheduler.yield();
                     }
                 });
 
+                //  Process a `Response`
                 thisScheduler.spawn({
                     auto c = thisScheduler.newCondition(null);
                     while (!terminate)
@@ -499,24 +504,56 @@ private class Server (API)
                             });
                         }
                         else if (!control.drop)
+                            await_res ~= res;
+
+                        thisScheduler.yield();
+                    }
+                });
+
+                //  Process a `Request` waiting by the command sleep().
+                thisScheduler.spawn({
+                    auto c = thisScheduler.newCondition(null);
+                    while (!terminate)
+                    {
+                        if (!isSleeping())
                         {
-                            thisScheduler.spawn({
-                                while (isSleeping())
-                                    thisScheduler.wait(c, 10.msecs);
-                                handleRes(res);
-                            });
+                            await_req.each!(
+                                req =>
+                                thisScheduler.spawn({
+                                    handleReq(req);
+                                })
+                            );
+                            await_req.length = 0;
+                            assumeSafeAppend(await_req);
                         }
-                        else
+
+                        thisScheduler.yield();
+                    }
+                });
+
+                //  Process a `Response` waiting by the command sleep().
+                thisScheduler.spawn({
+                    auto c = thisScheduler.newCondition(null);
+                    while (!terminate)
+                    {
+                        if (!isSleeping())
                         {
-                            //res.status = Status.Dropped;
-                            //thisScheduler.spawn({
-                            //    handleRes(res);
-                            //});
+                            await_res.each!(
+                                res =>
+                                thisScheduler.spawn({
+                                    handleRes(res);
+                                })
+                            );
+                            await_res.length = 0;
+                            assumeSafeAppend(await_res);
                         }
+
+                        thisScheduler.yield();
                     }
                 });
 
                 thread_scheduler.notify(cond);
+
             });
         });
 
@@ -641,10 +678,8 @@ private class Client
         if (thisWaitingManager !is null)
         {
             req = Request(thisTransceiver, thisWaitingManager.getNextResponseId(), method, args);
-            //writefln("case1 begin %s", req);
             remote.send(req);
             res = thisWaitingManager.waitResponse(req.id, this._timeout);
-            //writefln("case1 end %s %s", req, res);
         }
         // from Non-Node to Node
         else
@@ -653,7 +688,6 @@ private class Client
 
             scheduler.spawn({
                 req = Request(this.transceiver, this._waitingManager.getNextResponseId(), method, args);
-                //writefln("case2 beign %s", req);
                 remote.send(req);
             });
 
@@ -678,14 +712,12 @@ private class Client
                     this._waitingManager.waiting[res.id].c.notify();
                     this._waitingManager.remove(res.id);
                 }
-                //writefln("stop Client.wait");
             });
 
             scheduler.start({
                 res = this._waitingManager.waitResponse(req.id, this._timeout);
                 this._terminate = true;
             });
-            //writefln("case2 end %s %s", req, res);
         }
 
         return res;
@@ -744,6 +776,7 @@ public void runTask (void delegate() dg)
     thisScheduler.spawn(dg);
 }
 
+
 /// Ditto
 public void sleep (Duration timeout)
 {
@@ -751,6 +784,7 @@ public void sleep (Duration timeout)
     scope c = thisScheduler.newCondition(null);
     thisScheduler.wait(c, timeout);
 }
+
 
 /*******************************************************************************
 
@@ -802,6 +836,7 @@ public class RemoteAPI (API) : API
 
     // Vibe.d mandates that method must be @safe
     @safe:
+
 
     /***************************************************************************
 
@@ -868,7 +903,6 @@ public class RemoteAPI (API) : API
 
         public void shutdownClient () @trusted
         {
-            //writefln("shutdownClient");
             this._client.shutdown();
         }
 
@@ -1141,7 +1175,6 @@ unittest
     });
 }
 
-//  error
 /// This network have different types of nodes in it
 unittest
 {
@@ -1358,7 +1391,7 @@ unittest
     static assert(!is(typeof(RemoteAPI!DoesntWork)));
     node.ctrl.shutdown();
 }
-/*
+
 // Simulate temporary outage
 unittest
 {
@@ -1377,34 +1410,16 @@ unittest
                 this.remote = new RemoteAPI!API(n1transceive);
         }
 
-        public override ulong call ()
-        {
-            return ++this.count;
-        }
-
-        public override void  asyncCall ()
-        {
-            thisScheduler.spawn({
-                this.remote.call();
-            });
-        }
-
+        public override ulong call () { return ++this.count; }
+        public override void  asyncCall () { runTask(() => cast(void)this.remote.call); }
         size_t count;
         RemoteAPI!API remote;
     }
 
-    writeln("test 1-1");
-    n1transceive = null;
-
-    writeln("test 1-2");
     auto n1 = RemoteAPI!API.spawn!Node();
-    writeln("test 1-3");
     n1transceive = n1.ctrl.transceiver;
-    writeln("test 1-4");
     auto n2 = RemoteAPI!API.spawn!Node();
-    writeln("test 1-5");
 
-    writeln("test 2");
     /// Make sure calls are *relatively* efficient
     auto current1 = MonoTime.currTime();
     assert(1 == n1.call());
@@ -1412,7 +1427,6 @@ unittest
     auto current2 = MonoTime.currTime();
     assert(current2 - current1 < 200.msecs);
 
-    writeln("test 3");
     // Make one of the node sleep
     n1.sleep(1.seconds);
     // Make sure our main thread is not suspended,
@@ -1421,16 +1435,12 @@ unittest
     auto current3 = MonoTime.currTime();
     assert(current3 - current2 < 400.msecs);
 
-    writeln("test 4");
     // Wait for n1 to unblock
     assert(2 == n1.call());
-    writeln("test 4-1");
     // Check current time >= 1 second
     auto current4 = MonoTime.currTime();
-    writeln("test 4-2");
     assert(current4 - current2 >= 1.seconds);
 
-    writeln("test 5");
     // Now drop many messages
     n1.sleep(1.seconds, true);
     for (size_t i = 0; i < 500; i++)
@@ -1438,7 +1448,7 @@ unittest
     // Make sure we don't end up blocked forever
     Thread.sleep(1.seconds);
     assert(3 == n1.call());
-    writeln("test 6");
+
     // Debug output, uncomment if needed
     version (none)
     {
@@ -1450,9 +1460,8 @@ unittest
 
     n1.ctrl.shutdown();
     n2.ctrl.shutdown();
-    writeln("test 7");
 }
-*/
+
 // Filter commands
 unittest
 {
@@ -1674,7 +1683,7 @@ unittest
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
 }
-/*
+
 // request timeouts (foreign node to another node)
 unittest
 {
@@ -1756,7 +1765,7 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
 }
-*/
+
 // request timeouts with dropped messages
 unittest
 {
@@ -1793,7 +1802,7 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
 }
-/*
+
 // Test a node that gets a replay while it's delayed
 unittest
 {
@@ -1834,7 +1843,7 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
 }
-*/
+
 // Test explicit shutdown
 unittest
 {

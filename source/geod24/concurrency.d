@@ -158,6 +158,12 @@ interface Scheduler
     void start (void delegate() op);
 
 
+    /***************************************************************************
+
+        This commands the scheduler to shut down at the end of the program.
+
+    ***************************************************************************/
+
     void stop ();
 
 
@@ -327,10 +333,18 @@ public class ThreadScheduler : Scheduler
         op();
     }
 
+
+    /***************************************************************************
+
+        This commands the scheduler to shut down at the end of the program.
+
+    ***************************************************************************/
+
     void stop ()
     {
 
     }
+
 
     /***************************************************************************
 
@@ -519,11 +533,19 @@ class FiberScheduler : Scheduler
         dispatch();
     }
 
+
+    /***************************************************************************
+
+        This commands the scheduler to shut down at the end of the program.
+
+    ***************************************************************************/
+
     void stop ()
     {
         terminated = true;
         terminated_time = MonoTime.currTime;
     }
+
 
     /***************************************************************************
 
@@ -832,8 +854,6 @@ private:
     void dispatch ()
     {
         import std.algorithm.mutation : remove;
-        import std.stdio;
-        uint count = 0;
 
         while (m_fibers.length > 0)
         {
@@ -853,8 +873,6 @@ private:
             }
             if (terminated)
                 break;
-            //if ((count++) % 100 == 0)
-            //    writefln("Scheduler %s %s", name, m_fibers.length);
         }
     }
 
@@ -878,6 +896,7 @@ public @property Scheduler thisScheduler () nothrow
         return null;
 }
 
+
 /***************************************************************************
 
     Setter of Scheduler assigned to a called thread.
@@ -888,7 +907,6 @@ public @property void thisScheduler (Scheduler value) nothrow
 {
     thisInfo.objectValues["scheduler"] = cast(Object)value;
 }
-
 
 
 /*******************************************************************************
@@ -916,6 +934,10 @@ public class ChannelClosed : Exception
     into or read from.
     Hence one fiber(thread) can send data into a channel, while other fiber(thread)
     can read that data from the same channel
+
+    It is the Scheduler that allows the channel to connect the fiber organically.
+    This allows for the segmentation of small units of logic during a program
+    using fiber in a multi-threaded environment.
 
 *******************************************************************************/
 
@@ -946,6 +968,7 @@ public class Channel (T)
         this.mutex = new Mutex;
         this.qsize = qsize;
     }
+
 
     /***************************************************************************
 
@@ -1013,6 +1036,7 @@ public class Channel (T)
         return true;
     }
 
+
     /***************************************************************************
 
         Return the received message.
@@ -1079,6 +1103,7 @@ public class Channel (T)
         return res;
     }
 
+
     /***************************************************************************
 
         Return closing status
@@ -1095,6 +1120,7 @@ public class Channel (T)
             return this.closed;
         }
     }
+
 
     /***************************************************************************
 
@@ -1139,7 +1165,14 @@ public class Channel (T)
     }
 }
 
-/// A structure to be stored in a queue. It has information to use in standby.
+
+/***************************************************************************
+
+    A structure to be stored in a queue.
+    It has information to use in standby.
+
+***************************************************************************/
+
 private struct ChannelContext (T)
 {
     /// This is a message. Used in put

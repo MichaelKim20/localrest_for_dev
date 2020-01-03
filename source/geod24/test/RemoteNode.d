@@ -183,7 +183,6 @@ unittest
                 while (!terminate)
                 {
                     Request msg = server2.req.receive();
-                    //writefln("%s %s", server2, msg);
                     if (msg.method == "name")
                     {
                         Response res = Response(Status.Success, 0, "Tom");
