@@ -515,7 +515,6 @@ public class ThreadScheduler : Scheduler
 
 class FiberScheduler : Scheduler
 {
-    private Mutex mutex;
     private shared(bool) terminated;
     private shared(MonoTime) terminated_time;
     private shared(bool) stoped;

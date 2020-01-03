@@ -83,6 +83,7 @@ module geod24.LocalRest;
 
 import geod24.concurrency;
 import geod24.Transceiver;
+import geod24.LocalScheduler;
 
 import vibe.data.json;
 
@@ -399,7 +400,9 @@ private class Server (API)
 
             void handleReq (Request req)
             {
-                Server!(API).handleRequest(req, node, control.filter);
+                thisScheduler.spawn(() {
+                    Server!(API).handleRequest(req, node, control.filter);
+                });
             }
 
             void handleRes (Response res)
@@ -412,7 +415,7 @@ private class Server (API)
             Request[] await_req;
             Response[] await_res;
 
-            auto fiber_scheduler = new FiberScheduler();
+            auto fiber_scheduler = new LocalFiberScheduler();
             fiber_scheduler.start({
                 thisTransceiver = transceiver;
                 thisWaitingManager = waitingManager;
@@ -435,11 +438,7 @@ private class Server (API)
                             break;
 
                         if (!isSleeping())
-                        {
-                            thisScheduler.spawn({
-                                handleReq(req);
-                            });
-                        }
+                            handleReq(req);
                         else if (!control.drop)
                             await_req ~= req;
 
@@ -473,7 +472,6 @@ private class Server (API)
                             break;
 
                         control.filter = filter;
-
                         thisScheduler.yield();
                     }
                 });
@@ -492,15 +490,11 @@ private class Server (API)
                         {
                             if (waitingManager.exist(res.id))
                                 break;
-                            thisScheduler.wait(c, 1.msecs);
+                            thisScheduler.wait(c, 10.msecs);
                         }
 
                         if (!isSleeping())
-                        {
-                            thisScheduler.spawn({
-                                handleRes(res);
-                            });
-                        }
+                            handleRes(res);
                         else if (!control.drop)
                             await_res ~= res;
 
@@ -515,16 +509,10 @@ private class Server (API)
                     {
                         if (!isSleeping())
                         {
-                            await_req.each!(
-                                req =>
-                                thisScheduler.spawn({
-                                    handleReq(req);
-                                })
-                            );
+                            await_req.each!(req => handleReq(req));
                             await_req.length = 0;
                             assumeSafeAppend(await_req);
                         }
-
                         thisScheduler.yield();
                     }
                 });
@@ -536,25 +524,19 @@ private class Server (API)
                     {
                         if (!isSleeping())
                         {
-                            await_res.each!(
-                                res =>
-                                thisScheduler.spawn({
-                                    handleRes(res);
-                                })
-                            );
+                            await_res.each!(res => handleRes(res));
                             await_res.length = 0;
                             assumeSafeAppend(await_res);
                         }
-
                         thisScheduler.yield();
                     }
                 });
 
                 thread_scheduler.notify(cond);
-
             });
         });
 
+        //  Wait for the node to be created.
         thread_scheduler.wait(cond);
 
         return transceiver;
@@ -682,7 +664,7 @@ private class Client
         // from Non-Node to Node
         else
         {
-            auto scheduler = new FiberScheduler();
+            auto scheduler = new LocalFiberScheduler();
 
             scheduler.spawn({
                 req = Request(this.transceiver, this._waitingManager.getNextResponseId(), method, args);
@@ -1142,7 +1124,7 @@ unittest
     auto chan = new Channel!int;
     auto thread_scheduler = ThreadScheduler.instance;
     thread_scheduler.spawn({
-        auto fiber_scheduler = new FiberScheduler();
+        auto fiber_scheduler = new LocalFiberScheduler();
         fiber_scheduler.start({
             fiber_scheduler.spawn({
                 auto node1 = factory("this does not matter", 1);

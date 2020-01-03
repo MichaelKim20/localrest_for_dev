@@ -1,19 +1,33 @@
-
 /*******************************************************************************
 
-    An example Scheduler using Fibers.
+    An Local Fiber Scheduler.
 
-    This is an example scheduler that creates a new Fiber per call to spawn
-    and multiplexes the execution of all fibers within the main thread.
+    This is an scheduler that creates a new Fiber per call to spawn and
+    multiplexes the execution of all fibers within a thread.
 
 *******************************************************************************/
 
+
+module geod24.LocalScheduler;
+
+import geod24.concurrency;
+
+import core.sync.condition;
+import core.sync.mutex;
+import core.thread;
+
+/// Ditto
 class LocalFiberScheduler : Scheduler
 {
     private Mutex mutex;
     private shared(bool) terminated;
     private shared(MonoTime) terminated_time;
     private shared(bool) stoped;
+
+    this ()
+    {
+        this.mutex = new Mutex();
+    }
 
     /***************************************************************************
 
@@ -24,6 +38,7 @@ class LocalFiberScheduler : Scheduler
 
     void start (void delegate () op)
     {
+        terminated = false;
         create(op);
         dispatch();
     }
@@ -39,6 +54,7 @@ class LocalFiberScheduler : Scheduler
     {
         terminated = true;
         terminated_time = MonoTime.currTime;
+
     }
 
 
@@ -231,7 +247,9 @@ protected:
             op();
         }
 
+        this.mutex.lock_nothrow();
         m_fibers ~= new InfoFiber(&wrap);
+        this.mutex.unlock_nothrow();
     }
 
 
@@ -349,14 +367,27 @@ private:
     void dispatch ()
     {
         import std.algorithm.mutation : remove;
+        import std.math;
+        Duration limit = 1000.msecs;
 
-        while (m_fibers.length > 0)
+        auto condition = ThreadScheduler.instance.newCondition(this.mutex);
+        ulong count = 0;
+        bool done = false;
+
+        ulong getWaitInterval(ulong length)
         {
+            return ((length) / 5) + 1;
+        }
+
+        while (!done)
+        {
+            this.mutex.lock_nothrow();
+            scope (exit) this.mutex.unlock_nothrow();
+
             auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
             if (t !is null && !(cast(ChannelClosed) t))
-            {
                 throw t;
-            }
+
             if (m_fibers[m_pos].state == Fiber.State.TERM)
             {
                 if (m_pos >= (m_fibers = remove(m_fibers, m_pos)).length)
@@ -366,8 +397,19 @@ private:
             {
                 m_pos = 0;
             }
-            if (terminated)
-                break;
+
+            if (m_fibers.length == 0)
+                done = true;
+
+            if (terminated && (m_fibers.length > 0))
+            {
+                auto elapsed = MonoTime.currTime - terminated_time;
+                if (elapsed > limit)
+                    done = true;
+            }
+
+            if (++count % getWaitInterval(m_fibers.length) == 0)
+                ThreadScheduler.instance.wait(condition, 100.nsecs);
         }
     }
 
