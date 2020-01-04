@@ -2,7 +2,7 @@
 
     Registry implementation for multi-threaded access
 
-    This registry allows to look up a `ServerTransceiver` based on a `string`.
+    This registry allows to look up a `Transceiver` based on a `string`.
     It is extracted from the `std.concurrency` module to make it reusable
 
 *******************************************************************************/
@@ -16,8 +16,8 @@ import geod24.Transceiver;
 /// Ditto
 public shared struct Registry
 {
-    private ServerTransceiver[string] tidByName;
-    private string[][ServerTransceiver] namesByServerTransceiver;
+    private Transceiver[string] transceiverByName;
+    private string[][Transceiver] namesByTransceiver;
     private Mutex registryLock;
 
     /// Initialize this registry, creating the Mutex
@@ -27,55 +27,55 @@ public shared struct Registry
     }
 
     /**
-     * Gets the ServerTransceiver associated with name.
+     * Gets the Transceiver associated with name.
      *
      * Params:
      *  name = The name to locate within the registry.
      *
      * Returns:
-     *  The associated ServerTransceiver or ServerTransceiver.init if name is not registered.
+     *  The associated Transceiver or Transceiver.init if name is not registered.
      */
-    ServerTransceiver locate(string name)
+    Transceiver locate(string name)
     {
         synchronized (registryLock)
         {
-            if (shared(ServerTransceiver)* tid = name in this.tidByName)
-                return *cast(ServerTransceiver*)tid;
-            return ServerTransceiver.init;
+            if (shared(Transceiver)* transceiver = name in this.transceiverByName)
+                return *cast(Transceiver*)transceiver;
+            return Transceiver.init;
         }
     }
 
     /**
-     * Associates name with tid.
+     * Associates name with transceiver.
      *
-     * Associates name with tid in a process-local map.  When the thread
-     * represented by tid terminates, any names associated with it will be
+     * Associates name with transceiver in a process-local map.  When the thread
+     * represented by transceiver terminates, any names associated with it will be
      * automatically unregistered.
      *
      * Params:
-     *  name = The name to associate with tid.
-     *  tid  = The tid register by name.
+     *  name = The name to associate with transceiver.
+     *  transceiver  = The transceiver register by name.
      *
      * Returns:
-     *  true if the name is available and tid is not known to represent a
+     *  true if the name is available and transceiver is not known to represent a
      *  defunct thread.
      */
-    bool register(string name, ServerTransceiver tid)
+    bool register(string name, Transceiver transceiver)
     {
         synchronized (registryLock)
         {
-            if (name in tidByName)
+            if (name in transceiverByName)
                 return false;
-            //if (tid.mbox.isClosed)
-            //    return false;
-            this.namesByServerTransceiver[tid] ~= name;
-            this.tidByName[name] = cast(shared)tid;
+            if (transceiver.chan.isClosed)
+                return false;
+            this.namesByTransceiver[transceiver] ~= name;
+            this.transceiverByName[name] = cast(shared)transceiver;
             return true;
         }
     }
 
     /**
-     * Removes the registered name associated with a tid.
+     * Removes the registered name associated with a transceiver.
      *
      * Params:
      *  name = The name to unregister.
@@ -90,12 +90,12 @@ public shared struct Registry
 
         synchronized (registryLock)
         {
-            if (shared(ServerTransceiver)* tid = name in this.tidByName)
+            if (shared(Transceiver)* transceiver = name in this.transceiverByName)
             {
-                auto allNames = *cast(ServerTransceiver*)tid in this.namesByServerTransceiver;
+                auto allNames = *cast(Transceiver*)transceiver in this.namesByTransceiver;
                 auto pos = countUntil(*allNames, name);
                 remove!(SwapStrategy.unstable)(*allNames, pos);
-                this.tidByName.remove(name);
+                this.transceiverByName.remove(name);
                 return true;
             }
             return false;

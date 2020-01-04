@@ -1013,6 +1013,7 @@ public class Channel (T)
             return true;
         }
 
+        //if ((this.qsize == 0) || (this.queue[].walkLength < this.qsize))
         if (this.queue[].walkLength < this.qsize)
         {
             this.queue.insertBack(msg);
@@ -1183,7 +1184,7 @@ private struct ChannelContext (T)
     //  Waiting Condition
     public Condition condition;
 }
-
+/*
 /// Fiber1 -> [ channel2 ] -> Fiber2 -> [ channel1 ] -> Fiber1
 unittest
 {
@@ -1410,3 +1411,4 @@ unittest
         });
     });
 }
+*/

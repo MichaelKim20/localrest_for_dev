@@ -60,7 +60,7 @@
 
     When spawning a node, a thread is spawned, a node is instantiated with
     the provided arguments, and an event loop waits for messages sent
-    to the ServerTransceiver. Messages consist of the sender's ServerTransceiver, the mangled name
+    to the Transceiver. Messages consist of the sender's Transceiver, the mangled name
     of the function to call (to support overloading) and the arguments,
     serialized as a JSON string.
 
@@ -70,8 +70,8 @@
     as Vibe.d is the only available JSON module known to the author
     to provide an interface to deserialize composite types.
 
-    Removed ServerTransceiver
-    Added ITransceiver
+    Removed Transceiver
+    Added Transceiver
 
     Author:         Mathias 'Geod24' Lang
     License:        MIT (See LICENSE.txt)
@@ -83,7 +83,6 @@ module geod24.LocalRest;
 
 import geod24.concurrency;
 import geod24.Transceiver;
-import geod24.LocalScheduler;
 
 import vibe.data.json;
 
@@ -103,9 +102,6 @@ private struct ArgWrapper (T...)
         size_t dummy;
     T args;
 }
-
-/// Commands used to shutdown the server
-const string SHUTDOWN_COMMAND = "shutdown@command";
 
 /*******************************************************************************
 
@@ -219,34 +215,6 @@ public @property void thisWaitingManager (WaitingManager value) nothrow
 }
 
 
-
-/***************************************************************************
-
-    Getter of ITransceiver assigned to a called thread.
-
-***************************************************************************/
-
-public @property ITransceiver thisTransceiver () nothrow
-{
-    if (auto p = "ITransceiver" in thisInfo.objectValues)
-        return cast(ITransceiver)(*p);
-    else
-        return null;
-}
-
-
-/***************************************************************************
-
-    Setter of ITransceiver assigned to a called thread.
-
-***************************************************************************/
-
-public @property void thisTransceiver (ITransceiver value) nothrow
-{
-    thisInfo.objectValues["ITransceiver"] = cast(Object)value;
-}
-
-
 /*******************************************************************************
 
     Receive requests, To obtain and return results by passing
@@ -264,7 +232,7 @@ private class Server (API)
         nodes and then start to process request.
         In order to have a connected network, no nodes in any thread should have
         a different reference to the same node.
-        In practice, this means there should only be one `ServerTransceiver`
+        In practice, this means there should only be one `Transceiver`
         per "address".
 
         Note:
@@ -358,7 +326,7 @@ private class Server (API)
         Main dispatch function
 
         This function receive string-serialized messages from the calling thread,
-        which is a struct with the sender's ITransceiver, the method's mangleof,
+        which is a struct with the sender's Transceiver, the method's mangleof,
         and the method's arguments as a tuple, serialized to a JSON string.
 
         Params:
@@ -367,15 +335,14 @@ private class Server (API)
 
     ***************************************************************************/
 
-    private static ServerTransceiver spawned (Implementation) (CtorParams!Implementation cargs)
+    private static Transceiver spawned (Implementation) (CtorParams!Implementation cargs)
     {
         import std.datetime.systime : Clock, SysTime;
         import std.algorithm : each;
         import std.range;
 
-        ServerTransceiver transceiver = new ServerTransceiver();
+        Transceiver transceiver = new Transceiver();
         WaitingManager waitingManager = new WaitingManager();
-        auto thread_scheduler = ThreadScheduler.instance;
 
         // used for controling filtering / sleep
         struct Control
@@ -385,14 +352,13 @@ private class Server (API)
             bool drop;           // drop messages if sleeping
         }
 
-        auto cond = thread_scheduler.newCondition(null);
-        thread_scheduler.spawn({
-
+        auto cond = ThreadScheduler.instance.newCondition(null);
+        ThreadScheduler.instance.spawn({
             scope node = new Implementation(cargs);
 
             Control control;
 
-            bool isSleeping()
+            bool isSleeping ()
             {
                 return control.sleep_until != SysTime.init
                     && Clock.currTime < control.sleep_until;
@@ -401,7 +367,7 @@ private class Server (API)
             void handleReq (Request req)
             {
                 thisScheduler.spawn(() {
-                    Server!(API).handleRequest(req, node, control.filter);
+                    handleRequest(req, node, control.filter);
                 });
             }
 
@@ -415,94 +381,68 @@ private class Server (API)
             Request[] await_req;
             Response[] await_res;
 
-            auto fiber_scheduler = new LocalFiberScheduler();
+            auto fiber_scheduler = new FiberScheduler();
             fiber_scheduler.start({
                 thisTransceiver = transceiver;
                 thisWaitingManager = waitingManager;
                 bool terminate = false;
 
-                //  Process a `Request`
+                Message msg;
                 thisScheduler.spawn({
                     auto c = thisScheduler.newCondition(null);
                     while (!terminate)
                     {
-                        auto req = transceiver.req.receive();
+                        msg = transceiver.receive();
 
-                        if (req.method == SHUTDOWN_COMMAND)
+                        if (terminate)
+                            break;
+
+                        switch (msg.tag)
                         {
-                            terminate = true;
-                            fiber_scheduler.stop();
-                        }
-
-                        if (terminate)
-                            break;
-
-                        if (!isSleeping())
-                            handleReq(req);
-                        else if (!control.drop)
-                            await_req ~= req;
-
-                        thisScheduler.yield();
-                    }
-                });
-
-                //  Process a `TimeCommand`
-                thisScheduler.spawn({
-                    while (!terminate)
-                    {
-                        auto time_command = transceiver.ctrl_time.receive();
-
-                        if (terminate)
-                            break;
-
-                        control.sleep_until = Clock.currTime + time_command.dur;
-                        control.drop = time_command.drop;
-
-                        thisScheduler.yield();
-                    }
-                });
-
-                //  Process a `FilterAPI`
-                thisScheduler.spawn({
-                    while (!terminate)
-                    {
-                        auto filter = transceiver.ctrl_filter.receive();
-
-                        if (terminate)
-                            break;
-
-                        control.filter = filter;
-                        thisScheduler.yield();
-                    }
-                });
-
-                //  Process a `Response`
-                thisScheduler.spawn({
-                    auto c = thisScheduler.newCondition(null);
-                    while (!terminate)
-                    {
-                        auto res = transceiver.res.receive();
-
-                        if (terminate)
-                            break;
-
-                        foreach (_; 0..10)
-                        {
-                            if (waitingManager.exist(res.id))
+                            case MessageType.request :
+                                if (!isSleeping())
+                                    handleReq(msg.req);
+                                else if (!control.drop)
+                                    await_req ~= msg.req;
                                 break;
-                            thisScheduler.wait(c, 10.msecs);
+
+                            case MessageType.response :
+                                foreach (_; 0..10)
+                                {
+                                    if (waitingManager.exist(msg.res.id))
+                                        break;
+                                    thisScheduler.wait(c, 10.msecs);
+                                }
+
+                                if (!isSleeping())
+                                    handleRes(msg.res);
+                                else if (!control.drop)
+                                    await_res ~= msg.res;
+                                break;
+
+                            case MessageType.filter :
+                                control.filter = msg.filter;
+                                break;
+
+                            case MessageType.time_command :
+                                control.sleep_until = Clock.currTime + msg.time.dur;
+                                control.drop = msg.time.drop;
+                                break;
+
+                            case MessageType.shutdown_command :
+                                terminate = true;
+                                break;
+
+                            default :
+                                assert(0, "Unexpected type: " ~ msg.tag);
                         }
-
-                        if (!isSleeping())
-                            handleRes(res);
-                        else if (!control.drop)
-                            await_res ~= res;
-
                         thisScheduler.yield();
                     }
+                    fiber_scheduler.stop();
                 });
 
-                //  Process a `Request` waiting by the command sleep().
+
+                //  Process waiting by the command sleep().
                 thisScheduler.spawn({
                     auto c = thisScheduler.newCondition(null);
                     while (!terminate)
@@ -512,38 +452,52 @@ private class Server (API)
                             await_req.each!(req => handleReq(req));
                             await_req.length = 0;
                             assumeSafeAppend(await_req);
-                        }
-                        thisScheduler.yield();
-                    }
-                });
 
-                //  Process a `Response` waiting by the command sleep().
-                thisScheduler.spawn({
-                    auto c = thisScheduler.newCondition(null);
-                    while (!terminate)
-                    {
-                        if (!isSleeping())
-                        {
                             await_res.each!(res => handleRes(res));
                             await_res.length = 0;
                             assumeSafeAppend(await_res);
+                            /*
+                            Request[] await_req_backup;
+                            await_req_backup ~= await_req;
+                            await_req.length = 0;
+                            assumeSafeAppend(await_req);
+                            foreach (ref req; await_req_backup)
+                            {
+                                handleReq(req);
+                                thisScheduler.yield();
+                                if (terminate)
+                                    break;
+                            }
+
+                            Response[] await_res_backup;
+                            await_res_backup ~= await_res;
+                            await_res.length = 0;
+                            assumeSafeAppend(await_res);
+                            foreach (ref res; await_res_backup)
+                            {
+                                handleRes(res);
+                                thisScheduler.yield();
+                                if (terminate)
+                                    break;
+                            }
+                            */
                         }
-                        thisScheduler.yield();
+                        thisScheduler.wait(c, 10.msecs);
                     }
                 });
 
-                thread_scheduler.notify(cond);
+                ThreadScheduler.instance.notify(cond);
             });
         });
 
         //  Wait for the node to be created.
-        thread_scheduler.wait(cond);
+        ThreadScheduler.instance.wait(cond);
 
         return transceiver;
     }
 
     /// Devices that can receive requests.
-    private ServerTransceiver _transceiver;
+    private Transceiver _transceiver;
 
 
     /***************************************************************************
@@ -551,12 +505,12 @@ private class Server (API)
         Create an instante of a `Server`
 
         Params:
-            transceiver = This is an instance of `ServerTransceiver` and
+            transceiver = This is an instance of `Transceiver` and
                 a device that can receive requests.
 
     ***************************************************************************/
 
-    public this (ServerTransceiver transceiver) @nogc pure nothrow
+    public this (Transceiver transceiver) @nogc pure nothrow
     {
         this._transceiver = transceiver;
     }
@@ -564,15 +518,15 @@ private class Server (API)
 
     /***************************************************************************
 
-        Returns the `ServerTransceiver`
+        Returns the `Transceiver`
 
         This can be useful for calling `geod24.concurrency.register` or similar.
-        Note that the `ServerTransceiver` should not be used directly,
+        Note that the `Transceiver` should not be used directly,
         as our event loop, would error out on an unknown message.
 
     ***************************************************************************/
 
-    @property public ServerTransceiver transceiver () @safe nothrow
+    @property public Transceiver transceiver () @safe nothrow
     {
         return this._transceiver;
     }
@@ -586,7 +540,7 @@ private class Server (API)
 
     public void shutdown () @trusted
     {
-        this._transceiver.send(Request(null, 0, SHUTDOWN_COMMAND));
+        this._transceiver.send(ShutdownCommand());
         this._transceiver.close();
     }
 }
@@ -601,7 +555,7 @@ private class Server (API)
 private class Client
 {
     /// Devices that can receive a response
-    private ClientTransceiver _transceiver;
+    private Transceiver _transceiver;
 
     /// After making the request, wait until the response comes,
     /// and find the response that suits the request.
@@ -616,7 +570,7 @@ private class Client
     /// Ctor
     public this (Duration timeout = Duration.init) @safe nothrow
     {
-        this._transceiver = new ClientTransceiver;
+        this._transceiver = new Transceiver;
         this._waitingManager = new WaitingManager();
         this._timeout = timeout;
     }
@@ -632,7 +586,7 @@ private class Client
 
     ***************************************************************************/
 
-    @property public ClientTransceiver transceiver () @safe nothrow
+    @property public Transceiver transceiver () @safe nothrow
     {
         return this._transceiver;
     }
@@ -643,13 +597,13 @@ private class Client
         This enables appropriate responses to requests through the API
 
         Params:
-           remote = Instance of ServerTransceiver
+           remote = Instance of Transceiver
            req = `Request`
            res = `Response`
 
     ***************************************************************************/
 
-    public Response router (ServerTransceiver remote, string method, string args) @trusted
+    public Response router (Transceiver remote, string method, string args) @trusted
     {
         Request req;
         Response res;
@@ -664,7 +618,7 @@ private class Client
         // from Non-Node to Node
         else
         {
-            auto scheduler = new LocalFiberScheduler();
+            auto scheduler = new FiberScheduler();
 
             scheduler.spawn({
                 req = Request(this.transceiver, this._waitingManager.getNextResponseId(), method, args);
@@ -676,21 +630,21 @@ private class Client
             scheduler.spawn({
                 while (!this._terminate)
                 {
-                    Response res = this._transceiver.res.receive();
+                    Message msg = this._transceiver.receive();
 
                     if (this._terminate)
                         break;
 
                     foreach (_; 0..10)
                     {
-                        if (this._waitingManager.exist(res.id))
+                        if (this._waitingManager.exist(msg.res.id))
                             break;
                         scheduler.wait(c, 1.msecs);
                     }
 
-                    this._waitingManager.pending = res;
-                    this._waitingManager.waiting[res.id].c.notify();
-                    this._waitingManager.remove(res.id);
+                    this._waitingManager.pending = msg.res;
+                    this._waitingManager.waiting[msg.res.id].c.notify();
+                    this._waitingManager.remove(msg.res.id);
                 }
             });
 
@@ -702,6 +656,7 @@ private class Client
 
         return res;
     }
+
 
     /***************************************************************************
 
@@ -781,7 +736,7 @@ public class RemoteAPI (API) : API
         nodes and then start to process request.
         In order to have a connected network, no nodes in any thread should have
         a different reference to the same node.
-        In practice, this means there should only be one `ServerTransceiver`
+        In practice, this means there should only be one `Transceiver`
         per "address".
 
         Note:
@@ -808,7 +763,7 @@ public class RemoteAPI (API) : API
     }
 
     /// A device that can requests.
-    private ServerTransceiver _server_transceiver;
+    private Transceiver _server_transceiver;
 
     /// Request to the `Server`, receive a response
     private Client _client;
@@ -825,12 +780,12 @@ public class RemoteAPI (API) : API
         In order to instantiate a node, see the static `spawn` function.
 
         Params:
-            transceiver = `ServerTransceiver` of the node.
+            transceiver = `Transceiver` of the node.
             timeout = any timeout to use
 
     ***************************************************************************/
 
-    public this (ServerTransceiver transceiver, Duration timeout = Duration.init) @safe nothrow
+    public this (Transceiver transceiver, Duration timeout = Duration.init) @safe nothrow
     {
         this._server_transceiver = transceiver;
         this._client = new Client(timeout);
@@ -856,11 +811,11 @@ public class RemoteAPI (API) : API
 
         /***********************************************************************
 
-            Returns the `ServerTransceiver`
+            Returns the `Transceiver`
 
         ***********************************************************************/
 
-        @property public ServerTransceiver transceiver () @safe nothrow
+        @property public Transceiver transceiver () @safe nothrow
         {
             return this._server_transceiver;
         }
@@ -874,7 +829,7 @@ public class RemoteAPI (API) : API
 
         public void shutdown () @trusted
         {
-            this._server_transceiver.send(Request(null, 0, SHUTDOWN_COMMAND));
+            this._server_transceiver.send(ShutdownCommand());
             this._server_transceiver.close();
             this._client.shutdown();
         }
@@ -1026,6 +981,8 @@ public class RemoteAPI (API) : API
         }
 }
 
+import std.stdio;
+
 /// Simple usage example
 unittest
 {
@@ -1054,6 +1011,8 @@ unittest
     scope test = RemoteAPI!API.spawn!MockAPI();
     assert(test.pubkey() == 42);
     test.ctrl.shutdown();
+
+    writefln("test01");
 }
 
 /// In a real world usage, users will most likely need to use the registry
@@ -1122,36 +1081,33 @@ unittest
     auto node2 = factory("byzantine", 2);
 
     auto chan = new Channel!int;
-    auto thread_scheduler = ThreadScheduler.instance;
-    thread_scheduler.spawn({
-        auto fiber_scheduler = new LocalFiberScheduler();
+
+    auto cond = ThreadScheduler.instance.newCondition(null);
+    ThreadScheduler.instance.spawn({
+        auto fiber_scheduler = new FiberScheduler();
         fiber_scheduler.start({
-            fiber_scheduler.spawn({
-                auto node1 = factory("this does not matter", 1);
-                auto node2 = factory("neither does this", 2);
+            auto node1 = factory("this does not matter", 1);
+            auto node2 = factory("neither does this", 2);
 
-                assert(node1.pubkey() == 42);
-                assert(node1.last() == "pubkey");
-                assert(node2.pubkey() == 0);
-                assert(node2.last() == "pubkey");
+            assert(node1.pubkey() == 42);
+            assert(node1.last() == "pubkey");
+            assert(node2.pubkey() == 0);
+            assert(node2.last() == "pubkey");
 
-                node1.recv(42, Json.init);
-                assert(node1.last() == "recv@2");
-                node1.recv(Json.init);
-                assert(node1.last() == "recv@1");
-                assert(node2.last() == "pubkey");
+            node1.recv(42, Json.init);
+            assert(node1.last() == "recv@2");
+            node1.recv(Json.init);
+            assert(node1.last() == "recv@1");
+            assert(node2.last() == "pubkey");
 
-                node1.ctrl.shutdown();
-                node2.ctrl.shutdown();
+            node1.ctrl.shutdown();
+            node2.ctrl.shutdown();
 
-                chan.send(42);
-            });
-            fiber_scheduler.spawn({
-                auto result = chan.receive();
-                assert(result == 42);
-            });
+            ThreadScheduler.instance.notify(cond);
         });
     });
+    //  Wait for the node to be created.
+    ThreadScheduler.instance.wait(cond);
 }
 
 /// This network have different types of nodes in it
@@ -1186,7 +1142,7 @@ unittest
     static class SlaveNode : API
     {
         @safe:
-        this(ServerTransceiver masterTransceiver)
+        this(Transceiver masterTransceiver)
         {
             this.master = new RemoteAPI!API(masterTransceiver);
         }
@@ -1230,6 +1186,7 @@ unittest
     assert(nodes[0].requests() == 7);
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
+    writefln("test03");
 }
 
 /// Support for circular nodes call
@@ -1238,7 +1195,7 @@ unittest
     import geod24.concurrency;
     import std.format;
 
-    __gshared ServerTransceiver[string] tbn;
+    __gshared Transceiver[string] tbn;
 
     static interface API
     {
@@ -1282,6 +1239,7 @@ unittest
 
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
+    writefln("test04");
 }
 
 /// Nodes can start tasks
@@ -1308,6 +1266,8 @@ unittest
         public override void stop ()
         {
             terminate = true;
+            while (!stoped)
+                sleep(10.msecs);
         }
 
         public override ulong getCounter ()
@@ -1318,15 +1278,18 @@ unittest
 
         private void task ()
         {
+            stoped = false;
             while (!terminate)
             {
                 this.counter++;
                 sleep(50.msecs);
             }
+            stoped = true;
         }
 
         private ulong counter;
         private bool terminate;
+        private bool stoped;
     }
 
     import std.format;
@@ -1342,6 +1305,7 @@ unittest
     assert(node.getCounter() == 0);
     node.stop();
     node.ctrl.shutdown();
+    writefln("test05");
 }
 
 // Sane name insurance policy
@@ -1362,19 +1326,20 @@ unittest
     auto node = RemoteAPI!API.spawn!Node();
     assert(node.transceiver == 42);
     assert(node.ctrl.transceiver !is null);
+    node.ctrl.shutdown();
 
     static interface DoesntWork
     {
         public string ctrl ();
     }
     static assert(!is(typeof(RemoteAPI!DoesntWork)));
-    node.ctrl.shutdown();
+    writefln("test06");
 }
 
 // Simulate temporary outage
 unittest
 {
-    __gshared ServerTransceiver n1transceive;
+    __gshared Transceiver n1transceive;
 
     static interface API
     {
@@ -1395,10 +1360,12 @@ unittest
         RemoteAPI!API remote;
     }
 
+    writefln("test07-1");
     auto n1 = RemoteAPI!API.spawn!Node();
     n1transceive = n1.ctrl.transceiver;
     auto n2 = RemoteAPI!API.spawn!Node();
 
+    writefln("test07-2");
     /// Make sure calls are *relatively* efficient
     auto current1 = MonoTime.currTime();
     assert(1 == n1.call());
@@ -1406,6 +1373,7 @@ unittest
     auto current2 = MonoTime.currTime();
     assert(current2 - current1 < 200.msecs);
 
+    writefln("test07-3");
     // Make one of the node sleep
     n1.sleep(1.seconds);
     // Make sure our main thread is not suspended,
@@ -1414,12 +1382,14 @@ unittest
     auto current3 = MonoTime.currTime();
     assert(current3 - current2 < 400.msecs);
 
+    writefln("test07-4");
     // Wait for n1 to unblock
     assert(2 == n1.call());
     // Check current time >= 1 second
     auto current4 = MonoTime.currTime();
     assert(current4 - current2 >= 1.seconds);
 
+    writefln("test07-5");
     // Now drop many messages
     n1.sleep(1.seconds, true);
     for (size_t i = 0; i < 500; i++)
@@ -1428,6 +1398,7 @@ unittest
     Thread.sleep(1.seconds);
     assert(3 == n1.call());
 
+    writefln("test07-6");
     // Debug output, uncomment if needed
     version (none)
     {
@@ -1437,14 +1408,16 @@ unittest
         writeln("Delta since sleep: ", current4 - current2);
     }
 
+    writefln("test07-7");
     n1.ctrl.shutdown();
     n2.ctrl.shutdown();
+    writefln("test07");
 }
 
 // Filter commands
 unittest
 {
-    __gshared ServerTransceiver node_tid;
+    __gshared Transceiver node_tid;
 
     static interface API
     {
@@ -1578,6 +1551,7 @@ unittest
 
     filtered.ctrl.shutdown();
     caller.ctrl.shutdown();
+    writefln("test08");
 }
 
 // request timeouts (from main thread)
@@ -1617,6 +1591,7 @@ unittest
     Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
+    writefln("test09");
 }
 
 // test-case for responses to re-used requests (from main thread)
@@ -1661,6 +1636,7 @@ unittest
 
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
+    writefln("test10");
 }
 
 // request timeouts (foreign node to another node)
@@ -1669,7 +1645,7 @@ unittest
     import geod24.Transceiver;
     import std.exception;
 
-    __gshared ServerTransceiver node_transceiver;
+    __gshared Transceiver node_transceiver;
 
     static interface API
     {
@@ -1699,8 +1675,10 @@ unittest
     auto node_2 = RemoteAPI!API.spawn!Node();
     node_transceiver = node_2.ctrl.transceiver;
     node_1.check();
+    Thread.sleep(3000.msecs);
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
+    writefln("test11");
 }
 
 // test-case for zombie responses
@@ -1709,7 +1687,7 @@ unittest
     import geod24.Transceiver;
     import std.exception;
 
-    __gshared ServerTransceiver node_transceiver;
+    __gshared Transceiver node_transceiver;
 
     static interface API
     {
@@ -1741,8 +1719,10 @@ unittest
     auto node_2 = RemoteAPI!API.spawn!Node();
     node_transceiver = node_2.ctrl.transceiver;
     node_1.check();
+    Thread.sleep(3000.msecs);
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
+    writefln("test12");
 }
 
 // request timeouts with dropped messages
@@ -1751,7 +1731,7 @@ unittest
     import geod24.Transceiver;
     import std.exception;
 
-    __gshared ServerTransceiver node_transceiver;
+    __gshared Transceiver node_transceiver;
 
     static interface API
     {
@@ -1780,6 +1760,7 @@ unittest
     node_1.check();
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
+    writefln("test13");
 }
 
 // Test a node that gets a replay while it's delayed
@@ -1788,7 +1769,7 @@ unittest
     import geod24.Transceiver;
     import std.exception;
 
-    __gshared ServerTransceiver node_transceiver;
+    __gshared Transceiver node_transceiver;
 
     static interface API
     {
@@ -1821,6 +1802,7 @@ unittest
     assert(node_1.ping() == 42);
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
+    writefln("test14");
 }
 
 // Test explicit shutdown
@@ -1854,4 +1836,5 @@ unittest
     {
         assert(ex.msg == `"Request timed-out"`);
     }
+    writefln("test15");
 }
