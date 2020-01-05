@@ -43,9 +43,6 @@ public enum Status
     /// Request timed-out
     Timeout,
 
-    /// Request Dropped
-    Dropped,
-
     /// Request succeeded
     Success
 };
@@ -129,7 +126,7 @@ static struct Message
 
 *******************************************************************************/
 
-public class Transceiver
+public class Transceiver : InfoObject
 {
     /// Channel of Request
     public Channel!Message chan;
@@ -270,6 +267,12 @@ public class Transceiver
         import std.format : formattedWrite;
         formattedWrite(sink, "TR(%x)", cast(void*) chan);
     }
+
+
+    public void cleanup ()
+    {
+        this.close();
+    }
 }
 
 
@@ -296,5 +299,5 @@ public @property Transceiver thisTransceiver () nothrow
 
 public @property void thisTransceiver (Transceiver value) nothrow
 {
-    thisInfo.objectValues["Transceiver"] = cast(Object)value;
+    thisInfo.objectValues["Transceiver"] = cast(InfoObject)value;
 }

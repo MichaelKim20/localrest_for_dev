@@ -48,6 +48,12 @@ import core.sync.condition;
 import core.sync.mutex;
 import core.thread;
 
+
+public interface InfoObject
+{
+    void cleanup ();
+}
+
 /*******************************************************************************
 
     Encapsulates all implementation-level data needed for scheduling.
@@ -61,7 +67,7 @@ import core.thread;
 public struct ThreadInfo
 {
     ///
-    public Object[string] objectValues;
+    public InfoObject[string] objectValues;
 
     /***************************************************************************
 
@@ -91,7 +97,8 @@ public struct ThreadInfo
 
     public void cleanup ()
     {
-
+        //foreach (ref info_object; objectValues)
+        //    info_object.cleanup();
     }
 }
 
@@ -298,7 +305,7 @@ interface Scheduler
 
 *******************************************************************************/
 
-public class ThreadScheduler : Scheduler
+public class ThreadScheduler : Scheduler, InfoObject
 {
     /// For Condition
     private Mutex mutex;
@@ -502,6 +509,11 @@ public class ThreadScheduler : Scheduler
 
         c.notifyAll();
     }
+
+    public void cleanup ()
+    {
+        stop();
+    }
 }
 
 /*******************************************************************************
@@ -513,7 +525,7 @@ public class ThreadScheduler : Scheduler
 
 *******************************************************************************/
 
-class FiberScheduler : Scheduler
+class FiberScheduler : Scheduler, InfoObject
 {
     private shared(bool) terminated;
     private shared(MonoTime) terminated_time;
@@ -606,6 +618,12 @@ class FiberScheduler : Scheduler
     Condition newCondition (Mutex m) nothrow
     {
         return new FiberCondition(m);
+    }
+
+
+    public void cleanup ()
+    {
+        this.stop();
     }
 
 
@@ -904,7 +922,7 @@ public @property Scheduler thisScheduler () nothrow
 
 public @property void thisScheduler (Scheduler value) nothrow
 {
-    thisInfo.objectValues["scheduler"] = cast(Object)value;
+    thisInfo.objectValues["scheduler"] = cast(InfoObject)value;
 }
 
 
