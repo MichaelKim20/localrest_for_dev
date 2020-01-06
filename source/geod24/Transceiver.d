@@ -144,19 +144,14 @@ public class Transceiver : InfoObject
     ***************************************************************************/
 
     public void send (Message msg) @trusted
+    in
     {
-        if (thisScheduler !is null)
-            this.chan.send(msg);
-        else
-        {
-            auto fiber_scheduler = new FiberScheduler();
-            auto condition = fiber_scheduler.newCondition(null);
-            fiber_scheduler.start({
-                this.chan.send(msg);
-                condition.notify();
-            });
-            condition.wait();
-        }
+        assert(thisScheduler !is null,
+            "Cannot get a message until a scheduler was created ");
+    }
+    do
+    {
+        this.chan.send(msg);
     }
 
     /***************************************************************************
@@ -226,21 +221,14 @@ public class Transceiver : InfoObject
     ***************************************************************************/
 
     public Message receive () @trusted
+    in
     {
-        if (thisScheduler !is null)
-            return this.chan.receive();
-        else
-        {
-            Message msg;
-            auto fiber_scheduler = new FiberScheduler();
-            auto condition = fiber_scheduler.newCondition(null);
-            fiber_scheduler.start({
-                msg = this.chan.receive();
-                condition.notify();
-            });
-            condition.wait();
-            return msg;
-        }
+        assert(thisScheduler !is null,
+            "Cannot get a message until a scheduler was created ");
+    }
+    do
+    {
+        return this.chan.receive();
     }
 
 
@@ -269,7 +257,7 @@ public class Transceiver : InfoObject
     }
 
 
-    public void cleanup ()
+    public void cleanup (bool root)
     {
         this.close();
     }
