@@ -149,6 +149,9 @@ private class WaitingManager : InfoObject
             ptr.busy = true;
 
             if (duration == Duration.init)
+                duration = 3.seconds;
+
+            if (duration == Duration.init)
                 ptr.c.wait();
             else if (!ptr.c.wait(duration))
                 this.pending = Response(Status.Timeout, id, "");
@@ -1061,8 +1064,8 @@ unittest
     test.ctrl.shutdown();
 
     writefln("test01");
-    thisInfo.cleanup(true);
-    ThreadScheduler.instance.joinAll();
+    //thisInfo.cleanup(true);
+    ThreadScheduler.instance.cleanup();
 }
 
 /// In a real world usage, users will most likely need to use the registry
@@ -1152,8 +1155,8 @@ unittest
     node1.ctrl.shutdown();
     node2.ctrl.shutdown();
     writefln("test02");
-    thisInfo.cleanup(true);
-    ThreadScheduler.instance.joinAll();
+    //thisInfo.cleanup(true);
+    ThreadScheduler.instance.cleanup();
 }
 
 /// This network have different types of nodes in it
@@ -1235,8 +1238,8 @@ unittest
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
     writefln("test03");
-    thisInfo.cleanup(true);
-    ThreadScheduler.instance.joinAll();
+    //thisInfo.cleanup(true);
+    ThreadScheduler.instance.cleanup();
 }
 
 /// Support for circular nodes call
@@ -1291,8 +1294,8 @@ unittest
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
     writefln("test04");
-    thisInfo.cleanup(true);
-    ThreadScheduler.instance.joinAll();
+    //thisInfo.cleanup(true);
+    ThreadScheduler.instance.cleanup();
 }
 
 /// Nodes can start tasks
@@ -1305,6 +1308,7 @@ unittest
     static interface API
     {
         public void start ();
+        public void stop ();
         public ulong getCounter ();
     }
 
@@ -1312,7 +1316,13 @@ unittest
     {
         public override void start ()
         {
+            terminate = false;
             runTask(&this.task);
+        }
+
+        public override void stop ()
+        {
+            terminate = true;
         }
 
         public override ulong getCounter ()
@@ -1323,7 +1333,7 @@ unittest
 
         private void task ()
         {
-            while (true)
+            while (!terminate)
             {
                 this.counter++;
                 sleep(50.msecs);
@@ -1331,6 +1341,7 @@ unittest
         }
 
         private ulong counter;
+        private bool terminate;
     }
 
     import std.format;
@@ -1344,12 +1355,13 @@ unittest
     // (e.g. Travis Mac testers) so be safe
     assert(node.getCounter() >= 9);
     assert(node.getCounter() == 0);
-
+    node.stop();
+    core.thread.Thread.sleep(100.msecs);
     node.ctrl.shutdown();
     writefln("test05");
 
-    thisInfo.cleanup(true);
-    ThreadScheduler.instance.joinAll();
+    //thisInfo.cleanup(true);
+    ThreadScheduler.instance.cleanup();
 }
 
 // Sane name insurance policy
@@ -1379,8 +1391,8 @@ unittest
     }
     static assert(!is(typeof(RemoteAPI!DoesntWork)));
     writefln("test06");
-    thisInfo.cleanup(true);
-    ThreadScheduler.instance.joinAll();
+    //thisInfo.cleanup(true);
+    ThreadScheduler.instance.cleanup();
 }
 
 // Simulate temporary outage
@@ -1435,7 +1447,7 @@ unittest
 
     // Now drop many messages
     n1.sleep(1.seconds, true);
-    for (size_t i = 0; i < 100; i++)
+    //for (size_t i = 0; i < 100; i++)
         n2.asyncCall();
     // Make sure we don't end up blocked forever
     Thread.sleep(1.seconds);
@@ -1453,8 +1465,8 @@ unittest
     n1.ctrl.shutdown();
     n2.ctrl.shutdown();
     writefln("test07");
-    thisInfo.cleanup(true);
-    ThreadScheduler.instance.joinAll();
+    //thisInfo.cleanup(true);
+    ThreadScheduler.instance.cleanup();
 }
 
 // Filter commands
@@ -1596,8 +1608,8 @@ unittest
     filtered.ctrl.shutdown();
     caller.ctrl.shutdown();
     writefln("test08");
-    thisInfo.cleanup(true);
-    ThreadScheduler.instance.joinAll();
+    //thisInfo.cleanup(true);
+    ThreadScheduler.instance.cleanup();
 }
 
 // request timeouts (from main thread)
@@ -1639,8 +1651,8 @@ unittest
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
     writefln("test09");
-    thisInfo.cleanup(true);
-    ThreadScheduler.instance.joinAll();
+    //thisInfo.cleanup(true);
+    ThreadScheduler.instance.cleanup();
 }
 
 // test-case for responses to re-used requests (from main thread)
@@ -1687,8 +1699,8 @@ unittest
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
     writefln("test10");
-    thisInfo.cleanup(true);
-    ThreadScheduler.instance.joinAll();
+    //thisInfo.cleanup(true);
+    ThreadScheduler.instance.cleanup();
 }
 
 // request timeouts (foreign node to another node)
@@ -1732,8 +1744,8 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
     writefln("test11");
-    thisInfo.cleanup(true);
-    ThreadScheduler.instance.joinAll();
+    //thisInfo.cleanup(true);
+    ThreadScheduler.instance.cleanup();
 }
 
 // test-case for zombie responses
@@ -1779,8 +1791,8 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
     writefln("test12");
-    thisInfo.cleanup(true);
-    ThreadScheduler.instance.joinAll();
+    //thisInfo.cleanup(true);
+    ThreadScheduler.instance.cleanup();
 }
 
 // request timeouts with dropped messages
@@ -1821,8 +1833,8 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
     writefln("test13");
-    thisInfo.cleanup(true);
-    ThreadScheduler.instance.joinAll();
+    //thisInfo.cleanup(true);
+    ThreadScheduler.instance.cleanup();
 }
 
 // Test a node that gets a replay while it's delayed
@@ -1866,8 +1878,8 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
     writefln("test14");
-    thisInfo.cleanup(true);
-    ThreadScheduler.instance.joinAll();
+    //thisInfo.cleanup(true);
+    ThreadScheduler.instance.cleanup();
 }
 
 // Test explicit shutdown
@@ -1903,6 +1915,6 @@ unittest
         assert(ex.msg == `"Request timed-out"`);
     }
     writefln("test15");
-    thisInfo.cleanup(true);
-    ThreadScheduler.instance.joinAll();
+    //thisInfo.cleanup(true);
+    ThreadScheduler.instance.cleanup();
 }

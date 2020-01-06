@@ -109,7 +109,6 @@ public @property ref ThreadInfo thisInfo () nothrow
     return ThreadInfo.thisInfo;
 }
 
-
 static ~this ()
 {
     thisInfo.cleanup(true);
@@ -596,9 +595,9 @@ public class ThreadScheduler : Scheduler, InfoObject
     public void cleanup ()
     {
         writefln("Thread count  %s", this.m_all.length);
-        //synchronized(this)
+        synchronized(this)
         {
-            while (this.m_all.length > 0)
+            if (this.m_all.length > 0)
             {
                 foreach (ref infors; this.m_threadInfos)
                 {
