@@ -149,9 +149,6 @@ private class WaitingManager : InfoObject
             ptr.busy = true;
 
             if (duration == Duration.init)
-                duration = 3.seconds;
-
-            if (duration == Duration.init)
                 ptr.c.wait();
             else if (!ptr.c.wait(duration))
                 this.pending = Response(Status.Timeout, id, "");
@@ -420,6 +417,8 @@ private class Server (API)
 
             void handleReq (Request req)
             {
+                if (thisScheduler is null)
+                    return;
                 thisScheduler.spawn(() {
                     handleRequest(req, node, control.filter);
                 });
@@ -427,15 +426,18 @@ private class Server (API)
 
             void handleRes (Response res)
             {
-                waitingManager.pending = res;
-                waitingManager.waiting[res.id].c.notify();
-                waitingManager.remove(res.id);
+                if (thisScheduler !is null)
+                {
+                    waitingManager.pending = res;
+                    waitingManager.waiting[res.id].c.notify();
+                    waitingManager.remove(res.id);
+                }
             }
 
             Request[] await_req;
             Response[] await_res;
-
             thisScheduler.start({
+                (cast(FiberScheduler)thisScheduler).name = "server";
                 thisTransceiver = transceiver;
                 thisWaitingManager = waitingManager;
                 thisThreadInfoEx = infoEx;
@@ -444,7 +446,6 @@ private class Server (API)
 
                 Message msg;
                 thisScheduler.spawn({
-                    //writefln("Server.spawned 1, B");
                     auto c = thisScheduler.newCondition(null);
                     while (!terminate)
                     {
@@ -467,7 +468,8 @@ private class Server (API)
                                 {
                                     if (waitingManager.exist(msg.res.id))
                                         break;
-                                    thisScheduler.wait(c, 10.msecs);
+                                    if (thisScheduler !is null)
+                                        thisScheduler.wait(c, 10.msecs);
                                 }
 
                                 if (!isSleeping())
@@ -492,16 +494,15 @@ private class Server (API)
                             default :
                                 assert(0, "Unexpected type: " ~ msg.tag);
                         }
-                        thisScheduler.yield();
+                        if (thisScheduler !is null)
+                            thisScheduler.yield();
                     }
-                    //writefln("Server.spawned 1, E");
                 });
 
 
                 //  Process waiting by the command sleep().
                 thisScheduler.spawn({
                     auto c = thisScheduler.newCondition(null);
-                    //writefln("Server.spawned 2, B");
                     while (!terminate)
                     {
                         if (!isSleeping())
@@ -514,10 +515,9 @@ private class Server (API)
                             await_res.length = 0;
                             assumeSafeAppend(await_res);
                         }
-                        //thisScheduler.wait(c, 10.msecs);
-                        thisScheduler.yield();
+                        if (thisScheduler !is null)
+                            thisScheduler.yield();
                     }
-                    //writefln("Server.spawned 2, E");
                 });
 
                 ThreadScheduler.instance.notify(cond);
@@ -645,17 +645,18 @@ private class Client
         // from Node to Node
         if ((thisThreadInfoEx !is null) && (thisThreadInfoEx.is_node))
         {
-            //writefln("Client.router 1, B");
             req = Request(thisTransceiver, thisWaitingManager.getNextResponseId(), method, args);
             remote.send(req);
             res = thisWaitingManager.waitResponse(req.id, this._timeout);
-            //writefln("Client.router 1, E");
         }
         // from Non-Node to Node
         else
         {
             if (thisScheduler is null)
+            {
                 thisScheduler = new FiberScheduler();
+                (cast(FiberScheduler)thisScheduler).name = "main";
+            }
 
             thisScheduler.spawn({
                 req = Request(this.transceiver, this._waitingManager.getNextResponseId(), method, args);
@@ -665,7 +666,6 @@ private class Client
             this._terminate = false;
             auto c = thisScheduler.newCondition(null);
             thisScheduler.spawn({
-                //writefln("Client.router 2, B");
                 while (!this._terminate)
                 {
                     Message msg = this._transceiver.receive();
@@ -677,21 +677,22 @@ private class Client
                     {
                         if (this._waitingManager.exist(msg.res.id))
                             break;
-                        thisScheduler.wait(c, 1.msecs);
+                        if (thisScheduler !is null)
+                            thisScheduler.wait(c, 1.msecs);
                     }
 
-                    this._waitingManager.pending = msg.res;
-                    this._waitingManager.waiting[msg.res.id].c.notify();
-                    this._waitingManager.remove(msg.res.id);
+                    if (thisScheduler !is null)
+                    {
+                        this._waitingManager.pending = msg.res;
+                        this._waitingManager.waiting[msg.res.id].c.notify();
+                        this._waitingManager.remove(msg.res.id);
+                    }
                 }
-                //writefln("Client.router 2, E");
             });
 
             thisScheduler.start({
-                //writefln("Client.router 3, B");
                 res = this._waitingManager.waitResponse(req.id, this._timeout);
                 this._terminate = true;
-                //writefln("Client.router 3, E");
             });
         }
 
@@ -1064,8 +1065,8 @@ unittest
     test.ctrl.shutdown();
 
     writefln("test01");
-    //thisInfo.cleanup(true);
-    ThreadScheduler.instance.cleanup();
+
+    cleanupAllThread();
 }
 
 /// In a real world usage, users will most likely need to use the registry
@@ -1155,8 +1156,8 @@ unittest
     node1.ctrl.shutdown();
     node2.ctrl.shutdown();
     writefln("test02");
-    //thisInfo.cleanup(true);
-    ThreadScheduler.instance.cleanup();
+
+    cleanupAllThread();
 }
 
 /// This network have different types of nodes in it
@@ -1238,10 +1239,13 @@ unittest
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
     writefln("test03");
-    //thisInfo.cleanup(true);
-    ThreadScheduler.instance.cleanup();
+
+    //joinAllThread();
+
+    cleanupAllThread();
 }
 
+/*
 /// Support for circular nodes call
 unittest
 {
@@ -1294,8 +1298,8 @@ unittest
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
     writefln("test04");
-    //thisInfo.cleanup(true);
-    ThreadScheduler.instance.cleanup();
+
+    cleanupAllThread();
 }
 
 /// Nodes can start tasks
@@ -1360,8 +1364,7 @@ unittest
     node.ctrl.shutdown();
     writefln("test05");
 
-    //thisInfo.cleanup(true);
-    ThreadScheduler.instance.cleanup();
+    cleanupAllThread();
 }
 
 // Sane name insurance policy
@@ -1391,10 +1394,11 @@ unittest
     }
     static assert(!is(typeof(RemoteAPI!DoesntWork)));
     writefln("test06");
-    //thisInfo.cleanup(true);
-    ThreadScheduler.instance.cleanup();
-}
 
+    cleanupAllThread();
+}
+*/
+/*
 // Simulate temporary outage
 unittest
 {
@@ -1411,7 +1415,7 @@ unittest
         public this()
         {
             if (n1transceive !is null)
-                this.remote = new RemoteAPI!API(n1transceive);
+                this.remote = new RemoteAPI!API(n1transceive, 1.seconds);
         }
 
         public override ulong call () { return ++this.count; }
@@ -1465,8 +1469,8 @@ unittest
     n1.ctrl.shutdown();
     n2.ctrl.shutdown();
     writefln("test07");
-    //thisInfo.cleanup(true);
-    ThreadScheduler.instance.cleanup();
+
+    cleanupAllThread();
 }
 
 // Filter commands
@@ -1608,10 +1612,11 @@ unittest
     filtered.ctrl.shutdown();
     caller.ctrl.shutdown();
     writefln("test08");
-    //thisInfo.cleanup(true);
-    ThreadScheduler.instance.cleanup();
-}
 
+    cleanupAllThread();
+}
+*/
+/*
 // request timeouts (from main thread)
 unittest
 {
@@ -1651,10 +1656,11 @@ unittest
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
     writefln("test09");
-    //thisInfo.cleanup(true);
-    ThreadScheduler.instance.cleanup();
-}
 
+    cleanupAllThread();
+}
+*/
+/*
 // test-case for responses to re-used requests (from main thread)
 unittest
 {
@@ -1699,8 +1705,8 @@ unittest
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
     writefln("test10");
-    //thisInfo.cleanup(true);
-    ThreadScheduler.instance.cleanup();
+
+    cleanupAllThread();
 }
 
 // request timeouts (foreign node to another node)
@@ -1744,10 +1750,11 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
     writefln("test11");
-    //thisInfo.cleanup(true);
-    ThreadScheduler.instance.cleanup();
-}
 
+    cleanupAllThread();
+}
+*/
+/*
 // test-case for zombie responses
 unittest
 {
@@ -1791,10 +1798,11 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
     writefln("test12");
-    //thisInfo.cleanup(true);
-    ThreadScheduler.instance.cleanup();
-}
 
+    cleanupAllThread();
+}
+*/
+/*
 // request timeouts with dropped messages
 unittest
 {
@@ -1833,8 +1841,8 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
     writefln("test13");
-    //thisInfo.cleanup(true);
-    ThreadScheduler.instance.cleanup();
+
+    cleanupAllThread();
 }
 
 // Test a node that gets a replay while it's delayed
@@ -1878,8 +1886,8 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
     writefln("test14");
-    //thisInfo.cleanup(true);
-    ThreadScheduler.instance.cleanup();
+
+    cleanupAllThread();
 }
 
 // Test explicit shutdown
@@ -1915,6 +1923,7 @@ unittest
         assert(ex.msg == `"Request timed-out"`);
     }
     writefln("test15");
-    //thisInfo.cleanup(true);
-    ThreadScheduler.instance.cleanup();
+
+    cleanupAllThread();
 }
+*/
