@@ -117,9 +117,9 @@ public @property ref ThreadInfo thisInfo () nothrow
 
 static ~this ()
 {
-    //import std.process;
-    //writefln("static ~this %s", thisThreadID);
-    //thisInfo.cleanup(true);
+    import std.process;
+    writefln("static ~this %s", thisThreadID);
+    thisInfo.cleanup(true);
 }
 
 /*******************************************************************************
@@ -176,7 +176,7 @@ interface Scheduler
 
     ***************************************************************************/
 
-    void start (void delegate() op);
+    void start (string name, void delegate() op);
 
 
     /***************************************************************************
@@ -201,7 +201,7 @@ interface Scheduler
 
     ***************************************************************************/
 
-    void spawn (void delegate() op);
+    void spawn (string name, void delegate() op);
 
 
     /***************************************************************************
@@ -347,7 +347,7 @@ public class ThreadScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void start (void delegate () op)
+    void start (string name, void delegate () op)
     {
         op();
     }
@@ -371,7 +371,7 @@ public class ThreadScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void spawn (void delegate () op)
+    void spawn (string name, void delegate () op)
     {
         auto t = new Thread({
             scope (exit) {
@@ -566,28 +566,60 @@ public class ThreadScheduler : Scheduler, InfoObject
             }
         }
     }
+
     public void cleanupAllThread ()
     {
+        /*
         synchronized(this)
         {
             writefln("Thread count %d", this.m_threadInfos.length);
             if (this.m_threadInfos.length > 0)
             {
+                FiberScheduler sche;
                 foreach (ref treadInfo; this.m_threadInfos)
+                {
+                    if (auto p = "scheduler" in treadInfo.objectValues)
+                    {
+                        sche = cast(FiberScheduler)(*p);
+                        sche.writeFiberName();
+                    }
                     treadInfo.cleanup(true);
+                }
 
                 Thread.sleep(3.seconds);
             }
             writefln("Thread count %d", this.m_threadInfos.length);
         }
         thisInfo.cleanup(true);
+        */
+        /*
+        synchronized(this)
+        {
+            writefln("Thread count %d", this.m_threadInfos.length);
+            if (this.m_threadInfos.length > 0)
+            {
+                FiberScheduler sche;
+                foreach (ref treadInfo; this.m_threadInfos)
+                {
+                    if (auto p = "scheduler" in treadInfo.objectValues)
+                    {
+                        sche = cast(FiberScheduler)(*p);
+                        sche.writeFiberName();
+                    }
+                }
+            }
+            writefln("Thread count %d", this.m_threadInfos.length);
+        }
+        */
     }
 }
+
 
 public void joinAllThread ()
 {
     ThreadScheduler.instance.joinAll();
 }
+
 
 public void cleanupAllThread ()
 {
@@ -615,11 +647,11 @@ class FiberScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void start (void delegate () op)
+    void start (string name, void delegate () op)
     {
         if (terminated)
             return;
-        create(op);
+        create(name, op);
         dispatch();
     }
 
@@ -634,6 +666,7 @@ class FiberScheduler : Scheduler, InfoObject
     {
         terminated = true;
         terminated_time = MonoTime.currTime;
+        //writeFiberName();
     }
 
 
@@ -644,11 +677,11 @@ class FiberScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void spawn (void delegate() op) nothrow
+    void spawn (string name, void delegate() op) nothrow
     {
         if (terminated)
             return;
-        create(op);
+        create(name, op);
         yield();
     }
 
@@ -706,6 +739,7 @@ class FiberScheduler : Scheduler, InfoObject
     {
         if (terminated)
             return;
+
         if (root)
         {
             this.stop();
@@ -819,7 +853,7 @@ protected:
 
     ***************************************************************************/
 
-    void create (void delegate() op) nothrow
+    void create (string name, void delegate() op) nothrow
     {
         auto owner_scheduler = this;
         auto owner_objects = thisInfo.objectValues;
@@ -840,7 +874,7 @@ protected:
             op();
         }
 
-        m_fibers ~= new InfoFiber(&wrap);
+        m_fibers ~= new InfoFiber(name, &wrap);
     }
 
 
@@ -853,14 +887,17 @@ protected:
     static class InfoFiber : Fiber
     {
         ThreadInfo info;
+        public string name;
 
-        this (void delegate () op) nothrow
+        this (string name, void delegate () op) nothrow
         {
+            this.name = name;
             super(op);
         }
 
-        this (void delegate () op, size_t sz) nothrow
+        this (string name, void delegate () op, size_t sz) nothrow
         {
+            this.name = name;
             super (op, sz);
         }
     }
@@ -986,12 +1023,19 @@ private:
             if (m_fibers.length == 0)
                 done = true;
 
-            if (terminated)  {
-                //done = true;
-            }
+            if (terminated)
+                done = true;
             //writefln("m_fibers count %s %s", name, m_fibers.length);
         }
-
+    }
+    void writeFiberName ()
+    {
+        writefln("writeFiberName");
+        writefln("m_fibers count %s %s", name, m_fibers.length);
+        for (int idx = 0; idx < this.m_fibers.length; idx++)
+        {
+            writefln("Fiber Name : %s", (cast(InfoFiber)(this.m_fibers[idx])).name);
+        }
     }
 
 private:
@@ -999,16 +1043,21 @@ private:
     size_t m_pos;
 
     bool[FiberCondition] m_waiting;
+
 public:
+
     string name;
+
     public void addWaiting (FiberCondition c) nothrow
     {
         m_waiting[c] = true;
     }
+
     public void removeWaiting (FiberCondition c) nothrow
     {
-        //m_waiting.remove(c);
+        m_waiting.remove(c);
     }
+
     public void removeAllWaiting () nothrow
     {
         foreach(ref c; m_waiting.keys)

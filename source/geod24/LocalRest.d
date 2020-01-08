@@ -404,7 +404,7 @@ private class Server (API)
         }
 
         auto cond = ThreadScheduler.instance.newCondition(null);
-        ThreadScheduler.instance.spawn({
+        ThreadScheduler.instance.spawn("Server-Thrad-1", {
             scope node = new Implementation(cargs);
 
             Control control;
@@ -419,7 +419,7 @@ private class Server (API)
             {
                 if (thisScheduler is null)
                     return;
-                thisScheduler.spawn(() {
+                thisScheduler.spawn("Server-spawned-x", () {
                     handleRequest(req, node, control.filter);
                 });
             }
@@ -436,7 +436,7 @@ private class Server (API)
 
             Request[] await_req;
             Response[] await_res;
-            thisScheduler.start({
+            thisScheduler.start("Server-spawned-1", {
                 (cast(FiberScheduler)thisScheduler).name = "server";
                 thisTransceiver = transceiver;
                 thisWaitingManager = waitingManager;
@@ -445,7 +445,7 @@ private class Server (API)
                 bool terminate = false;
 
                 Message msg;
-                thisScheduler.spawn({
+                thisScheduler.spawn("Server-spawned-2", {
                     auto c = thisScheduler.newCondition(null);
                     while (!terminate)
                     {
@@ -501,7 +501,7 @@ private class Server (API)
 
 
                 //  Process waiting by the command sleep().
-                thisScheduler.spawn({
+                thisScheduler.spawn("Server-spawned-3", {
                     auto c = thisScheduler.newCondition(null);
                     while (!terminate)
                     {
@@ -658,14 +658,14 @@ private class Client
                 (cast(FiberScheduler)thisScheduler).name = "main";
             }
 
-            thisScheduler.spawn({
+            thisScheduler.spawn("client-router-1", {
                 req = Request(this.transceiver, this._waitingManager.getNextResponseId(), method, args);
                 remote.send(req);
             });
 
             this._terminate = false;
             auto c = thisScheduler.newCondition(null);
-            thisScheduler.spawn({
+            thisScheduler.spawn("client-router-2", {
                 while (!this._terminate)
                 {
                     Message msg = this._transceiver.receive();
@@ -690,7 +690,7 @@ private class Client
                 }
             });
 
-            thisScheduler.start({
+            thisScheduler.start("client-router-3", {
                 res = this._waitingManager.waitResponse(req.id, this._timeout);
                 this._terminate = true;
             });
@@ -750,7 +750,7 @@ private class Client
 public void runTask (void delegate() dg)
 {
     assert(thisScheduler !is null, "Cannot call this function from the main thread");
-    thisScheduler.spawn(dg);
+    thisScheduler.spawn("runTask", dg);
 }
 
 
@@ -1032,7 +1032,7 @@ public class RemoteAPI (API) : API
 
 
 import std.stdio;
-
+/*
 /// Simple usage example
 unittest
 {
@@ -1159,7 +1159,7 @@ unittest
 
     cleanupAllThread();
 }
-
+*/
 /// This network have different types of nodes in it
 unittest
 {
@@ -1239,8 +1239,6 @@ unittest
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
     writefln("test03");
-
-    //joinAllThread();
 
     cleanupAllThread();
 }
