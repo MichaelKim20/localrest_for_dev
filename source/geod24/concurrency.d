@@ -103,8 +103,9 @@ public struct ThreadInfo
         foreach (ref info; objectValues)
             if (info !is null)
                 info.cleanup(root);
+        foreach (key; objectValues.keys)
+            objectValues.remove(key);
         cleaning = true;
-
     }
 
     private bool cleaning;
@@ -115,11 +116,18 @@ public @property ref ThreadInfo thisInfo () nothrow
     return ThreadInfo.thisInfo;
 }
 
+import std.process;
+
+ThreadID thisTid;
+static this ()
+{
+    thisTid = thisThreadID;
+}
+
 static ~this ()
 {
-    import std.process;
-    writefln("static ~this %s", thisThreadID);
-    thisInfo.cleanup(true);
+    writefln("static ~this %s", thisTid);
+    //thisInfo.cleanup(true);
 }
 
 /*******************************************************************************
@@ -569,29 +577,21 @@ public class ThreadScheduler : Scheduler, InfoObject
 
     public void cleanupAllThread ()
     {
-        /*
+
         synchronized(this)
         {
             writefln("Thread count %d", this.m_threadInfos.length);
             if (this.m_threadInfos.length > 0)
             {
-                FiberScheduler sche;
                 foreach (ref treadInfo; this.m_threadInfos)
-                {
-                    if (auto p = "scheduler" in treadInfo.objectValues)
-                    {
-                        sche = cast(FiberScheduler)(*p);
-                        sche.writeFiberName();
-                    }
                     treadInfo.cleanup(true);
-                }
 
-                Thread.sleep(3.seconds);
+                //Thread.sleep(3.seconds);
             }
             writefln("Thread count %d", this.m_threadInfos.length);
         }
         thisInfo.cleanup(true);
-        */
+
         /*
         synchronized(this)
         {
@@ -739,11 +739,9 @@ class FiberScheduler : Scheduler, InfoObject
     {
         if (terminated)
             return;
-
         if (root)
         {
             this.stop();
-            thisInfo.objectValues.remove("scheduler");
         }
     }
 
@@ -921,8 +919,6 @@ private:
         {
             scope (exit) notified = false;
 
-            this.outer.addWaiting(this);
-
             while (!notified)
                 switchContext();
         }
@@ -944,8 +940,6 @@ private:
 
             scope (exit) notified = false;
 
-            this.outer.addWaiting(this);
-
             for (auto limit = MonoTime.currTime + period;
                  !notified && !period.isNegative;
                  period = limit - MonoTime.currTime)
@@ -953,7 +947,6 @@ private:
                 this.outer.yield();
             }
 
-            this.outer.removeWaiting(this);
             return notified;
         }
 
@@ -968,7 +961,6 @@ private:
         {
             notified = true;
             switchContext();
-            this.outer.removeWaiting(this);
         }
 
 
@@ -982,7 +974,6 @@ private:
         {
             notified = true;
             switchContext();
-            this.outer.removeWaiting(this);
         }
 
     private:

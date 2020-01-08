@@ -426,11 +426,11 @@ private class Server (API)
 
             void handleRes (Response res)
             {
-                if (thisScheduler !is null)
+                if ((thisScheduler !is null) && (thisWaitingManager !is null))
                 {
-                    waitingManager.pending = res;
-                    waitingManager.waiting[res.id].c.notify();
-                    waitingManager.remove(res.id);
+                    thisWaitingManager.pending = res;
+                    thisWaitingManager.waiting[res.id].c.notify();
+                    thisWaitingManager.remove(res.id);
                 }
             }
 
@@ -464,14 +464,16 @@ private class Server (API)
                                 break;
 
                             case MessageType.response :
-                                foreach (_; 0..10)
+                                if (thisWaitingManager !is null)
                                 {
-                                    if (waitingManager.exist(msg.res.id))
-                                        break;
-                                    if (thisScheduler !is null)
-                                        thisScheduler.wait(c, 10.msecs);
+                                    foreach (_; 0..10)
+                                    {
+                                        if (thisWaitingManager.exist(msg.res.id))
+                                            break;
+                                        if (thisScheduler !is null)
+                                            thisScheduler.wait(c, 10.msecs);
+                                    }
                                 }
-
                                 if (!isSleeping())
                                     handleRes(msg.res);
                                 else if (!control.drop)
@@ -500,7 +502,7 @@ private class Server (API)
                     }
                     throw new OwnerTerminated();
                 });
-
+/*
                 //  Process waiting by the command sleep().
                 thisScheduler.spawn("Server-spawned-3", {
                     auto c = thisScheduler.newCondition(null);
@@ -522,6 +524,7 @@ private class Server (API)
                     }
                     throw new OwnerTerminated();
                 });
+*/
                 ThreadScheduler.instance.notify(cond);
             });
         });
@@ -647,9 +650,12 @@ private class Client
         // from Node to Node
         if ((thisThreadInfoEx !is null) && (thisThreadInfoEx.is_node))
         {
-            req = Request(thisTransceiver, thisWaitingManager.getNextResponseId(), method, args);
-            remote.send(req);
-            res = thisWaitingManager.waitResponse(req.id, this._timeout);
+            if (thisWaitingManager !is null)
+            {
+                req = Request(thisTransceiver, thisWaitingManager.getNextResponseId(), method, args);
+                remote.send(req);
+                res = thisWaitingManager.waitResponse(req.id, this._timeout);
+            }
         }
         // from Non-Node to Node
         else
