@@ -53,7 +53,7 @@ import std.stdio;
 
 /*******************************************************************************
 
-    Fiber which embeds a ThreadInfo
+    Thread which embeds a ThreadInfo
 
 *******************************************************************************/
 
@@ -76,7 +76,7 @@ public class TaskThread : Thread
 
     ***************************************************************************/
 
-    this( void function() fn, size_t sz = 0 ) @safe pure nothrow @nogc
+    public this (void function() fn, size_t sz = 0) @safe pure nothrow @nogc
     in
     {
         assert( fn );
@@ -101,7 +101,7 @@ public class TaskThread : Thread
 
     ***************************************************************************/
 
-    this( void delegate() dg, size_t sz = 0 ) @safe pure nothrow @nogc
+    public this (void delegate() dg, size_t sz = 0) @safe pure nothrow @nogc
     in
     {
         assert( dg );
@@ -111,7 +111,7 @@ public class TaskThread : Thread
         super(dg, sz);
     }
 
-    @property ref ThreadInfo thisInfo () nothrow
+    public @property ref ThreadInfo thisInfo () nothrow
     {
         return this.info;
     }
@@ -172,7 +172,7 @@ public struct ThreadInfo
 
     ***************************************************************************/
 
-    static @property ref thisInfo () nothrow
+    public static @property ref thisInfo () nothrow
     {
         static ThreadInfo val;
         return val;
@@ -203,6 +203,10 @@ public struct ThreadInfo
 
 public @property ref ThreadInfo thisInfo () nothrow
 {
+    auto t = cast(TaskThread) Thread.getThis();
+
+    if (t !is null)
+        return t.info;
     return ThreadInfo.thisInfo;
 }
 
@@ -424,7 +428,7 @@ public class ThreadScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    @property static instance ()
+    public @property static instance ()
     {
         if (scheduler is null)
             scheduler = new ThreadScheduler();
@@ -438,7 +442,7 @@ public class ThreadScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void start (string name, void delegate () op)
+    public void start (string name, void delegate () op)
     {
         op();
     }
@@ -450,7 +454,7 @@ public class ThreadScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void stop ()
+    public void stop ()
     {
 
     }
@@ -462,9 +466,9 @@ public class ThreadScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void spawn (string name, void delegate () op)
+    public void spawn (string name, void delegate () op)
     {
-        auto t = new Thread({
+        auto t = new TaskThread({
             scope (exit) {
                 thisInfo.cleanup(true);
                 removeInfo(Thread.getThis());
@@ -483,7 +487,7 @@ public class ThreadScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void yield () nothrow
+    public void yield () nothrow
     {
         // no explicit yield needed
     }
@@ -496,7 +500,7 @@ public class ThreadScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    @property ref ThreadInfo thisInfo () nothrow
+    public @property ref ThreadInfo thisInfo () nothrow
     {
         return ThreadInfo.thisInfo;
     }
@@ -508,7 +512,7 @@ public class ThreadScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    Condition newCondition (Mutex m) nothrow
+    public Condition newCondition (Mutex m) nothrow
     {
         if (m is null)
         {
@@ -531,7 +535,7 @@ public class ThreadScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void wait (Condition c)
+    public void wait (Condition c)
     {
         if (c.mutex !is null)
             c.mutex.lock();
@@ -556,7 +560,7 @@ public class ThreadScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    bool wait (Condition c, Duration period)
+    public bool wait (Condition c, Duration period)
     {
         if (c.mutex !is null)
             c.mutex.lock();
@@ -579,7 +583,7 @@ public class ThreadScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void notify (Condition c)
+    public void notify (Condition c)
     {
         if (c.mutex !is null)
             c.mutex.lock();
@@ -602,7 +606,7 @@ public class ThreadScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void notifyAll (Condition c)
+    public void notifyAll (Condition c)
     {
         if (c.mutex !is null)
             c.mutex.lock();
@@ -738,7 +742,7 @@ public class FiberScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void start (string name, void delegate () op)
+    public void start (string name, void delegate () op)
     {
         if (terminated)
             return;
@@ -753,7 +757,7 @@ public class FiberScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void stop ()
+    public void stop ()
     {
         terminated = true;
         terminated_time = MonoTime.currTime;
@@ -768,7 +772,7 @@ public class FiberScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void spawn (string name, void delegate() op) nothrow
+    public void spawn (string name, void delegate() op) nothrow
     {
         if (terminated)
             return;
@@ -784,7 +788,7 @@ public class FiberScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void yield () nothrow
+    public void yield () nothrow
     {
         // NOTE: It's possible that we should test whether the calling Fiber
         //       is an TaskFiber before yielding, but I think it's reasonable
@@ -804,7 +808,7 @@ public class FiberScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    @property ref ThreadInfo thisInfo () nothrow
+    public @property ref ThreadInfo thisInfo () nothrow
     {
         auto f = cast(TaskFiber) Fiber.getThis();
 
@@ -820,7 +824,7 @@ public class FiberScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    Condition newCondition (Mutex m) nothrow
+    public Condition newCondition (Mutex m) nothrow
     {
         return new FiberCondition(m);
     }
@@ -849,7 +853,7 @@ public class FiberScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void wait (Condition c)
+    public void wait (Condition c)
     {
         if (c.mutex !is null)
             c.mutex.lock();
@@ -874,7 +878,7 @@ public class FiberScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    bool wait (Condition c, Duration period)
+    public bool wait (Condition c, Duration period)
     {
         if (c.mutex !is null)
             c.mutex.lock();
@@ -897,7 +901,7 @@ public class FiberScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void notify (Condition c)
+    public void notify (Condition c)
     {
         if (c.mutex !is null)
             c.mutex.lock();
@@ -920,7 +924,7 @@ public class FiberScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void notifyAll (Condition c)
+    public void notifyAll (Condition c)
     {
         if (c.mutex !is null)
             c.mutex.lock();
@@ -944,7 +948,7 @@ protected:
 
     ***************************************************************************/
 
-    void create (string name, void delegate() op) nothrow
+    public void create (string name, void delegate() op) nothrow
     {
         auto owner_scheduler = this;
         auto owner_objects = thisInfo.objectValues;
@@ -974,7 +978,7 @@ private:
 
     class FiberCondition : Condition
     {
-        this (Mutex m) nothrow
+        public this (Mutex m) nothrow
         {
             super(m);
             notified = false;
@@ -986,11 +990,9 @@ private:
 
         ***********************************************************************/
 
-        override void wait () nothrow
+        override public void wait () nothrow
         {
             scope (exit) notified = false;
-
-            this.outer.addWaiting(this);
 
             while (!notified)
                 switchContext();
@@ -1007,13 +1009,11 @@ private:
 
         ***********************************************************************/
 
-        override bool wait (Duration period) nothrow
+        override public  bool wait (Duration period) nothrow
         {
             import core.time : MonoTime;
 
             scope (exit) notified = false;
-
-            this.outer.addWaiting(this);
 
             for (auto limit = MonoTime.currTime + period;
                  !notified && !period.isNegative;
@@ -1022,7 +1022,6 @@ private:
                 this.outer.yield();
             }
 
-            this.outer.removeWaiting(this);
             return notified;
         }
 
@@ -1037,7 +1036,6 @@ private:
         {
             notified = true;
             switchContext();
-            this.outer.removeWaiting(this);
         }
 
 
@@ -1051,10 +1049,10 @@ private:
         {
             notified = true;
             switchContext();
-            this.outer.removeWaiting(this);
         }
 
     private:
+
         void switchContext() nothrow
         {
             if (mutex_nothrow) mutex_nothrow.unlock_nothrow();
@@ -1097,10 +1095,11 @@ private:
             //writefln("m_fibers count %s %s", name, m_fibers.length);
         }
     }
+
     void writeFiberName ()
     {
         writefln("writeFiberName");
-        writefln("m_fibers count %s %s", name, m_fibers.length);
+        writefln("m_fibers count %s", m_fibers.length);
         for (int idx = 0; idx < this.m_fibers.length; idx++)
         {
             writefln("Fiber Name : %s", (cast(TaskFiber)(this.m_fibers[idx])).name);
@@ -1110,28 +1109,6 @@ private:
 private:
     Fiber[] m_fibers;
     size_t m_pos;
-
-    bool[FiberCondition] m_waiting;
-
-public:
-
-    string name;
-
-    public void addWaiting (FiberCondition c) nothrow
-    {
-        m_waiting[c] = true;
-    }
-
-    public void removeWaiting (FiberCondition c) nothrow
-    {
-        m_waiting.remove(c);
-    }
-
-    public void removeAllWaiting () nothrow
-    {
-        foreach(ref c; m_waiting.keys)
-            c.notify();
-    }
 }
 
 
@@ -1446,6 +1423,7 @@ private struct ChannelContext (T)
     //  Waiting Condition
     public Condition condition;
 }
+
 /*
 /// Fiber1 -> [ channel2 ] -> Fiber2 -> [ channel1 ] -> Fiber1
 unittest
