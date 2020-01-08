@@ -63,6 +63,7 @@ public struct Response
     string data;
 };
 
+
 /// Filter out requests before they reach a node
 public struct FilterAPI
 {
@@ -73,6 +74,7 @@ public struct FilterAPI
     string pretty_func;
 }
 
+
 /// Ask the node to exhibit a certain behavior for a given time
 public struct TimeCommand
 {
@@ -82,10 +84,12 @@ public struct TimeCommand
     bool drop = false;
 }
 
+
 /// Ask the node to shut down
 public struct ShutdownCommand
 {
 }
+
 
 /// Status of a request
 public enum MessageType
@@ -96,6 +100,7 @@ public enum MessageType
     time_command,
     shutdown_command
 };
+
 
 // very simple & limited variant, to keep it performant.
 // should be replaced by a real Variant later
@@ -118,6 +123,7 @@ static struct Message
 
     ubyte tag;
 }
+
 
 /*******************************************************************************
 
@@ -229,6 +235,25 @@ public class Transceiver : InfoObject
     do
     {
         return this.chan.receive();
+    }
+
+
+
+    /***************************************************************************
+
+        Return the received message.
+
+    ***************************************************************************/
+
+    public bool tryReceive (Message *msg) @trusted
+    in
+    {
+        assert(thisScheduler !is null,
+            "Cannot get a message until a scheduler was created ");
+    }
+    do
+    {
+        return this.chan.tryReceive(msg);
     }
 
 

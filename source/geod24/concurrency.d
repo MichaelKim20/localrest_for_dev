@@ -99,35 +99,18 @@ public struct ThreadInfo
 
     public void cleanup (bool root)
     {
-        if (cleaning) return;
         foreach (ref info; objectValues)
             if (info !is null)
                 info.cleanup(root);
+
         foreach (key; objectValues.keys)
             objectValues.remove(key);
-        cleaning = true;
     }
-
-    private bool cleaning;
 }
 
 public @property ref ThreadInfo thisInfo () nothrow
 {
     return ThreadInfo.thisInfo;
-}
-
-import std.process;
-
-ThreadID thisTid;
-static this ()
-{
-    thisTid = thisThreadID;
-}
-
-static ~this ()
-{
-    writefln("static ~this %s", thisTid);
-    //thisInfo.cleanup(true);
 }
 
 /*******************************************************************************
@@ -184,7 +167,7 @@ interface Scheduler
 
     ***************************************************************************/
 
-    void start (string name, void delegate() op);
+    void start (void delegate() op);
 
 
     /***************************************************************************
@@ -209,7 +192,7 @@ interface Scheduler
 
     ***************************************************************************/
 
-    void spawn (string name, void delegate() op);
+    void spawn (void delegate() op);
 
 
     /***************************************************************************
@@ -355,7 +338,7 @@ public class ThreadScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void start (string name, void delegate () op)
+    void start (void delegate () op)
     {
         op();
     }
@@ -379,7 +362,7 @@ public class ThreadScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void spawn (string name, void delegate () op)
+    void spawn (void delegate () op)
     {
         auto t = new Thread({
             scope (exit) {
@@ -569,48 +552,18 @@ public class ThreadScheduler : Scheduler, InfoObject
         synchronized( this )
         {
             foreach ( Thread t; m_threadInfos.keys )
-            {
                 t.join( rethrow );
-            }
         }
     }
 
     public void cleanupAllThread ()
     {
-
         synchronized(this)
         {
-            writefln("Thread count %d", this.m_threadInfos.length);
-            if (this.m_threadInfos.length > 0)
-            {
-                foreach (ref treadInfo; this.m_threadInfos)
-                    treadInfo.cleanup(true);
-
-                //Thread.sleep(3.seconds);
-            }
-            writefln("Thread count %d", this.m_threadInfos.length);
+            foreach (ref treadInfo; this.m_threadInfos)
+                treadInfo.cleanup(true);
         }
         thisInfo.cleanup(true);
-
-        /*
-        synchronized(this)
-        {
-            writefln("Thread count %d", this.m_threadInfos.length);
-            if (this.m_threadInfos.length > 0)
-            {
-                FiberScheduler sche;
-                foreach (ref treadInfo; this.m_threadInfos)
-                {
-                    if (auto p = "scheduler" in treadInfo.objectValues)
-                    {
-                        sche = cast(FiberScheduler)(*p);
-                        sche.writeFiberName();
-                    }
-                }
-            }
-            writefln("Thread count %d", this.m_threadInfos.length);
-        }
-        */
     }
 }
 
@@ -647,11 +600,9 @@ class FiberScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void start (string name, void delegate () op)
+    void start (void delegate () op)
     {
-        if (terminated)
-            return;
-        create(name, op);
+        create(op);
         dispatch();
     }
 
@@ -666,7 +617,6 @@ class FiberScheduler : Scheduler, InfoObject
     {
         terminated = true;
         terminated_time = MonoTime.currTime;
-        //writeFiberName();
     }
 
 
@@ -677,11 +627,9 @@ class FiberScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    void spawn (string name, void delegate() op) nothrow
+    void spawn (void delegate() op) nothrow
     {
-        if (terminated)
-            return;
-        create(name, op);
+        create(op);
         yield();
     }
 
@@ -739,10 +687,9 @@ class FiberScheduler : Scheduler, InfoObject
     {
         if (terminated)
             return;
+
         if (root)
-        {
             this.stop();
-        }
     }
 
 
@@ -851,7 +798,7 @@ protected:
 
     ***************************************************************************/
 
-    void create (string name, void delegate() op) nothrow
+    void create (void delegate() op) nothrow
     {
         auto owner_scheduler = this;
         auto owner_objects = thisInfo.objectValues;
@@ -872,7 +819,7 @@ protected:
             op();
         }
 
-        m_fibers ~= new InfoFiber(name, &wrap);
+        m_fibers ~= new InfoFiber(&wrap);
     }
 
 
@@ -885,17 +832,14 @@ protected:
     static class InfoFiber : Fiber
     {
         ThreadInfo info;
-        public string name;
 
-        this (string name, void delegate () op) nothrow
+        this (void delegate () op) nothrow
         {
-            this.name = name;
             super(op);
         }
 
-        this (string name, void delegate () op, size_t sz) nothrow
+        this (void delegate () op, size_t sz) nothrow
         {
-            this.name = name;
             super (op, sz);
         }
     }
@@ -994,11 +938,10 @@ private:
     void dispatch ()
     {
         import std.algorithm.mutation : remove;
-        auto done = false;
-        while (!done)
+        while (m_fibers.length > 0)
         {
             auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
-            if (t !is null && !(cast(ChannelClosed) t) && !(cast(OwnerTerminated) t))
+            if (t !is null && !(cast(ChannelClosed) t))
             {
                 throw t;
             }
@@ -1011,49 +954,15 @@ private:
             {
                 m_pos = 0;
             }
-            if (m_fibers.length == 0)
-                done = true;
 
             if (terminated)
-                done = true;
-            //writefln("m_fibers count %s %s", name, m_fibers.length);
-        }
-    }
-    void writeFiberName ()
-    {
-        writefln("writeFiberName");
-        writefln("m_fibers count %s %s", name, m_fibers.length);
-        for (int idx = 0; idx < this.m_fibers.length; idx++)
-        {
-            writefln("Fiber Name : %s", (cast(InfoFiber)(this.m_fibers[idx])).name);
+                break;
         }
     }
 
 private:
     Fiber[] m_fibers;
     size_t m_pos;
-
-    bool[FiberCondition] m_waiting;
-
-public:
-
-    string name;
-
-    public void addWaiting (FiberCondition c) nothrow
-    {
-        m_waiting[c] = true;
-    }
-
-    public void removeWaiting (FiberCondition c) nothrow
-    {
-        m_waiting.remove(c);
-    }
-
-    public void removeAllWaiting () nothrow
-    {
-        foreach(ref c; m_waiting.keys)
-            c.notify();
-    }
 }
 
 
@@ -1094,18 +1003,6 @@ public class ChannelClosed : Exception
 {
     /// Ctor
     public this (string msg = "Channel Closed") @safe pure nothrow @nogc
-    {
-        super(msg);
-    }
-}
-
-
-/// Thrown on calls to `receive` if the thread that spawned the receiving
-/// thread has terminated and no more messages exist.
-public class OwnerTerminated : Exception
-{
-    /// Ctor
-    public this(string msg = "Owner terminated") @safe pure nothrow @nogc
     {
         super(msg);
     }
@@ -1302,6 +1199,60 @@ public class Channel (T)
 
     /***************************************************************************
 
+        Return the received message.
+
+        Return:
+            msg = value to receive
+
+    ***************************************************************************/
+
+    public bool tryReceive (T *msg)
+    in
+    {
+        assert(thisScheduler !is null,
+            "Cannot get a message until a scheduler was created ");
+    }
+    do
+    {
+        this.mutex.lock();
+
+        if (this.closed)
+        {
+            this.mutex.unlock();
+            throw new ChannelClosed();
+        }
+
+        if (this.sendq[].walkLength > 0)
+        {
+            ChannelContext!T context = this.sendq.front;
+            this.sendq.removeFront();
+            *(msg) = context.msg;
+            this.mutex.unlock();
+
+            if (context.condition !is null)
+                if (thisScheduler !is null)
+                    thisScheduler.notify(context.condition);
+
+            return true;
+        }
+
+        if (this.queue[].walkLength > 0)
+        {
+            *(msg) = this.queue.front;
+            this.queue.removeFront();
+
+            this.mutex.unlock();
+
+            return true;
+        }
+
+        this.mutex.unlock();
+        return false;
+    }
+
+
+    /***************************************************************************
+
         Return closing status
 
         Return:
@@ -1380,7 +1331,7 @@ private struct ChannelContext (T)
     //  Waiting Condition
     public Condition condition;
 }
-/*
+
 /// Fiber1 -> [ channel2 ] -> Fiber2 -> [ channel1 ] -> Fiber1
 unittest
 {
@@ -1606,4 +1557,3 @@ unittest
 
     cleanupAllThread();
 }
-*/

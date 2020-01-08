@@ -404,7 +404,7 @@ private class Server (API)
         }
 
         auto cond = ThreadScheduler.instance.newCondition(null);
-        ThreadScheduler.instance.spawn("Server-Thrad-1", {
+        ThreadScheduler.instance.spawn({
             scope node = new Implementation(cargs);
 
             Control control;
@@ -417,27 +417,21 @@ private class Server (API)
 
             void handleReq (Request req)
             {
-                if (thisScheduler is null)
-                    return;
-                thisScheduler.spawn("Server-spawned-x", () {
+                thisScheduler.spawn(() {
                     handleRequest(req, node, control.filter);
                 });
             }
 
             void handleRes (Response res)
             {
-                if ((thisScheduler !is null) && (thisWaitingManager !is null))
-                {
-                    thisWaitingManager.pending = res;
-                    thisWaitingManager.waiting[res.id].c.notify();
-                    thisWaitingManager.remove(res.id);
-                }
+                thisWaitingManager.pending = res;
+                thisWaitingManager.waiting[res.id].c.notify();
+                thisWaitingManager.remove(res.id);
             }
 
             Request[] await_req;
             Response[] await_res;
-            thisScheduler.start("Server-spawned-1", {
-                (cast(FiberScheduler)thisScheduler).name = "server";
+            thisScheduler.start({
                 thisTransceiver = transceiver;
                 thisWaitingManager = waitingManager;
                 thisThreadInfoEx = infoEx;
@@ -445,69 +439,52 @@ private class Server (API)
                 bool terminate = false;
 
                 Message msg;
-                thisScheduler.spawn("Server-spawned-2", {
-                    auto c = thisScheduler.newCondition(null);
+                thisScheduler.spawn({
                     while (!terminate)
                     {
-                        msg = transceiver.receive();
-
-                        if (terminate)
-                            break;
-
-                        switch (msg.tag)
+                        if (transceiver.tryReceive(&msg))
                         {
-                            case MessageType.request :
-                                if (!isSleeping())
-                                    handleReq(msg.req);
-                                else if (!control.drop)
-                                    await_req ~= msg.req;
-                                break;
+                            switch (msg.tag)
+                            {
+                                case MessageType.request :
+                                    if (!isSleeping())
+                                        handleReq(msg.req);
+                                    else if (!control.drop)
+                                        await_req ~= msg.req;
+                                    break;
 
-                            case MessageType.response :
-                                if (thisWaitingManager !is null)
-                                {
+                                case MessageType.response :
+                                    auto cond = thisScheduler.newCondition(null);
                                     foreach (_; 0..10)
                                     {
                                         if (thisWaitingManager.exist(msg.res.id))
                                             break;
-                                        if (thisScheduler !is null)
-                                            thisScheduler.wait(c, 10.msecs);
+                                        thisScheduler.wait(cond, 10.msecs);
                                     }
-                                }
-                                if (!isSleeping())
-                                    handleRes(msg.res);
-                                else if (!control.drop)
-                                    await_res ~= msg.res;
-                                break;
+                                    if (!isSleeping())
+                                        handleRes(msg.res);
+                                    else if (!control.drop)
+                                        await_res ~= msg.res;
+                                    break;
 
-                            case MessageType.filter :
-                                control.filter = msg.filter;
-                                break;
+                                case MessageType.filter :
+                                    control.filter = msg.filter;
+                                    break;
 
-                            case MessageType.time_command :
-                                control.sleep_until = Clock.currTime + msg.time.dur;
-                                control.drop = msg.time.drop;
-                                break;
+                                case MessageType.time_command :
+                                    control.sleep_until = Clock.currTime + msg.time.dur;
+                                    control.drop = msg.time.drop;
+                                    break;
 
-                            case MessageType.shutdown_command :
-                                terminate = true;
-                                break;
+                                case MessageType.shutdown_command :
+                                    terminate = true;
+                                    break;
 
-                            default :
-                                assert(0, "Unexpected type: " ~ msg.tag);
+                                default :
+                                    assert(0, "Unexpected type: " ~ msg.tag);
+                            }
                         }
 
-                        if (thisScheduler !is null)
-                            thisScheduler.yield();
-                    }
-                    throw new OwnerTerminated();
-                });
-/*
-                //  Process waiting by the command sleep().
-                thisScheduler.spawn("Server-spawned-3", {
-                    auto c = thisScheduler.newCondition(null);
-                    while (!terminate)
-                    {
                         if (!isSleeping())
                         {
                             await_req.each!(req => handleReq(req));
@@ -519,12 +496,10 @@ private class Server (API)
                             assumeSafeAppend(await_res);
                         }
 
-                        if (thisScheduler !is null)
-                            thisScheduler.yield();
+                        thisScheduler.yield();
                     }
-                    throw new OwnerTerminated();
                 });
-*/
+
                 ThreadScheduler.instance.notify(cond);
             });
         });
@@ -650,30 +625,24 @@ private class Client
         // from Node to Node
         if ((thisThreadInfoEx !is null) && (thisThreadInfoEx.is_node))
         {
-            if (thisWaitingManager !is null)
-            {
-                req = Request(thisTransceiver, thisWaitingManager.getNextResponseId(), method, args);
-                remote.send(req);
-                res = thisWaitingManager.waitResponse(req.id, this._timeout);
-            }
-        }
+            req = Request(thisTransceiver, thisWaitingManager.getNextResponseId(), method, args);
+            remote.send(req);
+            res = thisWaitingManager.waitResponse(req.id, this._timeout);
+         }
         // from Non-Node to Node
         else
         {
             if (thisScheduler is null)
-            {
                 thisScheduler = new FiberScheduler();
-                (cast(FiberScheduler)thisScheduler).name = "main";
-            }
 
-            thisScheduler.spawn("client-router-1", {
+            thisScheduler.spawn({
                 req = Request(this.transceiver, this._waitingManager.getNextResponseId(), method, args);
                 remote.send(req);
             });
 
             this._terminate = false;
             auto c = thisScheduler.newCondition(null);
-            thisScheduler.spawn("client-router-2", {
+            thisScheduler.spawn({
                 while (!this._terminate)
                 {
                     Message msg = this._transceiver.receive();
@@ -689,16 +658,13 @@ private class Client
                             thisScheduler.wait(c, 1.msecs);
                     }
 
-                    if (thisScheduler !is null)
-                    {
-                        this._waitingManager.pending = msg.res;
-                        this._waitingManager.waiting[msg.res.id].c.notify();
-                        this._waitingManager.remove(msg.res.id);
-                    }
+                    this._waitingManager.pending = msg.res;
+                    this._waitingManager.waiting[msg.res.id].c.notify();
+                    this._waitingManager.remove(msg.res.id);
                 }
             });
 
-            thisScheduler.start("client-router-3", {
+            thisScheduler.start({
                 res = this._waitingManager.waitResponse(req.id, this._timeout);
                 this._terminate = true;
             });
@@ -758,7 +724,7 @@ private class Client
 public void runTask (void delegate() dg)
 {
     assert(thisScheduler !is null, "Cannot call this function from the main thread");
-    thisScheduler.spawn("runTask", dg);
+    thisScheduler.spawn(dg);
 }
 
 
@@ -1040,7 +1006,7 @@ public class RemoteAPI (API) : API
 
 
 import std.stdio;
-/*
+
 /// Simple usage example
 unittest
 {
@@ -1167,7 +1133,7 @@ unittest
 
     cleanupAllThread();
 }
-*/
+
 /// This network have different types of nodes in it
 unittest
 {
@@ -1251,7 +1217,6 @@ unittest
     cleanupAllThread();
 }
 
-/*
 /// Support for circular nodes call
 unittest
 {
@@ -1403,8 +1368,7 @@ unittest
 
     cleanupAllThread();
 }
-*/
-/*
+
 // Simulate temporary outage
 unittest
 {
@@ -1457,7 +1421,7 @@ unittest
 
     // Now drop many messages
     n1.sleep(1.seconds, true);
-    //for (size_t i = 0; i < 100; i++)
+    for (size_t i = 0; i < 500; i++)
         n2.asyncCall();
     // Make sure we don't end up blocked forever
     Thread.sleep(1.seconds);
@@ -1621,8 +1585,7 @@ unittest
 
     cleanupAllThread();
 }
-*/
-/*
+
 // request timeouts (from main thread)
 unittest
 {
@@ -1665,8 +1628,7 @@ unittest
 
     cleanupAllThread();
 }
-*/
-/*
+
 // test-case for responses to re-used requests (from main thread)
 unittest
 {
@@ -1759,8 +1721,7 @@ unittest
 
     cleanupAllThread();
 }
-*/
-/*
+
 // test-case for zombie responses
 unittest
 {
@@ -1807,8 +1768,7 @@ unittest
 
     cleanupAllThread();
 }
-*/
-/*
+
 // request timeouts with dropped messages
 unittest
 {
@@ -1932,4 +1892,3 @@ unittest
 
     cleanupAllThread();
 }
-*/
