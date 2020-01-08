@@ -125,7 +125,6 @@ private class WaitingManager : InfoObject
     /// Request IDs waiting for a response
     public Waiting[ulong] waiting;
 
-
     /// Get the next available request ID
     public size_t getNextResponseId () @safe nothrow
     {
@@ -177,14 +176,9 @@ private class WaitingManager : InfoObject
         return ((id in this.waiting) !is null);
     }
 
-    ///
-    public void cleanup (bool root)
+    public void cleanup ()
     {
-        foreach (k; this.waiting.keys)
-        {
-            this.waiting[k].c.notify();
-        }
-        this.waiting.clear();
+
     }
 }
 
@@ -225,45 +219,6 @@ public @property void thisWaitingManager (WaitingManager value) nothrow
     thisInfo.objectValues["WaitingManager"] = cast(InfoObject)value;
 }
 
-public class ThreadInfoEx : InfoObject
-{
-    public bool is_node;
-
-    this (bool value)
-    {
-        this.is_node = value;
-    }
-
-    public void cleanup (bool root)
-    {
-    }
-}
-
-/***************************************************************************
-
-    Getter of WaitingManager assigned to a called thread.
-
-***************************************************************************/
-
-public @property ThreadInfoEx thisThreadInfoEx () nothrow
-{
-    if (auto p = "ThreadInfoEx" in thisInfo.objectValues)
-        return cast(ThreadInfoEx)(*p);
-    else
-        return null;
-}
-
-
-/***************************************************************************
-
-    Setter of WaitingManager assigned to a called thread.
-
-***************************************************************************/
-
-public @property void thisThreadInfoEx (ThreadInfoEx value) nothrow
-{
-    thisInfo.objectValues["ThreadInfoEx"] = cast(InfoObject)value;
-}
 
 /*******************************************************************************
 
@@ -393,7 +348,6 @@ private class Server (API)
 
         Transceiver transceiver = new Transceiver();
         WaitingManager waitingManager = new WaitingManager();
-        ThreadInfoEx infoEx = new ThreadInfoEx(true);
 
         // used for controling filtering / sleep
         struct Control
@@ -404,7 +358,7 @@ private class Server (API)
         }
 
         auto cond = ThreadScheduler.instance.newCondition(null);
-        ThreadScheduler.instance.spawn("Server-Thrad-1", {
+        ThreadScheduler.instance.spawn({
             scope node = new Implementation(cargs);
 
             Control control;
@@ -417,35 +371,29 @@ private class Server (API)
 
             void handleReq (Request req)
             {
-                if (thisScheduler is null)
-                    return;
-                thisScheduler.spawn("Server-spawned-x", () {
+                thisScheduler.spawn(() {
                     handleRequest(req, node, control.filter);
                 });
             }
 
             void handleRes (Response res)
             {
-                if (thisScheduler !is null)
-                {
-                    waitingManager.pending = res;
-                    waitingManager.waiting[res.id].c.notify();
-                    waitingManager.remove(res.id);
-                }
+                waitingManager.pending = res;
+                waitingManager.waiting[res.id].c.notify();
+                waitingManager.remove(res.id);
             }
 
             Request[] await_req;
             Response[] await_res;
-            thisScheduler.start("Server-spawned-1", {
-                (cast(FiberScheduler)thisScheduler).name = "server";
+
+            auto fiber_scheduler = new FiberScheduler();
+            fiber_scheduler.start({
                 thisTransceiver = transceiver;
                 thisWaitingManager = waitingManager;
-                thisThreadInfoEx = infoEx;
-
                 bool terminate = false;
 
                 Message msg;
-                thisScheduler.spawn("Server-spawned-2", {
+                thisScheduler.spawn({
                     auto c = thisScheduler.newCondition(null);
                     while (!terminate)
                     {
@@ -468,8 +416,7 @@ private class Server (API)
                                 {
                                     if (waitingManager.exist(msg.res.id))
                                         break;
-                                    if (thisScheduler !is null)
-                                        thisScheduler.wait(c, 10.msecs);
+                                    thisScheduler.wait(c, 10.msecs);
                                 }
 
                                 if (!isSleeping())
@@ -494,14 +441,14 @@ private class Server (API)
                             default :
                                 assert(0, "Unexpected type: " ~ msg.tag);
                         }
-                        if (thisScheduler !is null)
-                            thisScheduler.yield();
+                        thisScheduler.yield();
                     }
+                    fiber_scheduler.stop();
                 });
 
 
                 //  Process waiting by the command sleep().
-                thisScheduler.spawn("Server-spawned-3", {
+                thisScheduler.spawn({
                     auto c = thisScheduler.newCondition(null);
                     while (!terminate)
                     {
@@ -515,8 +462,7 @@ private class Server (API)
                             await_res.length = 0;
                             assumeSafeAppend(await_res);
                         }
-                        if (thisScheduler !is null)
-                            thisScheduler.yield();
+                        thisScheduler.wait(c, 10.msecs);
                     }
                 });
 
@@ -643,7 +589,7 @@ private class Client
         Response res;
 
         // from Node to Node
-        if ((thisThreadInfoEx !is null) && (thisThreadInfoEx.is_node))
+        if (thisWaitingManager !is null)
         {
             req = Request(thisTransceiver, thisWaitingManager.getNextResponseId(), method, args);
             remote.send(req);
@@ -652,20 +598,16 @@ private class Client
         // from Non-Node to Node
         else
         {
-            if (thisScheduler is null)
-            {
-                thisScheduler = new FiberScheduler();
-                (cast(FiberScheduler)thisScheduler).name = "main";
-            }
+            auto scheduler = new FiberScheduler();
 
-            thisScheduler.spawn("client-router-1", {
+            scheduler.spawn({
                 req = Request(this.transceiver, this._waitingManager.getNextResponseId(), method, args);
                 remote.send(req);
             });
 
             this._terminate = false;
-            auto c = thisScheduler.newCondition(null);
-            thisScheduler.spawn("client-router-2", {
+            auto c = scheduler.newCondition(null);
+            scheduler.spawn({
                 while (!this._terminate)
                 {
                     Message msg = this._transceiver.receive();
@@ -677,20 +619,16 @@ private class Client
                     {
                         if (this._waitingManager.exist(msg.res.id))
                             break;
-                        if (thisScheduler !is null)
-                            thisScheduler.wait(c, 1.msecs);
+                        scheduler.wait(c, 1.msecs);
                     }
 
-                    if (thisScheduler !is null)
-                    {
-                        this._waitingManager.pending = msg.res;
-                        this._waitingManager.waiting[msg.res.id].c.notify();
-                        this._waitingManager.remove(msg.res.id);
-                    }
+                    this._waitingManager.pending = msg.res;
+                    this._waitingManager.waiting[msg.res.id].c.notify();
+                    this._waitingManager.remove(msg.res.id);
                 }
             });
 
-            thisScheduler.start("client-router-3", {
+            scheduler.start({
                 res = this._waitingManager.waitResponse(req.id, this._timeout);
                 this._terminate = true;
             });
@@ -710,7 +648,6 @@ private class Client
     {
         this._terminate = true;
         this._transceiver.close();
-        this._waitingManager.cleanup(true);
     }
 
 
@@ -750,7 +687,7 @@ private class Client
 public void runTask (void delegate() dg)
 {
     assert(thisScheduler !is null, "Cannot call this function from the main thread");
-    thisScheduler.spawn("runTask", dg);
+    thisScheduler.spawn(dg);
 }
 
 
@@ -1030,13 +967,11 @@ public class RemoteAPI (API) : API
         }
 }
 
-
 import std.stdio;
-/*
+
 /// Simple usage example
 unittest
 {
-    writefln("test01, B");
     static interface API
     {
         @safe:
@@ -1061,18 +996,14 @@ unittest
 
     scope test = RemoteAPI!API.spawn!MockAPI();
     assert(test.pubkey() == 42);
-
     test.ctrl.shutdown();
 
     writefln("test01");
-
-    cleanupAllThread();
 }
 
 /// In a real world usage, users will most likely need to use the registry
 unittest
 {
-    writefln("test02, B");
     import std.conv;
     import geod24.concurrency;
     import geod24.Registry;
@@ -1135,35 +1066,32 @@ unittest
     auto node1 = factory("normal", 1);
     auto node2 = factory("byzantine", 2);
 
-    auto node12 = factory("this does not matter", 1);
-    auto node22 = factory("neither does this", 2);
+    auto fiber_scheduler = new FiberScheduler();
+    fiber_scheduler.start({
+        auto node1 = factory("this does not matter", 1);
+        auto node2 = factory("neither does this", 2);
 
-    assert(node12.pubkey() == 42);
-    assert(node12.last() == "pubkey");
-    assert(node22.pubkey() == 0);
-    assert(node22.last() == "pubkey");
+        assert(node1.pubkey() == 42);
+        assert(node1.last() == "pubkey");
+        assert(node2.pubkey() == 0);
+        assert(node2.last() == "pubkey");
 
-    node12.recv(42, Json.init);
-    assert(node12.last() == "recv@2");
-    node12.recv(Json.init);
-    assert(node12.last() == "recv@1");
-    assert(node22.last() == "pubkey");
+        node1.recv(42, Json.init);
+        assert(node1.last() == "recv@2");
+        node1.recv(Json.init);
+        assert(node1.last() == "recv@1");
+        assert(node2.last() == "pubkey");
 
-
-    node12.ctrl.shutdown();
-    node22.ctrl.shutdown();
-
-    node1.ctrl.shutdown();
-    node2.ctrl.shutdown();
-    writefln("test02");
-
-    cleanupAllThread();
+        node1.ctrl.shutdown();
+        node2.ctrl.shutdown();
+        writefln("test02");
+        fiber_scheduler.stop();
+    });
 }
-*/
+
 /// This network have different types of nodes in it
 unittest
 {
-    writefln("test03, B");
     import geod24.concurrency;
 
     static interface API
@@ -1235,19 +1163,14 @@ unittest
     }
 
     assert(nodes[0].requests() == 7);
-
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
     writefln("test03");
-
-    cleanupAllThread();
 }
 
-/*
 /// Support for circular nodes call
 unittest
 {
-    writefln("test04, B");
     import geod24.concurrency;
     import std.format;
 
@@ -1296,14 +1219,11 @@ unittest
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
     writefln("test04");
-
-    cleanupAllThread();
 }
 
 /// Nodes can start tasks
 unittest
 {
-    writefln("test05, B");
     import core.thread;
     import core.time;
 
@@ -1325,6 +1245,8 @@ unittest
         public override void stop ()
         {
             terminate = true;
+            while (!stoped)
+                sleep(10.msecs);
         }
 
         public override ulong getCounter ()
@@ -1335,15 +1257,18 @@ unittest
 
         private void task ()
         {
+            stoped = false;
             while (!terminate)
             {
                 this.counter++;
                 sleep(50.msecs);
             }
+            stoped = true;
         }
 
         private ulong counter;
         private bool terminate;
+        private bool stoped;
     }
 
     import std.format;
@@ -1358,17 +1283,13 @@ unittest
     assert(node.getCounter() >= 9);
     assert(node.getCounter() == 0);
     node.stop();
-    core.thread.Thread.sleep(100.msecs);
     node.ctrl.shutdown();
     writefln("test05");
-
-    cleanupAllThread();
 }
 
 // Sane name insurance policy
 unittest
 {
-    writefln("test06, B");
     import geod24.Transceiver;
 
     static interface API
@@ -1392,15 +1313,11 @@ unittest
     }
     static assert(!is(typeof(RemoteAPI!DoesntWork)));
     writefln("test06");
-
-    cleanupAllThread();
 }
-*/
-/*
+
 // Simulate temporary outage
 unittest
 {
-    writefln("test07, B");
     __gshared Transceiver n1transceive;
 
     static interface API
@@ -1413,7 +1330,7 @@ unittest
         public this()
         {
             if (n1transceive !is null)
-                this.remote = new RemoteAPI!API(n1transceive, 1.seconds);
+                this.remote = new RemoteAPI!API(n1transceive);
         }
 
         public override ulong call () { return ++this.count; }
@@ -1449,7 +1366,7 @@ unittest
 
     // Now drop many messages
     n1.sleep(1.seconds, true);
-    //for (size_t i = 0; i < 100; i++)
+    for (size_t i = 0; i < 500; i++)
         n2.asyncCall();
     // Make sure we don't end up blocked forever
     Thread.sleep(1.seconds);
@@ -1467,14 +1384,11 @@ unittest
     n1.ctrl.shutdown();
     n2.ctrl.shutdown();
     writefln("test07");
-
-    cleanupAllThread();
 }
 
 // Filter commands
 unittest
 {
-    writefln("test08, B");
     __gshared Transceiver node_tid;
 
     static interface API
@@ -1610,15 +1524,11 @@ unittest
     filtered.ctrl.shutdown();
     caller.ctrl.shutdown();
     writefln("test08");
-
-    cleanupAllThread();
 }
-*/
-/*
+
 // request timeouts (from main thread)
 unittest
 {
-    writefln("test09, B");
     import core.thread;
     import std.exception;
 
@@ -1654,15 +1564,11 @@ unittest
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
     writefln("test09");
-
-    cleanupAllThread();
 }
-*/
-/*
+
 // test-case for responses to re-used requests (from main thread)
 unittest
 {
-    writefln("test10, B");
     import core.thread;
     import std.exception;
 
@@ -1703,14 +1609,11 @@ unittest
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
     writefln("test10");
-
-    cleanupAllThread();
 }
 
 // request timeouts (foreign node to another node)
 unittest
 {
-    writefln("test11, B");
     import geod24.Transceiver;
     import std.exception;
 
@@ -1748,15 +1651,11 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
     writefln("test11");
-
-    cleanupAllThread();
 }
-*/
-/*
+
 // test-case for zombie responses
 unittest
 {
-    writefln("test12, B");
     import geod24.Transceiver;
     import std.exception;
 
@@ -1796,15 +1695,11 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
     writefln("test12");
-
-    cleanupAllThread();
 }
-*/
-/*
+
 // request timeouts with dropped messages
 unittest
 {
-    writefln("test13, B");
     import geod24.Transceiver;
     import std.exception;
 
@@ -1839,14 +1734,11 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
     writefln("test13");
-
-    cleanupAllThread();
 }
 
 // Test a node that gets a replay while it's delayed
 unittest
 {
-    writefln("test14, B");
     import geod24.Transceiver;
     import std.exception;
 
@@ -1884,14 +1776,11 @@ unittest
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
     writefln("test14");
-
-    cleanupAllThread();
 }
 
 // Test explicit shutdown
 unittest
 {
-    writefln("test15, B");
     import std.exception;
 
     static interface API
@@ -1921,7 +1810,4 @@ unittest
         assert(ex.msg == `"Request timed-out"`);
     }
     writefln("test15");
-
-    cleanupAllThread();
 }
-*/
