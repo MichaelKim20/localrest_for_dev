@@ -494,11 +494,12 @@ private class Server (API)
                             default :
                                 assert(0, "Unexpected type: " ~ msg.tag);
                         }
+
                         if (thisScheduler !is null)
                             thisScheduler.yield();
                     }
+                    throw new OwnerTerminated();
                 });
-
 
                 //  Process waiting by the command sleep().
                 thisScheduler.spawn("Server-spawned-3", {
@@ -515,11 +516,12 @@ private class Server (API)
                             await_res.length = 0;
                             assumeSafeAppend(await_res);
                         }
+
                         if (thisScheduler !is null)
                             thisScheduler.yield();
                     }
+                    throw new OwnerTerminated();
                 });
-
                 ThreadScheduler.instance.notify(cond);
             });
         });

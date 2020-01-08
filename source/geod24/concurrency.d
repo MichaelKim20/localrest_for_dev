@@ -1007,7 +1007,7 @@ private:
         while (!done)
         {
             auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
-            if (t !is null && !(cast(ChannelClosed) t))
+            if (t !is null && !(cast(ChannelClosed) t) && !(cast(OwnerTerminated) t))
             {
                 throw t;
             }
@@ -1103,6 +1103,18 @@ public class ChannelClosed : Exception
 {
     /// Ctor
     public this (string msg = "Channel Closed") @safe pure nothrow @nogc
+    {
+        super(msg);
+    }
+}
+
+
+/// Thrown on calls to `receive` if the thread that spawned the receiving
+/// thread has terminated and no more messages exist.
+public class OwnerTerminated : Exception
+{
+    /// Ctor
+    public this(string msg = "Owner terminated") @safe pure nothrow @nogc
     {
         super(msg);
     }
