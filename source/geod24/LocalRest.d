@@ -458,7 +458,7 @@ private class Server (API)
 
                     thisScheduler.yield();
                 }
-            }, 8*1024*1024);
+            });
         });
 
         //  Wait for the node to be created.
@@ -595,7 +595,7 @@ private class Client
             thisScheduler.spawn({
                 req = Request(this.transceiver, this._waitingManager.getNextResponseId(), method, args);
                 remote.send(req);
-            }, 8*1024*1024);
+            });
 
             this._terminate = false;
             auto c = thisScheduler.newCondition(null);
@@ -619,12 +619,12 @@ private class Client
                     this._waitingManager.waiting[msg.res.id].c.notify();
                     this._waitingManager.remove(msg.res.id);
                 }
-            }, 8*1024*1024);
+            });
 
             thisScheduler.start({
                 res = this._waitingManager.waitResponse(req.id, this._timeout);
                 this._terminate = true;
-            }, 8*1024*1024);
+            });
         }
 
         return res;

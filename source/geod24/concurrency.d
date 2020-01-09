@@ -640,13 +640,14 @@ public class ThreadScheduler : Scheduler, InfoObject
         }
     }
 
+
     /***************************************************************************
 
         Operates on all threads currently tracked by this object.
 
     ***************************************************************************/
 
-    final int opApply( scope int delegate( ref Thread ) dg )
+    final int opApply ( scope int delegate( ref Thread ) dg )
     {
         synchronized( this )
         {
@@ -679,7 +680,7 @@ public class ThreadScheduler : Scheduler, InfoObject
 
     ***************************************************************************/
 
-    final void joinAll( bool rethrow = true )
+    final void joinAll ( bool rethrow = true )
     {
         synchronized( this )
         {
@@ -704,8 +705,10 @@ public class ThreadScheduler : Scheduler, InfoObject
     {
         synchronized(this)
         {
+            writefln("this.threadInfos %s", this.threadInfos.length);
             foreach (ref treadInfo; this.threadInfos)
                 treadInfo.cleanup(true);
+            writefln("this.threadInfos %s", this.threadInfos.length);
         }
         thisInfo.cleanup(true);
     }
@@ -1117,7 +1120,6 @@ class FiberScheduler : Scheduler, InfoObject
             {
                 m_pos = 0;
             }
-
             if (terminated)
                 break;
         }
