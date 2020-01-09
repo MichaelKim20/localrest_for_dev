@@ -143,9 +143,16 @@ public class Transceiver : InfoObject
         chan = new Channel!Message(64*1024);
     }
 
+
     /***************************************************************************
 
         It is a function that accepts Message
+
+        Params:
+            msg = The `Message` to send.
+
+        In:
+            thisScheduler must not be null.
 
     ***************************************************************************/
 
@@ -160,9 +167,13 @@ public class Transceiver : InfoObject
         this.chan.send(msg);
     }
 
+
     /***************************************************************************
 
         It is a function that accepts Request
+
+        Params:
+            msg = The `Request` to send.
 
     ***************************************************************************/
 
@@ -176,6 +187,9 @@ public class Transceiver : InfoObject
 
         It is a function that accepts Response
 
+        Params:
+            msg = The `Response` to send.
+
     ***************************************************************************/
 
     public void send (Response msg) @trusted
@@ -188,6 +202,9 @@ public class Transceiver : InfoObject
 
         It is a function that accepts TimeCommand
 
+        Params:
+            msg = The `TimeCommand` to send.
+
     ***************************************************************************/
 
     public void send (TimeCommand msg) @trusted
@@ -199,6 +216,9 @@ public class Transceiver : InfoObject
     /***************************************************************************
 
         It is a function that accepts ShutdownCommand
+
+        Params:
+            msg = The `ShutdownCommand` to send.
 
     ***************************************************************************/
 
@@ -224,6 +244,12 @@ public class Transceiver : InfoObject
 
         Return the received message.
 
+        Returns:
+            A received `Message`
+
+        In:
+            thisScheduler must not be null.
+
     ***************************************************************************/
 
     public Message receive () @trusted
@@ -238,10 +264,18 @@ public class Transceiver : InfoObject
     }
 
 
-
     /***************************************************************************
 
         Return the received message.
+
+        Params:
+            msg = The `Message` pointer to receive.
+
+        Returns:
+            Returns true when message has been received. Otherwise false
+
+        In:
+            thisScheduler must not be null.
 
     ***************************************************************************/
 
@@ -281,6 +315,14 @@ public class Transceiver : InfoObject
         formattedWrite(sink, "TR(%x)", cast(void*) chan);
     }
 
+
+    /***************************************************************************
+
+        Cleans up this Transceiver.
+
+        This must be called when a thread terminates.
+
+    ***************************************************************************/
 
     public void cleanup (bool root)
     {

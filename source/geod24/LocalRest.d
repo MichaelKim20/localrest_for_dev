@@ -225,45 +225,6 @@ public @property void thisWaitingManager (WaitingManager value) nothrow
     thisInfo.objectValues["WaitingManager"] = cast(InfoObject)value;
 }
 
-public class ThreadInfoEx : InfoObject
-{
-    public bool is_node;
-
-    this (bool value)
-    {
-        this.is_node = value;
-    }
-
-    public void cleanup (bool root)
-    {
-    }
-}
-
-/***************************************************************************
-
-    Getter of WaitingManager assigned to a called thread.
-
-***************************************************************************/
-
-public @property ThreadInfoEx thisThreadInfoEx () nothrow
-{
-    if (auto p = "ThreadInfoEx" in thisInfo.objectValues)
-        return cast(ThreadInfoEx)(*p);
-    else
-        return null;
-}
-
-
-/***************************************************************************
-
-    Setter of WaitingManager assigned to a called thread.
-
-***************************************************************************/
-
-public @property void thisThreadInfoEx (ThreadInfoEx value) nothrow
-{
-    thisInfo.objectValues["ThreadInfoEx"] = cast(InfoObject)value;
-}
 
 /*******************************************************************************
 
@@ -391,9 +352,7 @@ private class Server (API)
         import std.algorithm : each;
         import std.range;
 
-        Transceiver transceiver = new Transceiver();
-        WaitingManager waitingManager = new WaitingManager();
-        ThreadInfoEx infoEx = new ThreadInfoEx(true);
+        Transceiver res;
 
         // used for controling filtering / sleep
         struct Control
@@ -403,7 +362,7 @@ private class Server (API)
             bool drop;           // drop messages if sleeping
         }
 
-        auto cond = ThreadScheduler.instance.newCondition(null);
+        scope tcond = ThreadScheduler.instance.newCondition(null);
         ThreadScheduler.instance.spawn({
             scope node = new Implementation(cargs);
 
@@ -419,7 +378,7 @@ private class Server (API)
             {
                 thisScheduler.spawn(() {
                     handleRequest(req, node, control.filter);
-                });
+                }, 256*1024);
             }
 
             void handleRes (Response res)
@@ -432,82 +391,80 @@ private class Server (API)
             Request[] await_req;
             Response[] await_res;
             thisScheduler.start({
-                thisTransceiver = transceiver;
-                thisWaitingManager = waitingManager;
-                thisThreadInfoEx = infoEx;
+                thisTransceiver = new Transceiver();
+                thisWaitingManager = new WaitingManager();
+                res = thisTransceiver;
+
+                ThreadScheduler.instance.notify(tcond);
 
                 bool terminate = false;
 
-                Message msg;
-                thisScheduler.spawn({
-                    while (!terminate)
+                while (!terminate)
+                {
+                    Message msg;
+                    if (thisTransceiver.tryReceive(&msg))
                     {
-                        if (transceiver.tryReceive(&msg))
+                        switch (msg.tag)
                         {
-                            switch (msg.tag)
-                            {
-                                case MessageType.request :
-                                    if (!isSleeping())
-                                        handleReq(msg.req);
-                                    else if (!control.drop)
-                                        await_req ~= msg.req;
-                                    break;
+                            case MessageType.request :
+                                if (!isSleeping())
+                                    handleReq(msg.req);
+                                else if (!control.drop)
+                                    await_req ~= msg.req;
+                                break;
 
-                                case MessageType.response :
-                                    auto cond = thisScheduler.newCondition(null);
-                                    foreach (_; 0..10)
-                                    {
-                                        if (thisWaitingManager.exist(msg.res.id))
-                                            break;
-                                        thisScheduler.wait(cond, 10.msecs);
-                                    }
-                                    if (!isSleeping())
-                                        handleRes(msg.res);
-                                    else if (!control.drop)
-                                        await_res ~= msg.res;
-                                    break;
+                            case MessageType.response :
+                                scope c = thisScheduler.newCondition(null);
+                                foreach (_; 0..10)
+                                {
+                                    if (thisWaitingManager.exist(msg.res.id))
+                                        break;
+                                    thisScheduler.wait(c, 10.msecs);
+                                }
+                                if (!isSleeping())
+                                    handleRes(msg.res);
+                                else if (!control.drop)
+                                    await_res ~= msg.res;
+                                break;
 
-                                case MessageType.filter :
-                                    control.filter = msg.filter;
-                                    break;
+                            case MessageType.filter :
+                                control.filter = msg.filter;
+                                break;
 
-                                case MessageType.time_command :
-                                    control.sleep_until = Clock.currTime + msg.time.dur;
-                                    control.drop = msg.time.drop;
-                                    break;
+                            case MessageType.time_command :
+                                control.sleep_until = Clock.currTime + msg.time.dur;
+                                control.drop = msg.time.drop;
+                                break;
 
-                                case MessageType.shutdown_command :
-                                    terminate = true;
-                                    break;
+                            case MessageType.shutdown_command :
+                                terminate = true;
+                                break;
 
-                                default :
-                                    assert(0, "Unexpected type: " ~ msg.tag);
-                            }
+                            default :
+                                assert(0, "Unexpected type: " ~ msg.tag);
                         }
-
-                        if (!isSleeping())
-                        {
-                            await_req.each!(req => handleReq(req));
-                            await_req.length = 0;
-                            assumeSafeAppend(await_req);
-
-                            await_res.each!(res => handleRes(res));
-                            await_res.length = 0;
-                            assumeSafeAppend(await_res);
-                        }
-
-                        thisScheduler.yield();
                     }
-                });
 
-                ThreadScheduler.instance.notify(cond);
-            });
+                    if (!isSleeping())
+                    {
+                        await_req.each!(req => handleReq(req));
+                        await_req.length = 0;
+                        assumeSafeAppend(await_req);
+
+                        await_res.each!(res => handleRes(res));
+                        await_res.length = 0;
+                        assumeSafeAppend(await_res);
+                    }
+
+                    thisScheduler.yield();
+                }
+            }, 8*1024*1024);
         });
 
         //  Wait for the node to be created.
-        ThreadScheduler.instance.wait(cond);
+        ThreadScheduler.instance.wait(tcond);
 
-        return transceiver;
+        return res;
     }
 
     /// Devices that can receive requests.
@@ -623,12 +580,12 @@ private class Client
         Response res;
 
         // from Node to Node
-        if ((thisThreadInfoEx !is null) && (thisThreadInfoEx.is_node))
+        if (thisWaitingManager !is null)
         {
             req = Request(thisTransceiver, thisWaitingManager.getNextResponseId(), method, args);
             remote.send(req);
             res = thisWaitingManager.waitResponse(req.id, this._timeout);
-         }
+        }
         // from Non-Node to Node
         else
         {
@@ -638,7 +595,7 @@ private class Client
             thisScheduler.spawn({
                 req = Request(this.transceiver, this._waitingManager.getNextResponseId(), method, args);
                 remote.send(req);
-            });
+            }, 8*1024*1024);
 
             this._terminate = false;
             auto c = thisScheduler.newCondition(null);
@@ -662,12 +619,12 @@ private class Client
                     this._waitingManager.waiting[msg.res.id].c.notify();
                     this._waitingManager.remove(msg.res.id);
                 }
-            });
+            }, 8*1024*1024);
 
             thisScheduler.start({
                 res = this._waitingManager.waitResponse(req.id, this._timeout);
                 this._terminate = true;
-            });
+            }, 8*1024*1024);
         }
 
         return res;
@@ -1004,7 +961,6 @@ public class RemoteAPI (API) : API
         }
 }
 
-
 import std.stdio;
 
 /// Simple usage example
@@ -1186,27 +1142,35 @@ unittest
         private API master;
         private ulong requests_;
     }
+    writefln("test03, 1");
 
     RemoteAPI!API[4] nodes;
     auto master = RemoteAPI!API.spawn!MasterNode();
     nodes[0] = master;
+    writefln("test03, 2");
     nodes[1] = RemoteAPI!API.spawn!SlaveNode(master.transceiver);
+    writefln("test03, 3");
     nodes[2] = RemoteAPI!API.spawn!SlaveNode(master.transceiver);
+    writefln("test03, 4");
     nodes[3] = RemoteAPI!API.spawn!SlaveNode(master.transceiver);
+    writefln("test03, 5");
 
     foreach (n; nodes)
     {
         assert(n.requests() == 0);
         assert(n.value() == 42);
     }
+    writefln("test03, 6");
 
     assert(nodes[0].requests() == 4);
+    writefln("test03, 7");
 
     foreach (n; nodes[1 .. $])
     {
         assert(n.value() == 42);
         assert(n.requests() == 2);
     }
+    writefln("test03, 8");
 
     assert(nodes[0].requests() == 7);
 
