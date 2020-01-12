@@ -140,7 +140,7 @@ public class Transceiver : InfoObject
     /// Ctor
     public this () @safe nothrow
     {
-        chan = new Channel!Message(0);
+        chan = new Channel!Message(4*1024);
     }
 
 

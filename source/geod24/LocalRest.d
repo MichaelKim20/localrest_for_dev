@@ -638,72 +638,25 @@ private class Client
         Response res;
 
         // from Node to Node
-        if ((thisThreadInfoEx !is null) && (thisThreadInfoEx.is_node) && (this._has_server))
+        if (thisWaitingManager !is null)
         {
             writefln("router 1");
             req = Request(thisTransceiver, thisWaitingManager.getNextResponseId(), method, args);
             remote.send(req);
             res = thisWaitingManager.waitResponse(req.id, this._timeout);
         }
-        else if ((thisThreadInfoEx !is null) && (thisThreadInfoEx.is_node) && (!this._has_server))
-        {
-            writefln("router 2");
-
-            if (thisScheduler is null)
-                thisScheduler = new FiberScheduler();
-
-            thisScheduler.spawn({
-                req = Request(this.transceiver, this._waitingManager.getNextResponseId(), method, args);
-                remote.send(req);
-            });
-
-            this._terminate = false;
-            auto c = thisScheduler.newCondition(null);
-            thisScheduler.spawn({
-                while (!this._terminate)
-                {
-                    Message msg = this._transceiver.receive();
-
-                    if (this._terminate)
-                        break;
-
-                    foreach (_; 0..10)
-                    {
-                        if (this._waitingManager.exist(msg.res.id))
-                            break;
-                        if (thisScheduler !is null)
-                            thisScheduler.wait(c, 1.msecs);
-                    }
-
-                    this._waitingManager.pending = msg.res;
-                    this._waitingManager.waiting[msg.res.id].c.notify();
-                    this._waitingManager.remove(msg.res.id);
-                }
-            });
-
-            bool done = false;
-            thisScheduler.spawn({
-                res = this._waitingManager.waitResponse(req.id, this._timeout);
-                this._terminate = true;
-                done = true;
-            });
-            while (!done) thisScheduler.yield();
-        }
         // from Non-Node to Node
         else
         {
             writefln("router 3");
+            //auto scheduler = new FiberScheduler();
             if (thisScheduler is null)
                 thisScheduler = new FiberScheduler();
 
+            this._terminate = false;
             thisScheduler.spawn({
                 req = Request(this.transceiver, this._waitingManager.getNextResponseId(), method, args);
                 remote.send(req);
-            });
-
-            this._terminate = false;
-            auto c = thisScheduler.newCondition(null);
-            thisScheduler.spawn({
                 while (!this._terminate)
                 {
                     Message msg = this._transceiver.receive();
@@ -716,12 +669,14 @@ private class Client
                         if (this._waitingManager.exist(msg.res.id))
                             break;
                         if (thisScheduler !is null)
+                        {
+                            auto c = thisScheduler.newCondition(null);
                             thisScheduler.wait(c, 1.msecs);
+                        }
                     }
 
                     this._waitingManager.pending = msg.res;
                     this._waitingManager.waiting[msg.res.id].c.notify();
-                    this._waitingManager.remove(msg.res.id);
                 }
             });
 
@@ -1198,7 +1153,7 @@ unittest
     cleanupMainThread();
     writefln("test02");
 }
-
+/*
 /// This network have different types of nodes in it
 unittest
 {
@@ -1337,7 +1292,7 @@ unittest
     cleanupMainThread();
     writefln("test04");
 }
-
+*/
 /// Nodes can start tasks
 unittest
 {

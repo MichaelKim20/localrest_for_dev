@@ -675,7 +675,7 @@ class FiberScheduler : Scheduler, InfoObject
 {
     private Mutex mutex;
     private bool terminated;
-    //private bool dispatching;
+    private bool dispatching;
 
     public this ()
     {
@@ -1091,6 +1091,9 @@ class FiberScheduler : Scheduler, InfoObject
         this.mutex.lock_nothrow();
         scope(exit) this.mutex.unlock_nothrow();
 
+        if (this.dispatching) return;
+
+        this.dispatching = true;
         while (m_fibers.length > 0)
         {
             auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
@@ -1107,13 +1110,10 @@ class FiberScheduler : Scheduler, InfoObject
             {
                 m_pos = 0;
             }
-
             if (terminated)
                 break;
         }
-
-        //    this.dispatching = false;
-        //}
+        this.dispatching = false;
     }
 
     private Fiber[] m_fibers;
