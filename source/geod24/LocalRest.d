@@ -1614,7 +1614,7 @@ unittest
 
     cleanupMainThread();
 }
-/*
+
 // request timeouts (from main thread)
 unittest
 {
@@ -1921,4 +1921,3 @@ unittest
 
     cleanupMainThread();
 }
-*/

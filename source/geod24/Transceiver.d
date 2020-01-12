@@ -158,18 +158,7 @@ public class Transceiver : InfoObject
 
     public void send (Message msg) @trusted
     {
-        if (thisScheduler !is null)
-            this.chan.send(msg);
-        else
-        {
-            thisScheduler  = new FiberScheduler();
-            auto c = thisScheduler.newCondition(null);
-            thisScheduler.start({
-                this.chan.send(msg);
-                thisScheduler.notify(c);
-            });
-            thisScheduler.wait(c);
-        }
+        this.chan.send(msg);
     }
 
     /***************************************************************************
@@ -261,20 +250,7 @@ public class Transceiver : InfoObject
 
     public Message receive () @trusted
     {
-        if (thisScheduler !is null)
-            return this.chan.receive();
-        else
-        {
-            Message msg;
-            thisScheduler = new FiberScheduler();
-            auto c = thisScheduler.newCondition(null);
-            thisScheduler.start({
-                msg = this.chan.receive();
-                thisScheduler.notify(c);
-            });
-            thisScheduler.wait(c);
-            return msg;
-        }
+        return this.chan.receive();
     }
 
 
@@ -295,20 +271,7 @@ public class Transceiver : InfoObject
 
     public bool tryReceive (Message *msg) @trusted
     {
-        if (thisScheduler !is null)
-            return this.chan.tryReceive(msg);
-        else
-        {
-            bool res;
-            thisScheduler = new FiberScheduler();
-            auto c = thisScheduler.newCondition(null);
-            thisScheduler.start({
-                res = this.chan.tryReceive(msg);
-                thisScheduler.notify(c);
-            });
-            thisScheduler.wait(c);
-            return res;
-        }
+        return this.chan.tryReceive(msg);
     }
 
 
