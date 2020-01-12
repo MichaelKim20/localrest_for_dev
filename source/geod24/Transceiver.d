@@ -140,7 +140,7 @@ public class Transceiver : InfoObject
     /// Ctor
     public this () @safe nothrow
     {
-        chan = new Channel!Message(64*1024);
+        chan = new Channel!Message(0);
     }
 
 
@@ -157,16 +157,20 @@ public class Transceiver : InfoObject
     ***************************************************************************/
 
     public void send (Message msg) @trusted
-    in
     {
-        assert(thisScheduler !is null,
-            "Cannot get a message until a scheduler was created ");
+        if (thisScheduler !is null)
+            this.chan.send(msg);
+        else
+        {
+            thisScheduler  = new FiberScheduler();
+            auto c = thisScheduler.newCondition(null);
+            thisScheduler.start({
+                this.chan.send(msg);
+                thisScheduler.notify(c);
+            });
+            thisScheduler.wait(c);
+        }
     }
-    do
-    {
-        this.chan.send(msg);
-    }
-
 
     /***************************************************************************
 
@@ -232,6 +236,9 @@ public class Transceiver : InfoObject
 
         It is a function that accepts FilterAPI
 
+        Params:
+            msg = The `FilterAPI` to send.
+
     ***************************************************************************/
 
     public void send (FilterAPI msg) @trusted
@@ -253,14 +260,21 @@ public class Transceiver : InfoObject
     ***************************************************************************/
 
     public Message receive () @trusted
-    in
     {
-        assert(thisScheduler !is null,
-            "Cannot get a message until a scheduler was created ");
-    }
-    do
-    {
-        return this.chan.receive();
+        if (thisScheduler !is null)
+            return this.chan.receive();
+        else
+        {
+            Message msg;
+            thisScheduler = new FiberScheduler();
+            auto c = thisScheduler.newCondition(null);
+            thisScheduler.start({
+                msg = this.chan.receive();
+                thisScheduler.notify(c);
+            });
+            thisScheduler.wait(c);
+            return msg;
+        }
     }
 
 
@@ -280,14 +294,21 @@ public class Transceiver : InfoObject
     ***************************************************************************/
 
     public bool tryReceive (Message *msg) @trusted
-    in
     {
-        assert(thisScheduler !is null,
-            "Cannot get a message until a scheduler was created ");
-    }
-    do
-    {
-        return this.chan.tryReceive(msg);
+        if (thisScheduler !is null)
+            return this.chan.tryReceive(msg);
+        else
+        {
+            bool res;
+            thisScheduler = new FiberScheduler();
+            auto c = thisScheduler.newCondition(null);
+            thisScheduler.start({
+                res = this.chan.tryReceive(msg);
+                thisScheduler.notify(c);
+            });
+            thisScheduler.wait(c);
+            return res;
+        }
     }
 
 
@@ -319,8 +340,12 @@ public class Transceiver : InfoObject
     /***************************************************************************
 
         Cleans up this Transceiver.
-
         This must be called when a thread terminates.
+
+        Params:
+            root = The top is a Thread and the fibers exist below it.
+                   Thread is root, if this value is true,
+                   then it is to clean the value that Thread had.
 
     ***************************************************************************/
 
@@ -334,6 +359,9 @@ public class Transceiver : InfoObject
 /***************************************************************************
 
     Getter of Transceiver assigned to a called thread.
+
+    Returns:
+        Returns instance of `Transceiver` that is created by top thread.
 
 ***************************************************************************/
 
@@ -349,6 +377,9 @@ public @property Transceiver thisTransceiver () nothrow
 /***************************************************************************
 
     Setter of Transceiver assigned to a called thread.
+
+    Params:
+        value = The instance of `Transceiver`.
 
 ***************************************************************************/
 
