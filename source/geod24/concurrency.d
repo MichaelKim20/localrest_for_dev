@@ -673,9 +673,14 @@ public void cleanupMainThread ()
 
 class FiberScheduler : Scheduler, InfoObject
 {
+    private Mutex mutex;
     private bool terminated;
     //private bool dispatching;
 
+    public this ()
+    {
+        this.mutex = new Mutex();
+    }
     /***************************************************************************
 
         This creates a new Fiber for the supplied op and then starts the
@@ -951,6 +956,9 @@ class FiberScheduler : Scheduler, InfoObject
             op();
         }
 
+        this.mutex.lock_nothrow();
+        scope(exit) this.mutex.unlock_nothrow();
+
         if (sz == 0)
             m_fibers ~= new InfoFiber(&wrap);
         else
@@ -1079,34 +1087,29 @@ class FiberScheduler : Scheduler, InfoObject
     private void dispatch ()
     {
         import std.algorithm.mutation : remove;
-        bool done = false;
-        Duration limit = 1.msecs;
 
-        while (!done)
+        this.mutex.lock_nothrow();
+        scope(exit) this.mutex.unlock_nothrow();
+
+        while (m_fibers.length > 0)
         {
-            if (m_fibers.length > 0)
+            auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
+            if (t !is null && !(cast(ChannelClosed) t))
             {
-                auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
-                if (t !is null && !(cast(ChannelClosed) t))
-                {
-                    throw t;
-                }
-                if (m_fibers[m_pos].state == Fiber.State.TERM)
-                {
-                    if (m_pos >= (m_fibers = remove(m_fibers, m_pos)).length)
-                        m_pos = 0;
-                }
-                else if (m_pos++ >= m_fibers.length - 1)
-                {
+                throw t;
+            }
+            if (m_fibers[m_pos].state == Fiber.State.TERM)
+            {
+                if (m_pos >= (m_fibers = remove(m_fibers, m_pos)).length)
                     m_pos = 0;
-                }
+            }
+            else if (m_pos++ >= m_fibers.length - 1)
+            {
+                m_pos = 0;
             }
 
-            if (m_fibers.length == 0)
-                done = true;
-
             if (terminated)
-                done = true;
+                break;
         }
 
         //    this.dispatching = false;
