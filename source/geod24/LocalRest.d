@@ -585,8 +585,6 @@ private class Client
     /// and find the response that suits the request.
     private WaitingManager _waitingManager;
 
-    private FiberScheduler _scheduler;
-
     /// Timeout to use when issuing requests
     private Duration _timeout;
 
@@ -638,7 +636,7 @@ private class Client
         Response res;
 
         // from Node to Node
-        if (thisWaitingManager !is null)
+        if ((thisThreadInfoEx !is null) && (thisThreadInfoEx.is_node))
         {
             writefln("router 1");
             req = Request(thisTransceiver, thisWaitingManager.getNextResponseId(), method, args);
@@ -648,8 +646,7 @@ private class Client
         // from Non-Node to Node
         else
         {
-            writefln("router 3");
-            //auto scheduler = new FiberScheduler();
+            writefln("router 3 %s", thread_isMainThread());
             if (thisScheduler is null)
                 thisScheduler = new FiberScheduler();
 
@@ -657,6 +654,9 @@ private class Client
             thisScheduler.spawn({
                 req = Request(this.transceiver, this._waitingManager.getNextResponseId(), method, args);
                 remote.send(req);
+            });
+
+            thisScheduler.spawn({
                 while (!this._terminate)
                 {
                     Message msg = this._transceiver.receive();
@@ -1125,24 +1125,26 @@ unittest
 
     auto thrad_scheduler = new ThreadScheduler();
     thrad_scheduler.spawn({
-        auto node12 = factory("this does not matter", 1);
-        auto node22 = factory("neither does this", 2);
+        thisScheduler.start({
+            auto node12 = factory("this does not matter", 1);
+            auto node22 = factory("neither does this", 2);
 
-        assert(node12.pubkey() == 42);
-        assert(node12.last() == "pubkey");
-        assert(node22.pubkey() == 0);
-        assert(node22.last() == "pubkey");
+            assert(node12.pubkey() == 42);
+            assert(node12.last() == "pubkey");
+            assert(node22.pubkey() == 0);
+            assert(node22.last() == "pubkey");
 
-        node12.recv(42, Json.init);
-        assert(node12.last() == "recv@2");
-        node12.recv(Json.init);
-        assert(node12.last() == "recv@1");
-        assert(node22.last() == "pubkey");
+            node12.recv(42, Json.init);
+            assert(node12.last() == "recv@2");
+            node12.recv(Json.init);
+            assert(node12.last() == "recv@1");
+            assert(node22.last() == "pubkey");
 
-        node12.ctrl.shutdown();
-        node22.ctrl.shutdown();
+            node12.ctrl.shutdown();
+            node22.ctrl.shutdown();
 
-        chan.send(1);
+            chan.send(1);
+        });
     });
 
     auto res = chan.receive();

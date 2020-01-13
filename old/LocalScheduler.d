@@ -96,7 +96,6 @@ public class LocalFiberScheduler : FiberScheduler
     }
 
 
-
     /***************************************************************************
 
         If the caller is a scheduled Fiber, this yields execution to another
