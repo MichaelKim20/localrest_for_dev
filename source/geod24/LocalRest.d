@@ -111,11 +111,18 @@ private struct ArgWrapper (T...)
 
 private class WaitingManager : InfoObject
 {
+    import std.random;
     /// Just a Condition with a state
     private struct Waiting
     {
         Condition c;
         bool busy;
+    }
+
+    this ()
+    {
+        //auto rnd = Random(unpredictableSeed);
+        //last_idx = 0;//uniform(0, 100000, rnd);
     }
 
     /// The 'Response' we are currently processing, if any
@@ -150,7 +157,10 @@ private class WaitingManager : InfoObject
             if (duration == Duration.init)
                 ptr.c.wait();
             else if (!ptr.c.wait(duration))
+            {
+                //writeln("waitResponse --- TimeOut ");
                 this.pending = Response(Status.Timeout, id, "");
+            }
 
             ptr.busy = false;
             // After control returns to us, `pending` has been filled
@@ -179,11 +189,12 @@ private class WaitingManager : InfoObject
     ///
     public void cleanup (bool root)
     {
-        foreach (k; this.waiting.keys)
+        if (root)
         {
-            this.waiting[k].c.notify();
+            this.waiting.clear();
+            auto rnd = Random(unpredictableSeed);
+            //last_idx = 0;//uniform(0, 100000, rnd);
         }
-        this.waiting.clear();
     }
 }
 
@@ -348,7 +359,9 @@ private class Server (API)
 
                         static if (!is(ReturnType!ovrld == void))
                         {
-                            req.sender.send(Response(Status.Success, req.id, node.%1$s(args.args).serializeToJsonString()));
+                            auto result = node.%1$s(args.args).serializeToJsonString();
+                            //writefln("-----------------------> result %s", result);
+                            req.sender.send(Response(Status.Success, req.id, result));
                         }
                         else
                         {
@@ -423,11 +436,13 @@ private class Server (API)
             {
                 thisScheduler.spawn(() {
                     handleRequest(req, node, control.filter);
-                });
+                }, 8 * 1024 * 1024);
             }
 
             void handleRes (Response res)
             {
+                //if (!thisWaitingManager.exist(res.id))
+                    //writefln("Not found 1 %s", res);
                 thisWaitingManager.pending = res;
                 thisWaitingManager.waiting[res.id].c.notify();
                 thisWaitingManager.remove(res.id);
@@ -451,6 +466,7 @@ private class Server (API)
                         switch (msg.tag)
                         {
                             case MessageType.request :
+                                //writefln("____________________ MessageType.request %s", msg.req);
                                 if (!isSleeping())
                                     handleReq(msg.req);
                                 else if (!control.drop)
@@ -458,6 +474,7 @@ private class Server (API)
                                 break;
 
                             case MessageType.response :
+                                //writefln("____________________ MessageType.response %s", msg.res);
                                 scope c = thisScheduler.newCondition(null);
                                 foreach (_; 0..10)
                                 {
@@ -488,6 +505,7 @@ private class Server (API)
                                 assert(0, "Unexpected type: " ~ msg.tag);
                         }
                     }
+
                     if (thisScheduler !is null)
                         thisScheduler.yield();
 
@@ -507,10 +525,11 @@ private class Server (API)
                             assumeSafeAppend(await_res);
                         }
                     }
+
                     if (thisScheduler !is null)
                         thisScheduler.yield();
                 }
-            }, 32 * 1024 * 1024);
+            }, 8 * 1024 * 1024);
         });
 
         //  Wait for the node to be created.
@@ -583,7 +602,7 @@ private class Client
 
     /// After making the request, wait until the response comes,
     /// and find the response that suits the request.
-    private WaitingManager _waitingManager;
+    //private WaitingManager _waitingManager;
 
     /// Timeout to use when issuing requests
     private Duration _timeout;
@@ -591,15 +610,13 @@ private class Client
     ///
     private bool _terminate;
 
-    private bool _has_server;
 
     /// Ctor
-    public this (Duration timeout = Duration.init, bool has_server = false) @safe nothrow
+    public this (Duration timeout = Duration.init) @safe nothrow
     {
         this._transceiver = new Transceiver;
-        this._waitingManager = new WaitingManager();
+        //this._waitingManager = new WaitingManager();
         this._timeout = timeout;
-        this._has_server = has_server;
     }
 
 
@@ -638,21 +655,25 @@ private class Client
         // from Node to Node
         if ((thisThreadInfoEx !is null) && (thisThreadInfoEx.is_node))
         {
-            writefln("router 1");
             req = Request(thisTransceiver, thisWaitingManager.getNextResponseId(), method, args);
             remote.send(req);
+            writefln("router 1 %s", req.id);
             res = thisWaitingManager.waitResponse(req.id, this._timeout);
         }
+
         // from Non-Node to Node
         else
         {
-            writefln("router 3 %s", thread_isMainThread());
             if (thisScheduler is null)
                 thisScheduler = new FiberScheduler();
 
+            if (thisWaitingManager is null)
+                thisWaitingManager = new WaitingManager();
+
             this._terminate = false;
             thisScheduler.spawn({
-                req = Request(this.transceiver, this._waitingManager.getNextResponseId(), method, args);
+                req = Request(this.transceiver, thisWaitingManager.getNextResponseId(), method, args);
+                writefln("router 3 %s", req.id);
                 remote.send(req);
             });
 
@@ -666,7 +687,7 @@ private class Client
 
                     foreach (_; 0..10)
                     {
-                        if (this._waitingManager.exist(msg.res.id))
+                        if (thisWaitingManager.exist(msg.res.id))
                             break;
                         if (thisScheduler !is null)
                         {
@@ -675,14 +696,14 @@ private class Client
                         }
                     }
 
-                    this._waitingManager.pending = msg.res;
-                    this._waitingManager.waiting[msg.res.id].c.notify();
+                    thisWaitingManager.pending = msg.res;
+                    thisWaitingManager.waiting[msg.res.id].c.notify();
                 }
             });
 
             bool done = false;
             thisScheduler.start({
-                res = this._waitingManager.waitResponse(req.id, this._timeout);
+                res = thisWaitingManager.waitResponse(req.id, this._timeout);
                 this._terminate = true;
                 done = true;
             });
@@ -703,7 +724,7 @@ private class Client
     {
         this._terminate = true;
         this._transceiver.close();
-        this._waitingManager.cleanup(true);
+        //this._waitingManager.cleanup(true);
     }
 }
 
@@ -780,7 +801,7 @@ public class RemoteAPI (API) : API
         Duration timeout = Duration.init)
     {
         auto server = Server!API.spawn!Impl(args);
-        return new RemoteAPI(server.transceiver, timeout, true);
+        return new RemoteAPI(server.transceiver, timeout);
     }
 
     /// A device that can requests.
@@ -813,12 +834,11 @@ public class RemoteAPI (API) : API
 
     ***************************************************************************/
 
-    public this (Transceiver transceiver, Duration timeout = Duration.init, bool has_server = false) @safe nothrow
+    public this (Transceiver transceiver, Duration timeout = Duration.init) @safe nothrow
     {
         this._server_transceiver = transceiver;
         this._timeout = timeout;
-        this._has_server = has_server;
-        this._client = new Client(timeout, has_server);
+        this._client = new Client(timeout);
     }
 
 
@@ -1416,22 +1436,17 @@ unittest
         RemoteAPI!API remote;
     }
 
-    writefln("test07, 1");
     auto n1 = RemoteAPI!API.spawn!Node();
     n1transceive = n1.ctrl.transceiver;
     auto n2 = RemoteAPI!API.spawn!Node();
 
-    writefln("test07, 2");
     /// Make sure calls are *relatively* efficient
     auto current1 = MonoTime.currTime();
-    writefln("test07, 2-1");
     assert(1 == n1.call());
-    writefln("test07, 2-2");
     assert(1 == n2.call());
     auto current2 = MonoTime.currTime();
    // assert(current2 - current1 < 200.msecs);
 
-    writefln("test07, 3");
     // Make one of the node sleep
     n1.sleep(1.seconds);
     // Make sure our main thread is not suspended,
@@ -1440,23 +1455,19 @@ unittest
     auto current3 = MonoTime.currTime();
     assert(current3 - current2 < 400.msecs);
 
-    writefln("test07, 4");
     // Wait for n1 to unblock
     assert(2 == n1.call());
-    writefln("test07, 4-1");
     // Check current time >= 1
     auto current4 = MonoTime.currTime();
-    writefln("test07, 4-2");
     assert(current4 - current2 >= 1.seconds);
 
-    writefln("test07, 5");
     // Now drop many messages
     n1.sleep(1.seconds, true);
-    //for (size_t i = 0; i < 100; i++)
+    for (size_t i = 0; i < 100; i++)
         n2.asyncCall();
     // Make sure we don't end up blocked forever
     Thread.sleep(1.seconds);
-    //assert(3 == n1.call());
+    assert(3 == n1.call());
 
     // Debug output, uncomment if needed
     version (none)

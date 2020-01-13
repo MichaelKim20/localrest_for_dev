@@ -1280,13 +1280,13 @@ public class Channel (T)
         else
         {
             bool res;
-            auto scheduler = new FiberScheduler();
-            auto c = scheduler.newCondition(null);
-            scheduler.start({
+            thisScheduler = new FiberScheduler();
+            auto c = thisScheduler.newCondition(null);
+            thisScheduler.start({
                 res = _send(msg);
-                scheduler.notify(c);
+                thisScheduler.notify(c);
             });
-            scheduler.wait(c);
+            thisScheduler.wait(c);
             return res;
         }
     }
@@ -1363,13 +1363,13 @@ public class Channel (T)
         else
         {
             T res;
-            auto scheduler = new FiberScheduler();
-            auto c = scheduler.newCondition(null);
-            scheduler.start({
+            thisScheduler = new FiberScheduler();
+            auto c = thisScheduler.newCondition(null);
+            thisScheduler.start({
                 res = _receive();
-                scheduler.notify(c);
+                thisScheduler.notify(c);
             });
-            scheduler.wait(c);
+            thisScheduler.wait(c);
             return res;
         }
     }
@@ -1429,13 +1429,13 @@ public class Channel (T)
         else
         {
             bool res;
-            auto scheduler = new FiberScheduler();
-            auto c = scheduler.newCondition(null);
-            scheduler.start({
+            thisScheduler = new FiberScheduler();
+            auto c = thisScheduler.newCondition(null);
+            thisScheduler.start({
                 res = _tryReceive(msg);
-                scheduler.notify(c);
+                thisScheduler.notify(c);
             });
-            scheduler.wait(c);
+            thisScheduler.wait(c);
             return res;
         }
     }
