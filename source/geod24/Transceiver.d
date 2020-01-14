@@ -43,6 +43,9 @@ public enum Status
     /// Request timed-out
     Timeout,
 
+    /// Request droped
+    Dropped,
+
     /// Request succeeded
     Success
 };
@@ -161,6 +164,7 @@ public class Transceiver : InfoObject
         this.chan.send(msg);
     }
 
+
     /***************************************************************************
 
         It is a function that accepts Request
@@ -243,9 +247,6 @@ public class Transceiver : InfoObject
         Returns:
             A received `Message`
 
-        In:
-            thisScheduler must not be null.
-
     ***************************************************************************/
 
     public Message receive () @trusted
@@ -263,9 +264,6 @@ public class Transceiver : InfoObject
 
         Returns:
             Returns true when message has been received. Otherwise false
-
-        In:
-            thisScheduler must not be null.
 
     ***************************************************************************/
 

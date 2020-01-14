@@ -111,7 +111,6 @@ private struct ArgWrapper (T...)
 
 private class WaitingManager : InfoObject
 {
-    import std.random;
     /// Just a Condition with a state
     private struct Waiting
     {
@@ -119,17 +118,19 @@ private class WaitingManager : InfoObject
         bool busy;
     }
 
-    this ()
-    {
-        //auto rnd = Random(unpredictableSeed);
-        //last_idx = 0;//uniform(0, 100000, rnd);
-    }
-
     /// The 'Response' we are currently processing, if any
     public Response pending;
 
     /// Request IDs waiting for a response
     public Waiting[ulong] waiting;
+
+
+    private Mutex m;
+
+    this ()
+    {
+        this.m = new Mutex();
+    }
 
 
     /// Get the next available request ID
@@ -154,13 +155,14 @@ private class WaitingManager : InfoObject
             // We yield and wait for an answer
             ptr.busy = true;
 
+            //m.lock_nothrow();
+
             if (duration == Duration.init)
                 ptr.c.wait();
             else if (!ptr.c.wait(duration))
-            {
-                //writeln("waitResponse --- TimeOut ");
                 this.pending = Response(Status.Timeout, id, "");
-            }
+
+            //m.unlock_nothrow();
 
             ptr.busy = false;
             // After control returns to us, `pending` has been filled
@@ -191,11 +193,11 @@ private class WaitingManager : InfoObject
     {
         if (root)
         {
+            writefln("this.waiting.clear start");
             this.waiting.clear();
-            auto rnd = Random(unpredictableSeed);
-            //last_idx = 0;//uniform(0, 100000, rnd);
+            writefln("this.waiting.clear end");
         }
-    }
+   }
 }
 
 
@@ -275,6 +277,7 @@ public @property void thisThreadInfoEx (ThreadInfoEx value) nothrow
 {
     thisInfo.objectValues["ThreadInfoEx"] = cast(InfoObject)value;
 }
+
 
 /*******************************************************************************
 
@@ -357,17 +360,21 @@ private class Server (API)
 
                         auto args = req.args.deserializeJson!(ArgWrapper!(Parameters!ovrld));
 
+                        writefln("-------------------> handleRequest BEGIN %s", member);
                         static if (!is(ReturnType!ovrld == void))
                         {
-                            auto result = node.%1$s(args.args).serializeToJsonString();
-                            //writefln("-----------------------> result %s", result);
-                            req.sender.send(Response(Status.Success, req.id, result));
+                            auto v = node.%1$s(args.args).serializeToJsonString();
+                            req.sender.send(Response(Status.Success, req.id, v));
+                            writefln("-------------------> handleRequest 1 %s", v);
                         }
                         else
                         {
                             node.%1$s(args.args);
                             req.sender.send(Response(Status.Success, req.id));
+                            writefln("-------------------> handleRequest 2");
                         }
+
+                        writefln("-------------------> handleRequest END   %s", member);
                     }
                     catch (Throwable t)
                     {
@@ -406,9 +413,7 @@ private class Server (API)
         import core.atomic : atomicOp, atomicLoad;
 
         Transceiver transceiver;
-        Request[] await_req;
-        Response[] await_res;
-        ThreadScheduler thread_scheduler;
+        Implementation node;
 
         // used for controling filtering / sleep
         struct Control
@@ -418,45 +423,52 @@ private class Server (API)
             bool drop;           // drop messages if sleeping
         }
 
-        shared(int) started = 0;
+        bool started = false;
 
-        thread_scheduler = new ThreadScheduler();
+        auto thread_scheduler = new ThreadScheduler();
         thread_scheduler.spawn({
-            scope node = new Implementation(cargs);
-
-            Control control;
-
-            bool isSleeping ()
-            {
-                return control.sleep_until != SysTime.init
-                    && Clock.currTime < control.sleep_until;
-            }
-
-            void handleReq (Request req)
-            {
-                thisScheduler.spawn(() {
-                    handleRequest(req, node, control.filter);
-                }, 8 * 1024 * 1024);
-            }
-
-            void handleRes (Response res)
-            {
-                //if (!thisWaitingManager.exist(res.id))
-                    //writefln("Not found 1 %s", res);
-                thisWaitingManager.pending = res;
-                thisWaitingManager.waiting[res.id].c.notify();
-                thisWaitingManager.remove(res.id);
-            }
-
             thisScheduler.start({
+                node = new Implementation(cargs);
                 thisTransceiver = new Transceiver();
                 thisWaitingManager = new WaitingManager();
                 thisThreadInfoEx = new ThreadInfoEx(true);
                 transceiver = thisTransceiver;
 
-                started.atomicOp!"+="(1);
+                Request[] await_req;
+                Response[] await_res;
+
+                started = true;
 
                 bool terminate = false;
+
+                Control control;
+
+                bool isSleeping ()
+                {
+                    return control.sleep_until != SysTime.init
+                        && Clock.currTime < control.sleep_until;
+                }
+
+                void handleReq (Request req)
+                {
+                    thisScheduler.spawn({
+                        handleRequest(req, node, control.filter);
+                    });
+                }
+
+                void handleRes (Response res)
+                {
+                    if (thisWaitingManager.exist(res.id))
+                    {
+                        thisWaitingManager.pending = res;
+                        thisWaitingManager.waiting[res.id].c.notify();
+                        thisWaitingManager.remove(res.id);
+                    }
+                    else
+                    {
+                        writefln("Not found %s", res);
+                    }
+                }
 
                 while (!terminate)
                 {
@@ -466,15 +478,20 @@ private class Server (API)
                         switch (msg.tag)
                         {
                             case MessageType.request :
-                                //writefln("____________________ MessageType.request %s", msg.req);
+                                writefln("____________________ MessageType.request BEGIN %s", msg.req);
                                 if (!isSleeping())
+                                {
                                     handleReq(msg.req);
+                                }
                                 else if (!control.drop)
+                                {
                                     await_req ~= msg.req;
+                                }
+                                writefln("____________________ MessageType.request END   %s", msg.req);
                                 break;
 
                             case MessageType.response :
-                                //writefln("____________________ MessageType.response %s", msg.res);
+                                writefln("____________________ MessageType.response BEGIN %s", msg.req);
                                 scope c = thisScheduler.newCondition(null);
                                 foreach (_; 0..10)
                                 {
@@ -482,10 +499,16 @@ private class Server (API)
                                         break;
                                     thisScheduler.wait(c, 10.msecs);
                                 }
+
                                 if (!isSleeping())
+                                {
                                     handleRes(msg.res);
+                                }
                                 else if (!control.drop)
+                                {
                                     await_res ~= msg.res;
+                                }
+                                writefln("____________________ MessageType.response END   %s", msg.req);
                                 break;
 
                             case MessageType.filter :
@@ -513,6 +536,7 @@ private class Server (API)
                     {
                         if (await_req.length > 0)
                         {
+                            writefln("____________________ Process Saved Request");
                             await_req.each!(req => handleReq(req));
                             await_req.length = 0;
                             assumeSafeAppend(await_req);
@@ -520,6 +544,7 @@ private class Server (API)
 
                         if (await_res.length > 0)
                         {
+                            writefln("____________________ Process Saved Response");
                             await_res.each!(res => handleRes(res));
                             await_res.length = 0;
                             assumeSafeAppend(await_res);
@@ -529,11 +554,11 @@ private class Server (API)
                     if (thisScheduler !is null)
                         thisScheduler.yield();
                 }
-            }, 8 * 1024 * 1024);
+            }, 32 * 1024 * 1024);
         });
 
         //  Wait for the node to be created.
-        while (!atomicLoad(started))
+        while (!started)
             Thread.sleep(1.msecs);
 
         return transceiver;
@@ -655,15 +680,18 @@ private class Client
         // from Node to Node
         if ((thisThreadInfoEx !is null) && (thisThreadInfoEx.is_node))
         {
+            writefln("router 1 begin");
             req = Request(thisTransceiver, thisWaitingManager.getNextResponseId(), method, args);
             remote.send(req);
-            writefln("router 1 %s", req.id);
+            // writefln("router 1 %s %s", req.id, this._timeout);
             res = thisWaitingManager.waitResponse(req.id, this._timeout);
+            writefln("router 1 end");
         }
 
         // from Non-Node to Node
         else
         {
+            writefln("router 3 begin");
             if (thisScheduler is null)
                 thisScheduler = new FiberScheduler();
 
@@ -673,7 +701,7 @@ private class Client
             this._terminate = false;
             thisScheduler.spawn({
                 req = Request(this.transceiver, thisWaitingManager.getNextResponseId(), method, args);
-                writefln("router 3 %s", req.id);
+                // writefln("router 3 %s %s", req.id, this._timeout);
                 remote.send(req);
             });
 
@@ -707,6 +735,7 @@ private class Client
                 this._terminate = true;
                 done = true;
             });
+            writefln("router 3 end");
             while (!done) thisScheduler.yield();
         }
 
@@ -812,9 +841,6 @@ public class RemoteAPI (API) : API
 
     /// Timeout to use when issuing requests
     private Duration _timeout;
-
-
-    private bool _has_server;
 
 
     // Vibe.d mandates that method must be @safe
@@ -1022,8 +1048,6 @@ public class RemoteAPI (API) : API
                     auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                         .serializeToJsonString();
 
-                    //writefln("API _has_server %s", _has_server);
-
                     auto res = this._client.router(this._server_transceiver, ovrld.mangleof, serialized);
 
                     if (res.status == Status.Failed)
@@ -1040,7 +1064,7 @@ public class RemoteAPI (API) : API
 }
 
 import std.stdio;
-
+/*
 /// Simple usage example
 unittest
 {
@@ -1175,7 +1199,7 @@ unittest
     cleanupMainThread();
     writefln("test02");
 }
-/*
+
 /// This network have different types of nodes in it
 unittest
 {
@@ -1300,7 +1324,7 @@ unittest
     ];
 
     foreach (idx, ref api; nodes)
-        tbn[format("node%d", idx)] = api.transceiver();
+        tbn[format("node%d", idx)] = api.ctrl.transceiver;
     nodes[0].setNext("node1");
     nodes[1].setNext("node2");
     nodes[2].setNext("node0");
@@ -1314,7 +1338,7 @@ unittest
     cleanupMainThread();
     writefln("test04");
 }
-*/
+
 /// Nodes can start tasks
 unittest
 {
@@ -1445,7 +1469,7 @@ unittest
     assert(1 == n1.call());
     assert(1 == n2.call());
     auto current2 = MonoTime.currTime();
-   // assert(current2 - current1 < 200.msecs);
+    assert(current2 - current1 < 200.msecs);
 
     // Make one of the node sleep
     n1.sleep(1.seconds);
@@ -1457,13 +1481,13 @@ unittest
 
     // Wait for n1 to unblock
     assert(2 == n1.call());
-    // Check current time >= 1
+    // Check current time >= 1 second
     auto current4 = MonoTime.currTime();
     assert(current4 - current2 >= 1.seconds);
 
     // Now drop many messages
     n1.sleep(1.seconds, true);
-    for (size_t i = 0; i < 100; i++)
+    //for (size_t i = 0; i < 100; i++)
         n2.asyncCall();
     // Make sure we don't end up blocked forever
     Thread.sleep(1.seconds);
@@ -1484,7 +1508,8 @@ unittest
 
     cleanupMainThread();
 }
-
+*/
+/*
 // Filter commands
 unittest
 {
@@ -1931,6 +1956,82 @@ unittest
         assert(ex.msg == `"Request timed-out"`);
     }
     writefln("test15");
+
+    cleanupMainThread();
+}
+*/
+
+// Simulate temporary outage
+unittest
+{
+    writefln("test07, B");
+    __gshared Transceiver n1transceive;
+
+    static interface API
+    {
+        public ulong call ();
+        public void asyncCall ();
+    }
+
+    static class Node : API
+    {
+        public this()
+        {
+            if (n1transceive !is null)
+                this.remote = new RemoteAPI!API(n1transceive, 1.seconds);
+        }
+
+        public override ulong call () { return ++this.count; }
+        public override void  asyncCall () { runTask(() => cast(void)this.remote.call); }
+        size_t count;
+        RemoteAPI!API remote;
+    }
+
+    auto n1 = RemoteAPI!API.spawn!Node();
+    n1transceive = n1.ctrl.transceiver;
+    auto n2 = RemoteAPI!API.spawn!Node();
+
+    /// Make sure calls are *relatively* efficient
+    auto current1 = MonoTime.currTime();
+    assert(1 == n1.call());
+    assert(1 == n2.call());
+    auto current2 = MonoTime.currTime();
+    assert(current2 - current1 < 200.msecs);
+
+    // Make one of the node sleep
+    n1.sleep(1.seconds);
+    // Make sure our main thread is not suspended,
+    // nor is the second node
+    assert(2 == n2.call());
+    auto current3 = MonoTime.currTime();
+    assert(current3 - current2 < 400.msecs);
+
+    // Wait for n1 to unblock
+    assert(2 == n1.call());
+    // Check current time >= 1
+    auto current4 = MonoTime.currTime();
+    assert(current4 - current2 >= 1.seconds);
+
+    // Now drop many messages
+    //n1.sleep(1.seconds, true);
+    //for (size_t i = 0; i < 100; i++)
+        n2.asyncCall();
+    // Make sure we don't end up blocked forever
+    //Thread.sleep(1.seconds);
+    //assert(3 == n1.call());
+
+    // Debug output, uncomment if needed
+    version (none)
+    {
+        import std.stdio;
+        writeln("Two non-blocking calls: ", current2 - current1);
+        writeln("Sleep + non-blocking call: ", current3 - current2);
+        writeln("Delta since sleep: ", current4 - current2);
+    }
+
+    n1.ctrl.shutdown();
+    n2.ctrl.shutdown();
+    writefln("test07");
 
     cleanupMainThread();
 }

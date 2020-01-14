@@ -681,6 +681,7 @@ class FiberScheduler : Scheduler, InfoObject
     {
         this.mutex = new Mutex();
     }
+
     /***************************************************************************
 
         This creates a new Fiber for the supplied op and then starts the
@@ -707,7 +708,6 @@ class FiberScheduler : Scheduler, InfoObject
 
     public void stop ()
     {
-        this.cleanupCondition();
         terminated = true;
     }
 
@@ -766,29 +766,6 @@ class FiberScheduler : Scheduler, InfoObject
         return ThreadInfo.thisInfo;
     }
 
-    private Condition[Condition] all_condition;
-
-    public void addCondition (Condition c)
-    {
-        all_condition[c] = c;
-    }
-
-    public void removeCondition (Condition c)
-    {
-        all_condition.remove(c);
-    }
-
-
-    public void cleanupCondition ()
-    {
-        auto keys = all_condition.keys;
-        foreach(ref c; keys)
-        {
-            this.notify(c);
-        }
-    }
-
-
     /***************************************************************************
 
         Returns a Condition analog that yields when wait or notify is called.
@@ -846,7 +823,6 @@ class FiberScheduler : Scheduler, InfoObject
              if (c.mutex !is null)
                 c.mutex.unlock();
 
-        addCondition(c);
         c.wait();
     }
 
@@ -872,7 +848,6 @@ class FiberScheduler : Scheduler, InfoObject
              if (c.mutex !is null)
                 c.mutex.unlock();
 
-        addCondition(c);
         return c.wait(period);
     }
 
@@ -896,7 +871,6 @@ class FiberScheduler : Scheduler, InfoObject
              if (c.mutex !is null)
                 c.mutex.unlock();
 
-        removeCondition(c);
         c.notify();
     }
 
@@ -920,7 +894,6 @@ class FiberScheduler : Scheduler, InfoObject
              if (c.mutex !is null)
                 c.mutex.unlock();
 
-        removeCondition(c);
         c.notifyAll();
     }
 
@@ -1096,20 +1069,24 @@ class FiberScheduler : Scheduler, InfoObject
         this.dispatching = true;
         while (m_fibers.length > 0)
         {
-            auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
-            if (t !is null && !(cast(ChannelClosed) t))
-            {
-                throw t;
-            }
-            if (m_fibers[m_pos].state == Fiber.State.TERM)
-            {
-                if (m_pos >= (m_fibers = remove(m_fibers, m_pos)).length)
+            try {
+                auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
+                if (t !is null && !(cast(ChannelClosed) t) && !(cast(WaitingClosed) t))
+                {
+                    throw t;
+                }
+                if (m_fibers[m_pos].state == Fiber.State.TERM)
+                {
+                    if (m_pos >= (m_fibers = remove(m_fibers, m_pos)).length)
+                        m_pos = 0;
+                }
+                else if (m_pos++ >= m_fibers.length - 1)
+                {
                     m_pos = 0;
+                }
+            } catch (Exception) {
             }
-            else if (m_pos++ >= m_fibers.length - 1)
-            {
-                m_pos = 0;
-            }
+
             if (terminated)
                 break;
         }
@@ -1158,6 +1135,22 @@ public class ChannelClosed : Exception
 {
     /// Ctor
     public this (string msg = "Channel Closed") @safe pure nothrow @nogc
+    {
+        super(msg);
+    }
+}
+
+
+/*******************************************************************************
+
+    When the waiting is closed.
+
+*******************************************************************************/
+
+public class WaitingClosed : Exception
+{
+    /// Ctor
+    public this (string msg = "Waiting Closed") @safe pure nothrow @nogc
     {
         super(msg);
     }
@@ -1522,6 +1515,7 @@ private struct ChannelContext (T)
     public Condition condition;
 }
 
+/*
 /// Fiber1 -> [ channel2 ] -> Fiber2 -> [ channel1 ] -> Fiber1
 unittest
 {
@@ -1722,3 +1716,4 @@ unittest
 
     cleanupMainThread();
 }
+*/
