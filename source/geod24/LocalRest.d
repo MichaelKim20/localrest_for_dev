@@ -420,10 +420,12 @@ private class Server (API)
         auto thread_scheduler = new ThreadScheduler();
         thread_scheduler.spawn({
             thisScheduler.start({
+
                 node = new Implementation(cargs);
                 thisTransceiver = new Transceiver();
                 thisWaitingManager = new WaitingManager();
                 thisThreadInfoEx = new ThreadInfoEx(true);
+
                 transceiver = thisTransceiver;
 
                 Request[] await_req;
@@ -462,11 +464,14 @@ private class Server (API)
                     thisWaitingManager.waiting[res.id].c.notify();
                     thisWaitingManager.remove(res.id);
                 }
+                        writefln("thisTransceiver %s", thisTransceiver);
+
 
                 Message msg;
-
                 while (!terminate)
                 {
+                    if (thisTransceiver is null)
+                        writefln("thisTransceiver %s", thisTransceiver);
                     if (thisTransceiver.tryReceive(&msg))
                     {
                         switch (msg.tag)
@@ -551,7 +556,7 @@ private class Server (API)
                     if (thisScheduler !is null)
                         thisScheduler.yield();
                 }
-            });
+            }, 32*1024*1024);
         });
 
         //  Wait for the node to be created.

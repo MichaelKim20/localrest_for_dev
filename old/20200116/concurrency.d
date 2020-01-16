@@ -309,9 +309,9 @@ interface Scheduler
 
 /*******************************************************************************
 
-    An example Scheduler using kernel threads.
+    An Scheduler using kernel threads.
 
-    This is an example Scheduler that mirrors the default scheduling behavior
+    This is an Scheduler that mirrors the default scheduling behavior
     of creating one kernel thread per call to spawn.  It is fully functional
     and may be instantiated and used, but is not a necessary part of the
     default functioning of this module.
@@ -664,7 +664,7 @@ public void cleanupMainThread ()
 
 /*******************************************************************************
 
-    An example Scheduler using Fibers.
+    An Scheduler using Fibers.
 
     This is an example scheduler that creates a new Fiber per call to spawn
     and multiplexes the execution of all fibers within the main thread.
@@ -1495,7 +1495,7 @@ private struct ChannelContext (T)
     public Condition condition;
 }
 
-/*
+
 /// Fiber1 -> [ channel2 ] -> Fiber2 -> [ channel1 ] -> Fiber1
 unittest
 {
@@ -1696,4 +1696,3 @@ unittest
 
     cleanupMainThread();
 }
-*/
