@@ -1,0 +1,194 @@
+
+/*******************************************************************************
+
+    Transceiver device required for message exchange between threads.
+    Send and receive data requests, responses, commands, etc.
+
+*******************************************************************************/
+
+private class LocalTransceiver : Transceiver
+{
+
+    /// Channel of Request
+    public Channel!Message chan;
+
+    /// Ctor
+    public this () @safe nothrow
+    {
+        this.chan = new Channel!Message(64*1024);
+    }
+
+
+    /***************************************************************************
+
+        It is a function that accepts Message
+
+        Params:
+            msg = The message to send.
+
+    ***************************************************************************/
+
+    public void send (T) (T msg) @trusted
+    {
+        if (is (T == Message))
+            this.chan.send(msg);
+        //else
+            //this.chan.send(Message(msg));
+    }
+
+
+    /***************************************************************************
+
+        Return the received message.
+
+        Returns:
+            A received `Message`
+
+    ***************************************************************************/
+
+    public bool receive (T) (T *msg) @trusted
+    {
+        if (is (T == Message))
+            return this.chan.receive(msg);
+        else
+            return false;
+    }
+
+
+    /***************************************************************************
+
+        Return the received message.
+
+        Params:
+            msg = The `Message` pointer to receive.
+
+        Returns:
+            Returns true when message has been received. Otherwise false
+
+    ***************************************************************************/
+
+    public bool tryReceive (T) (T *msg) @trusted
+    {
+        if (is (T == Message))
+            return this.chan.tryReceive(msg);
+        else
+            return false;
+    }
+
+
+    /***************************************************************************
+
+        Close the `Channel`
+
+    ***************************************************************************/
+
+    public void close () @trusted
+    {
+        this.chan.close();
+    }
+
+
+    /***************************************************************************
+
+        Return closing status
+
+        Return:
+            true if channel is closed, otherwise false
+
+    ***************************************************************************/
+
+    public @property bool isClosed () @safe @nogc pure
+    {
+        return false;
+    }
+
+
+    /***************************************************************************
+
+        Generate a convenient string for identifying this LocalTransceiver.
+
+    ***************************************************************************/
+
+    public void toString (scope void delegate(const(char)[]) sink)
+    {
+        import std.format : formattedWrite;
+        formattedWrite(sink, "TR(%x)", cast(void*) chan);
+    }
+}
+
+
+
+
+
+/// Ditto
+public interface Transceiver
+{
+
+    /***************************************************************************
+
+        It is a function that accepts Message
+
+        Params:
+            msg = The message to send.
+
+    ***************************************************************************/
+
+    void send (T) (T msg);
+
+
+    /***************************************************************************
+
+        Return the received message.
+
+        Returns:
+            A received message
+
+    ***************************************************************************/
+
+    bool receive (T) (T *msg);
+
+
+    /***************************************************************************
+
+        Return the received message.
+
+        Params:
+            msg = The message pointer to receive.
+
+        Returns:
+            Returns true when message has been received. Otherwise false
+
+    ***************************************************************************/
+
+    bool tryReceive (T) (T *msg);
+
+
+    /***************************************************************************
+
+        Close the `Channel`
+
+    ***************************************************************************/
+
+    void close ();
+
+
+    /***************************************************************************
+
+        Return closing status
+
+        Return:
+            true if channel is closed, otherwise false
+
+    ***************************************************************************/
+
+    @property bool isClosed ();
+
+
+    /***************************************************************************
+
+        Generate a convenient string for identifying this Transceiver.
+
+    ***************************************************************************/
+
+    void toString (scope void delegate(const(char)[]) sink);
+}
