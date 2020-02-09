@@ -6,12 +6,11 @@ import geod24.LocalRest;
 import core.sync.mutex;
 import core.thread;
 
-
 public alias MessageChannel = Channel!Message;
-
 
 public struct Request
 {
+    MessagePipeline pipeline;
     string method;
     string args;
 }
@@ -64,28 +63,27 @@ public struct Message
 
 public class MessagePipeline
 {
-    public MessageChannel sender;
-    public MessageChannel receiver;
+    public MessageChannel producer;
+    public MessageChannel consumer;
 
-    public this (MessageChannel receiver, MessageChannel sender = null)
+    public this (MessageChannel producer, MessageChannel consumer)
     {
-        if (sender !is null)
-            this.sender = sender;
+        if (producer !is null)
+            this.producer = producer;
         else
-            this.sender = new MessageChannel();
-        this.receiver = receiver;
+            this.producer = new MessageChannel();
+        this.consumer = consumer;
     }
 
     public Message query (Message req)
     {
-        this.sender.send(req);
-        Message res = this.receiver.receive();
-        return res;
+        this.consumer.send(req);
+        return this.producer.receive();
     }
 
     public void reply (Message res)
     {
-        this.receiver.send(res);
+        this.producer.send(res);
     }
 }
 

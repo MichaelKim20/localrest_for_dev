@@ -2,7 +2,7 @@
 
     Registry implementation for multi-threaded access
 
-    This registry allows to look up a `Transceiver` based on a `string`.
+    This registry allows to look up a `MessageChannel` based on a `string`.
     It is extracted from the `std.concurrency` module to make it reusable
 
 *******************************************************************************/
@@ -17,8 +17,8 @@ import geod24.LocalRestType;
 /// Ditto
 public shared struct Registry
 {
-    private Transceiver[string] transceiverByName;
-    private string[][Transceiver] namesByTransceiver;
+    private MessageChannel[string] channelByName;
+    private string[][MessageChannel] namesByChannel;
     private Mutex registryLock;
 
     /// Initialize this registry, creating the Mutex
@@ -28,55 +28,55 @@ public shared struct Registry
     }
 
     /**
-     * Gets the Transceiver associated with name.
+     * Gets the MessageChannel associated with name.
      *
      * Params:
      *  name = The name to locate within the registry.
      *
      * Returns:
-     *  The associated Transceiver or Transceiver.init if name is not registered.
+     *  The associated MessageChannel or MessageChannel.init if name is not registered.
      */
-    Transceiver locate(string name)
+    MessageChannel locate(string name)
     {
         synchronized (registryLock)
         {
-            if (shared(Transceiver)* transceiver = name in this.transceiverByName)
-                return *cast(Transceiver*)transceiver;
-            return Transceiver.init;
+            if (shared(MessageChannel)* channel = name in this.channelByName)
+                return *cast(MessageChannel*)channel;
+            return MessageChannel.init;
         }
     }
 
     /**
-     * Associates name with transceiver.
+     * Associates name with channel.
      *
-     * Associates name with transceiver in a process-local map.  When the thread
-     * represented by transceiver terminates, any names associated with it will be
+     * Associates name with channel in a process-local map.  When the thread
+     * represented by channel terminates, any names associated with it will be
      * automatically unregistered.
      *
      * Params:
-     *  name = The name to associate with transceiver.
-     *  transceiver  = The transceiver register by name.
+     *  name = The name to associate with channel.
+     *  channel  = The channel register by name.
      *
      * Returns:
-     *  true if the name is available and transceiver is not known to represent a
+     *  true if the name is available and channel is not known to represent a
      *  defunct thread.
      */
-    bool register(string name, Transceiver transceiver)
+    bool register(string name, MessageChannel channel)
     {
         synchronized (registryLock)
         {
-            if (name in transceiverByName)
+            if (name in channelByName)
                 return false;
-            if (transceiver.isClosed)
+            if (channel.isClosed)
                 return false;
-            this.namesByTransceiver[transceiver] ~= name;
-            this.transceiverByName[name] = cast(shared)transceiver;
+            this.namesByChannel[channel] ~= name;
+            this.channelByName[name] = cast(shared)channel;
             return true;
         }
     }
 
     /**
-     * Removes the registered name associated with a transceiver.
+     * Removes the registered name associated with a channel.
      *
      * Params:
      *  name = The name to unregister.
@@ -91,12 +91,12 @@ public shared struct Registry
 
         synchronized (registryLock)
         {
-            if (shared(Transceiver)* transceiver = name in this.transceiverByName)
+            if (shared(MessageChannel)* channel = name in this.channelByName)
             {
-                auto allNames = *cast(Transceiver*)transceiver in this.namesByTransceiver;
+                auto allNames = *cast(MessageChannel*)channel in this.namesByChannel;
                 auto pos = countUntil(*allNames, name);
                 remove!(SwapStrategy.unstable)(*allNames, pos);
-                this.transceiverByName.remove(name);
+                this.channelByName.remove(name);
                 return true;
             }
             return false;

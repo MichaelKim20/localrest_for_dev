@@ -10,15 +10,12 @@ module geod24.LocalRestType;
 import geod24.concurrency;
 import core.time;
 
+public alias MessageChannel = Channel!Message;
+
 /// Data sent by the caller
 public struct Command
 {
-    /// Transceiver of the sender thread
-    Transceiver sender;
-    /// In order to support re-entrancy, every request contains an id
-    /// which should be copied in the `Response`
-    /// Initialized to `size_t.max` so not setting it crashes the program
-    size_t id = size_t.max;
+    MessagePipeline pipeline;
     /// Method to call
     string method;
     /// Arguments to the method, JSON formatted
@@ -67,11 +64,6 @@ public struct Response
 {
     /// Final status of a request (failed, timeout, success, etc)
     Status status;
-    /// In order to support re-entrancy, every request contains an id
-    /// which should be copied in the `Response` so the scheduler can
-    /// properly dispatch this event
-    /// Initialized to `size_t.max` so not setting it crashes the program
-    size_t id;
     /// If `status == Status.Success`, the JSON-serialized return value.
     /// Otherwise, it contains `Exception.toString()`.
     string data;
@@ -109,130 +101,47 @@ public struct Message
     }
 }
 
-
-/*******************************************************************************
-
-    Transceiver device required for message exchange between threads.
-    Send and receive data requests, responses, commands, etc.
-
-*******************************************************************************/
-
-public class Transceiver
+public class MessagePipeline
 {
+    public MessageChannel producer;
+    public MessageChannel consumer;
 
-    /// Channel of Request
-    public Channel!Message chan;
-
-    /// Ctor
-    public this () @safe nothrow
+    public this (MessageChannel producer, MessageChannel consumer)
     {
-        this.chan = new Channel!Message(64*1024);
+        if (producer !is null)
+            this.producer = producer;
+        else
+            this.producer = new MessageChannel();
+        this.consumer = consumer;
     }
 
-
-    /***************************************************************************
-
-        It is a function that accepts Message
-
-        Params:
-            msg = The `Message` to send.
-
-    ***************************************************************************/
-
-    public void send (Message msg) @trusted
+    public Message query (Message req)
     {
-        this.chan.send(msg);
+        this.consumer.send(req);
+        return this.producer.receive();
     }
 
-
-    /***************************************************************************
-
-        Return the received message.
-
-        Returns:
-            A received `Message`
-
-    ***************************************************************************/
-
-    public Message receive () @trusted
+    public void reply (Message res)
     {
-        return this.chan.receive();
-    }
-
-
-    /***************************************************************************
-
-        Return the received message.
-
-        Params:
-            msg = The `Message` pointer to receive.
-
-        Returns:
-            Returns true when message has been received. Otherwise false
-
-    ***************************************************************************/
-
-    public bool tryReceive (Message *msg) @trusted
-    {
-        return this.chan.tryReceive(msg);
-    }
-
-
-    /***************************************************************************
-
-        Close the `Channel`
-
-    ***************************************************************************/
-
-    public void close () @trusted
-    {
-        this.chan.close();
-    }
-
-
-    /***************************************************************************
-
-        Return closing status
-
-        Return:
-            true if channel is closed, otherwise false
-
-    ***************************************************************************/
-
-    public @property bool isClosed () @safe @nogc pure
-    {
-        return false;
-    }
-
-
-    /***************************************************************************
-
-        Generate a convenient string for identifying this Transceiver.
-
-    ***************************************************************************/
-
-    public void toString (scope void delegate(const(char)[]) sink)
-    {
-        import std.format : formattedWrite;
-        formattedWrite(sink, "TR(%x)", cast(void*) chan);
+        this.producer.send(res);
     }
 }
 
 
 /***************************************************************************
 
-    Getter of Transceiver assigned to a called thread.
+    Getter of MessageChannel assigned to a called thread.
 
     Returns:
-        Returns instance of `Transceiver` that is created by top thread.
+        Returns instance of `MessageChannel` that is created by top thread.
 
 ***************************************************************************/
 
-public @property Transceiver thisTransceiver () nothrow
+public @property MessageChannel thisMessageChannel () nothrow
 {
-    auto p = "transceiver" in thisInfo.objects;
+    auto p = "messagechannel" in thisInfo.objects;
     if (p !is null)
-        return cast(Transceiver)*p;
+        return cast(MessageChannel)*p;
     else
         return null;
 }
@@ -240,14 +149,14 @@ public @property Transceiver thisTransceiver () nothrow
 
 /***************************************************************************
 
-    Setter of Transceiver assigned to a called thread.
+    Setter of MessageChannel assigned to a called thread.
 
     Params:
-        value = The instance of `Transceiver`.
+        value = The instance of `MessageChannel`.
 
 ***************************************************************************/
 
-public @property void thisTransceiver (Transceiver value) nothrow
+public @property void thisMessageChannel (MessageChannel value) nothrow
 {
-    thisInfo.objects["transceiver"] = value;
+    thisInfo.objects["messagechannel"] = value;
 }
