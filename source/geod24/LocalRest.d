@@ -592,9 +592,9 @@ public final class RemoteAPI (API) : API
 
                         Response res;
 
-                        void exec ()
+                        void doMessagePassing ()
                         {
-                            auto producer = new MessageChannel(4096);
+                            auto producer = new MessageChannel(16);
                             auto pipeline = new MessagePipeline(producer, this.childChannel);
 
                             auto msg_req = Message(Command(pipeline, ovrld.mangleof, serialized));
@@ -603,7 +603,7 @@ public final class RemoteAPI (API) : API
                             if (msg_res.tag == Message.Type.response)
                                 res = msg_res.res;
                             else
-                                assert(0, "Not expected response type");
+                                assert(0, "Not expected message type");
                         }
 
                         auto scheduler = thisScheduler;
@@ -611,18 +611,14 @@ public final class RemoteAPI (API) : API
                         {
                             scheduler = new FiberScheduler();
                             thisScheduler = scheduler;
-                            scheduler.start({
-                                exec();
-                            });
+                            scheduler.start(&doMessagePassing);
                         }
                         else
                         {
-                            if (Fiber.getThis() !is null)
-                                exec();
+                            if (Fiber.getThis())
+                                doMessagePassing();
                             else
-                                scheduler.start({
-                                    exec();
-                                });
+                                scheduler.start(&doMessagePassing);
                         }
                         return res;
                     } ();
