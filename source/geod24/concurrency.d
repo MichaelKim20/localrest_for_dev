@@ -1124,6 +1124,7 @@ unittest
     });
 }
 
+
 // The teacher and producer/consumer model
 unittest
 {
@@ -1153,7 +1154,6 @@ unittest
             channel2.send(idx);
         assert(results == [0,1,2,3,4,5,6,7,8,9]);
     }
-
 
     /// Create and Register FiberScheduler of main thread
     thisScheduler = new FiberScheduler();

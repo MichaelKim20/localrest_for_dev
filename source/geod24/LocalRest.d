@@ -295,12 +295,9 @@ public final class RemoteAPI (API) : API
         }
 
         auto node = new Implementation(cargs);
-        auto wmanager = new WaitingManager();
         scope channel = self;
         scope scheduler = thisScheduler;
 
-        thisWaitingManager = wmanager;
-        thisNodeThread = true;
         Control control;
         Message[] await_msg;
         bool terminate = false;
@@ -320,13 +317,6 @@ public final class RemoteAPI (API) : API
                 });
             }
 
-            void handleRes (Response res)
-            {
-                wmanager.pending = res;
-                //wmanager.waiting[res.id].c.notify();
-               // wmanager.remove(res.id);
-            }
-
             while (!terminate)
             {
                 Message msg;
@@ -339,13 +329,6 @@ public final class RemoteAPI (API) : API
                                 handleCmd(msg.cmd);
                             else if (!control.drop)
                                 await_msg ~= Message(msg.cmd);
-                            break;
-
-                        case Message.Type.response :
-                            if (!isSleeping())
-                                handleRes(msg.res);
-                            else if (!control.drop)
-                                await_msg ~= Message(msg.res);
                             break;
 
                         case Message.Type.filter :
@@ -376,8 +359,6 @@ public final class RemoteAPI (API) : API
                             (msg) {
                                 if (msg.tag == Message.Type.command)
                                     handleCmd(msg.cmd);
-                                if (msg.tag == Message.Type.response)
-                                    handleRes(msg.res);
                             }
                         );
                         await_msg.length = 0;
@@ -609,42 +590,39 @@ public final class RemoteAPI (API) : API
                         auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                             .serializeToJsonString();
 
-                        Command command;
                         Response res;
 
-                        // from Node to Node
-                        if (thisNodeThread)
+                        void exec ()
                         {
                             auto producer = new MessageChannel(4096);
                             auto pipeline = new MessagePipeline(producer, this.childChannel);
+
                             auto msg_req = Message(Command(pipeline, ovrld.mangleof, serialized));
-                            auto msg_res = pipeline.query(msg_req);
+                            auto msg_res = pipeline.query(msg_req, this.timeout);
+
                             if (msg_res.tag == Message.Type.response)
                                 res = msg_res.res;
                             else
-                                assert(0, "Not expect response type");
+                                assert(0, "Not expected response type");
                         }
 
-                        // from Non-Node to Node
+                        auto scheduler = thisScheduler;
+                        if (scheduler is null)
+                        {
+                            scheduler = new FiberScheduler();
+                            thisScheduler = scheduler;
+                            scheduler.start({
+                                exec();
+                            });
+                        }
                         else
                         {
-                            auto scheduler = thisScheduler;
-                            if (scheduler is null)
-                            {
-                                scheduler = new FiberScheduler();
-                                thisScheduler = scheduler;
-                            }
-
-                            scheduler.start({
-                                auto producer = new MessageChannel(4096);
-                                auto pipeline = new MessagePipeline(producer, this.childChannel);
-                                auto msg_req = Message(Command(pipeline, ovrld.mangleof, serialized));
-                                auto msg_res = pipeline.query(msg_req);
-                                if (msg_res.tag == Message.Type.response)
-                                    res = msg_res.res;
-                                else
-                                    assert(0, "Not expect response type");
-                            });
+                            if (Fiber.getThis() !is null)
+                                exec();
+                            else
+                                scheduler.start({
+                                    exec();
+                                });
                         }
                         return res;
                     } ();
@@ -661,6 +639,7 @@ public final class RemoteAPI (API) : API
             });
         }
 }
+
 
 private
 {
@@ -722,179 +701,6 @@ private
     }
 }
 
-
-/***************************************************************************
-
-    Getter of WaitingManager assigned to a called thread.
-
-***************************************************************************/
-
-public @property bool thisNodeThread () nothrow
-{
-    auto p = "thisNodeThread" in thisInfo.objects;
-    if (p !is null)
-        return true;
-    else
-        return false;
-}
-
-/***************************************************************************
-
-    Setter of WaitingManager assigned to a called thread.
-
-***************************************************************************/
-
-public @property void thisNodeThread (bool value) nothrow
-{
-    if (value)
-        thisInfo.objects["thisNodeThread"] = new Object();
-    else
-        thisInfo.objects.remove ("thisNodeThread");
-}
-
-
-/*******************************************************************************
-
-    After making the request, wait until the response comes,
-    and find the response that suits the request.
-
-*******************************************************************************/
-
-private class WaitingManager
-{
-    /// Just a Condition with a state
-    public struct Waiting
-    {
-        Condition c;
-        bool busy;
-    }
-
-    /// Request IDs waiting for a response
-    public Waiting[ulong] waiting;
-
-    /// The 'Response' we are currently processing, if any
-    public Response pending;
-
-    /***************************************************************************
-
-        Get the next available request ID
-
-        Returns:
-            request ID
-
-    ***************************************************************************/
-
-    public size_t getNextResponseId () @safe nothrow
-    {
-        static size_t last_idx;
-        return last_idx++;
-    }
-
-
-    /***************************************************************************
-
-        Called when a waiting condition was handled and can be safely removed
-
-        Params:
-            id = request ID
-
-    ***************************************************************************/
-
-    public void remove (size_t id) @safe nothrow
-    {
-        this.waiting.remove(id);
-    }
-
-
-    /***************************************************************************
-
-        Check that a value such as the request ID already exists.
-
-        Params:
-            id = request ID
-
-        Returns:
-            Returns true if a key value equal to id exists.
-
-    ***************************************************************************/
-
-    public bool exist (size_t id) @safe nothrow
-    {
-        return ((id in this.waiting) !is null);
-    }
-
-    /***************************************************************************
-
-        Wait for a response.
-        When time out, return the response that means time out.
-
-        Params:
-            id = request ID
-            duration = Maximum time to wait
-
-        Returns:
-            Returns response data.
-
-    ***************************************************************************/
-
-    public Response waitResponse (size_t id, Duration duration) @trusted nothrow
-    {
-        try
-        {
-            if (id !in this.waiting)
-                this.waiting[id] = Waiting(thisScheduler.newCondition(), false);
-
-            Waiting* ptr = &this.waiting[id];
-            if (ptr.busy)
-                assert(0, "Trying to override a pending request");
-
-            ptr.busy = true;
-
-            //if (duration == Duration.init)
-            //    ptr.c.wait();
-            //else if (!ptr.c.wait(duration))
-                //this.pending = Response(Status.Timeout, id, "");
-
-            ptr.busy = false;
-
-            scope(exit) this.pending = Response.init;
-            return this.pending;
-        }
-        catch (Exception e)
-        {
-            import std.format;
-            assert(0, format("Exception - %s", e.message));
-        }
-    }
-}
-
-
-/***************************************************************************
-
-    Getter of WaitingManager assigned to a called thread.
-
-***************************************************************************/
-
-public @property WaitingManager thisWaitingManager () nothrow
-{
-    auto p = ("wmanager" in thisInfo.objects);
-    if (p !is null)
-        return cast(WaitingManager)*p;
-    else
-        return null;
-}
-
-
-/***************************************************************************
-
-    Setter of WaitingManager assigned to a called thread.
-
-***************************************************************************/
-
-public @property void thisWaitingManager (WaitingManager value) nothrow
-{
-    thisInfo.objects["wmanager"] = value;
-}
 
 /// Simple usage example
 unittest
@@ -1243,7 +1049,7 @@ unittest
     }
     static assert(!is(typeof(RemoteAPI!DoesntWork)));
 }
-/*
+
 // Simulate temporary outage
 unittest
 {
@@ -1774,4 +1580,3 @@ unittest
     node_1.ctrl.shutdown();
     thread_joinAll();
 }
-*/

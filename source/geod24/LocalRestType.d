@@ -115,10 +115,25 @@ public class MessagePipeline
         this.consumer = consumer;
     }
 
-    public Message query (Message req)
+    public Message query (Message req, Duration timeout = Duration.init)
     {
         this.consumer.send(req);
-        return this.producer.receive();
+
+        Message msg;
+        if (timeout == Duration.init)
+            timeout = 60.seconds;
+        auto limit = MonoTime.currTime + timeout;
+
+        while (true)
+        {
+            if (this.producer.tryReceive(&msg))
+                return msg;
+
+            auto left = limit - MonoTime.currTime;
+            if (left.isNegative)
+                return Message(Response(Status.Timeout, ""));
+            thisScheduler.yield();
+        }
     }
 
     public void reply (Message res)
