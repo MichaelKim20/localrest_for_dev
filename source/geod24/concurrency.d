@@ -805,6 +805,19 @@ public class Channel (T)
             context.notify();
         }
     }
+
+
+    /***************************************************************************
+
+        Generate a convenient string for identifying this Transceiver.
+
+    ***************************************************************************/
+
+    public void toString (scope void delegate(const(char)[]) sink)
+    {
+        import std.format : formattedWrite;
+        formattedWrite(sink, "CH(%x)", cast(void*) this);
+    }
 }
 
 

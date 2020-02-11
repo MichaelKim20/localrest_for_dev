@@ -6,6 +6,9 @@ import geod24.LocalRest;
 import core.sync.mutex;
 import core.thread;
 
+import std.stdio;
+
+/*
 public alias MessageChannel = Channel!Message;
 
 public struct Request
@@ -101,4 +104,11 @@ bool compute (Message req, Message res)
 {
 
     return true;
+}
+*/
+
+void main ()
+{
+    import std.process;
+    writefln("Current thread ID: %x",  thisThreadID);
 }

@@ -34,7 +34,7 @@ public shared struct Registry
      *  name = The name to locate within the registry.
      *
      * Returns:
-     *  The associated MessageChannel or MessageChannel.init if name is not registered.
+     *  The associated MessageChannel or null if name is not registered.
      */
     MessageChannel locate(string name)
     {
@@ -42,7 +42,7 @@ public shared struct Registry
         {
             if (shared(MessageChannel)* channel = name in this.channelByName)
                 return *cast(MessageChannel*)channel;
-            return MessageChannel.init;
+            return null;
         }
     }
 

@@ -91,6 +91,7 @@ import core.sync.mutex;
 import core.thread;
 import core.time;
 
+import std.stdio;
 
 /// Simple wrapper to deal with tuples
 /// Vibe.d might emit a pragma(msg) when T.length == 0
@@ -174,6 +175,7 @@ public final class RemoteAPI (API) : API
           Impl = Type of the implementation to instantiate
           args = Arguments to the object's constructor
           timeout = (optional) timeout to use with requests
+          reuse_pipeline = Reuse of message pipeline
 
         Returns:
           A `RemoteAPI` owning the node reference
@@ -181,10 +183,10 @@ public final class RemoteAPI (API) : API
     ***************************************************************************/
 
     public static RemoteAPI!(API) spawn (Impl) (CtorParams!Impl args,
-        Duration timeout = Duration.init)
+        Duration timeout = Duration.init, bool reuse_pipeline = true)
     {
         auto childChannel = spawnThread(&spawned!(Impl), args);
-        return new RemoteAPI(childChannel, true, timeout);
+        return new RemoteAPI(childChannel, true, timeout, reuse_pipeline);
     }
 
     /// Helper template to get the constructor's parameters
@@ -210,7 +212,7 @@ public final class RemoteAPI (API) : API
 
     ***************************************************************************/
 
-    private static void handleCommand (Command cmd, API node, FilterAPI filter)
+    private static void handleCommand (MessagePipeline pipeline, Command cmd, API node, FilterAPI filter)
     {
         import std.format;
 
@@ -228,7 +230,7 @@ public final class RemoteAPI (API) : API
                         {
                             // we have to send back a message
                             import std.format;
-                            cmd.pipeline.reply(Message(Response(Status.Failed,
+                            pipeline.reply(Message(Response(Status.Failed, cmd.id,
                                 format("Filtered method '%%s'", filter.pretty_func))));
                             return;
                         }
@@ -237,9 +239,10 @@ public final class RemoteAPI (API) : API
 
                         static if (!is(ReturnType!ovrld == void))
                         {
-                            cmd.pipeline.reply(
+                            pipeline.reply(
                                 Message(Response(
                                     Status.Success,
+                                    cmd.id,
                                     node.%1$s(args.args).serializeToJsonString()
                                 ))
                             );
@@ -247,13 +250,13 @@ public final class RemoteAPI (API) : API
                         else
                         {
                             node.%1$s(args.args);
-                            cmd.pipeline.reply(Message(Response(Status.Success)));
+                            pipeline.reply(Message(Response(Status.Success, cmd.id)));
                         }
                     }
                     catch (Throwable t)
                     {
                         // Our sender expects a response
-                        cmd.pipeline.reply(Message(Response(Status.Failed, t.toString())));
+                        pipeline.reply(Message(Response(Status.Failed, cmd.id, t.toString())));
                     }
 
                     return;
@@ -298,24 +301,30 @@ public final class RemoteAPI (API) : API
         scope channel = self;
         scope scheduler = thisScheduler;
 
+        struct AwaitCommand
+        {
+            MessagePipeline pipeline;
+            Command cmd;
+        }
+
         Control control;
-        Message[] await_msg;
+        AwaitCommand[] await_msg;
         bool terminate = false;
 
+        bool isSleeping ()
+        {
+            return control.sleep_until != SysTime.init
+                && Clock.currTime < control.sleep_until;
+        }
+
+        void handleCmd (MessagePipeline pipeline, Command cmd)
+        {
+            scheduler.spawn({
+                handleCommand(pipeline, cmd, node, control.filter);
+            });
+        }
+
         scheduler.start({
-
-            bool isSleeping ()
-            {
-                return control.sleep_until != SysTime.init
-                    && Clock.currTime < control.sleep_until;
-            }
-
-            void handleCmd (Command cmd)
-            {
-                scheduler.spawn({
-                    handleCommand(cmd, node, control.filter);
-                });
-            }
 
             while (!terminate)
             {
@@ -324,13 +333,6 @@ public final class RemoteAPI (API) : API
                 {
                     switch (msg.tag)
                     {
-                        case Message.Type.command :
-                            if (!isSleeping())
-                                handleCmd(msg.cmd);
-                            else if (!control.drop)
-                                await_msg ~= Message(msg.cmd);
-                            break;
-
                         case Message.Type.filter :
                             control.filter = msg.filter;
                             break;
@@ -338,6 +340,37 @@ public final class RemoteAPI (API) : API
                         case Message.Type.time_command :
                             control.sleep_until = Clock.currTime + msg.time.dur;
                             control.drop = msg.time.drop;
+                            break;
+
+                        case Message.Type.create_pipe_command :
+                            scheduler.spawn({
+                                scope pipeline = msg.create_pipe.pipeline;
+                                scope pipe_terminate = false;
+                                while (!terminate && !pipe_terminate)
+                                {
+                                    Message pmsg;
+                                    if (pipeline.consumer.tryReceive(&pmsg))
+                                    {
+                                        switch (pmsg.tag)
+                                        {
+                                            case Message.Type.command :
+                                                if (!isSleeping())
+                                                    handleCmd(pipeline, pmsg.cmd);
+                                                else if (!control.drop)
+                                                    await_msg ~= AwaitCommand(pipeline, pmsg.cmd);
+                                                break;
+
+                                            case Message.Type.destoy_pipe_command :
+                                                pipe_terminate = true;
+                                                break;
+
+                                            default :
+                                                assert(0, "Unexpected type: " ~ pmsg.tag);
+                                        }
+                                    }
+                                    scheduler.yield();
+                                }
+                            });
                             break;
 
                         case Message.Type.shutdown_command :
@@ -355,12 +388,7 @@ public final class RemoteAPI (API) : API
                 {
                     if (await_msg.length > 0)
                     {
-                        await_msg.each!(
-                            (msg) {
-                                if (msg.tag == Message.Type.command)
-                                    handleCmd(msg.cmd);
-                            }
-                        );
+                        await_msg.each!((msg) => handleCmd(msg.pipeline, msg.cmd));
                         await_msg.length = 0;
                         assumeSafeAppend(await_msg);
                     }
@@ -380,6 +408,12 @@ public final class RemoteAPI (API) : API
     /// Timeout to use when issuing requests
     private const Duration timeout;
 
+    /// Storage of Message Pipeline, Save what has already been created.
+    private MessagePipelineRegistry registry;
+
+    /// Reuse of message pipeline
+    private bool reuse_pipeline;
+
     // Vibe.d mandates that method must be @safe
     @safe:
 
@@ -393,20 +427,24 @@ public final class RemoteAPI (API) : API
         Params:
             channel = `MessageChannel` of the node.
             timeout = any timeout to use
+            reuse_pipeline = Reuse of message pipeline
 
     ***************************************************************************/
 
-    public this (MessageChannel channel, Duration timeout = Duration.init) @nogc pure nothrow
+    public this (MessageChannel channel, Duration timeout = Duration.init, bool reuse = true) nothrow
     {
-        this(channel, false, timeout);
+        this(channel, false, timeout, reuse);
     }
 
     /// Private overload used by `spawn`
-    private this (MessageChannel channel, bool isOwner, Duration timeout) @nogc pure nothrow
+    private this (MessageChannel channel, bool isOwner, Duration timeout, bool reuse) nothrow
     {
         this.childChannel = channel;
         this.owner = isOwner;
         this.timeout = timeout;
+        this.reuse_pipeline = reuse;
+
+        this.registry.initialize();
     }
 
 
@@ -592,18 +630,46 @@ public final class RemoteAPI (API) : API
 
                         Response res;
 
-                        void doMessagePassing ()
+                        void doWork ()
                         {
-                            auto producer = new MessageChannel(16);
-                            auto pipeline = new MessagePipeline(producer, this.childChannel);
+                            if (this.reuse_pipeline)
+                            {
+                                auto pipe = this.registry.locate();
+                                if ((pipe is null) || ((pipe !is null) && (pipe.isBusy)))
+                                {
+                                    auto producer = new MessageChannel(1);
+                                    auto consumer = new MessageChannel(1);
+                                    pipe = new MessagePipeline(this.childChannel, producer, consumer);
+                                    pipe.open();
+                                    this.registry.register(pipe);
+                                }
 
-                            auto msg_req = Message(Command(pipeline, ovrld.mangleof, serialized));
-                            auto msg_res = pipeline.query(msg_req, this.timeout);
+                                auto msg_req = Message(Command(pipe.getId(), ovrld.mangleof, serialized));
+                                auto msg_res = pipe.query(msg_req, this.timeout);
 
-                            if (msg_res.tag == Message.Type.response)
-                                res = msg_res.res;
+                                if (msg_res.tag == Message.Type.response)
+                                    res = msg_res.res;
+                                else
+                                    assert(0, "Not expected message type");
+                            }
                             else
-                                assert(0, "Not expected message type");
+                            {
+                                auto producer = new MessageChannel(1);
+                                auto consumer = new MessageChannel(1);
+                                auto pipe = new MessagePipeline(this.childChannel, producer, consumer);
+                                pipe.open();
+
+                                auto msg_req = Message(Command(pipe.getId(), ovrld.mangleof, serialized));
+                                auto msg_res = pipe.query(msg_req, this.timeout);
+
+                                if (msg_res.tag == Message.Type.response)
+                                    res = msg_res.res;
+                                else
+                                    assert(0, "Not expected message type");
+
+                                if (res.status == Status.Success)
+                                    pipe.close();
+                            }
                         }
 
                         auto scheduler = thisScheduler;
@@ -611,14 +677,14 @@ public final class RemoteAPI (API) : API
                         {
                             scheduler = new FiberScheduler();
                             thisScheduler = scheduler;
-                            scheduler.start(&doMessagePassing);
+                            scheduler.start(&doWork);
                         }
                         else
                         {
                             if (Fiber.getThis())
-                                doMessagePassing();
+                                doWork();
                             else
-                                scheduler.start(&doMessagePassing);
+                                scheduler.start(&doWork);
                         }
                         return res;
                     } ();
@@ -635,7 +701,6 @@ public final class RemoteAPI (API) : API
             });
         }
 }
-
 
 private
 {
@@ -696,7 +761,6 @@ private
         return channel;
     }
 }
-
 
 /// Simple usage example
 unittest
@@ -1523,7 +1587,6 @@ unittest
     auto node = RemoteAPI!API.spawn!Node(1.seconds);
     assert(node.myping(42) == 42);
     node.ctrl.shutdown();
-
     try
     {
         node.myping(69);
